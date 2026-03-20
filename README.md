@@ -14,18 +14,21 @@ Multi OpenClaw instance manager — scaffold, run, and deploy AI agents with per
 
 ```bash
 # Requires Bun (https://bun.sh)
-bun install -g @permissionlabs/claw-farm
+git clone https://github.com/PermissionLabs/claw-farm.git
+cd claw-farm && bun install
 
-# Or run directly
-bunx @permissionlabs/claw-farm init my-agent
+# Add alias (optional)
+alias claw-farm='bun run /path/to/claw-farm/src/index.ts'
 ```
+
+> **npm publish is planned** — `bun install -g @permissionlabs/claw-farm` will work once published.
 
 ## Quick Start
 
 ```bash
 # Scaffold a new agent
 mkdir my-agent && cd my-agent
-claw-farm init my-agent
+bun run /path/to/claw-farm/src/index.ts init my-agent
 
 # Configure API keys
 cp .env.example .env
