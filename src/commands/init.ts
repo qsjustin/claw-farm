@@ -8,6 +8,11 @@ import { mem0ComposeTemplate } from "../templates/docker-compose.mem0.yml.ts";
 import { openclawConfigTemplate } from "../templates/openclaw.json5.ts";
 import { soulTemplate } from "../templates/SOUL.md.ts";
 import { policyTemplate } from "../templates/policy.yaml.ts";
+import {
+  apiProxyServerTemplate,
+  apiProxyDockerfileTemplate,
+  apiProxyRequirementsTemplate,
+} from "../templates/api-proxy.ts";
 import { builtinProcessor } from "../processors/builtin.ts";
 import { mem0Processor } from "../processors/mem0.ts";
 
@@ -66,6 +71,14 @@ export async function initCommand(args: string[]): Promise<void> {
     policyTemplate(name),
   );
   console.log("✓ Generated openclaw/config/policy.yaml");
+
+  // Write API Proxy sidecar (key isolation + PII filter)
+  const proxyDir = join(projectDir, "api-proxy");
+  await mkdir(proxyDir, { recursive: true });
+  await Bun.write(join(proxyDir, "api_proxy.py"), apiProxyServerTemplate());
+  await Bun.write(join(proxyDir, "Dockerfile"), apiProxyDockerfileTemplate());
+  await Bun.write(join(proxyDir, "requirements.txt"), apiProxyRequirementsTemplate());
+  console.log("✓ Generated api-proxy/ (key isolation + PII filter)");
 
   // Write SOUL.md
   await Bun.write(
