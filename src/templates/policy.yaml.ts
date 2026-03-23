@@ -19,10 +19,12 @@ tools:
       - /proc/**
       - /sys/**
 
-  # Network: allowlist domains the agent can reach
+  # Network: allowlist domains the agent's HTTP tool can reach
+  # NOTE: LLM calls go through api-proxy (internal Docker network),
+  # NOT through this HTTP tool. This only restricts web_fetch/web_search tools.
   http:
     allow:
-      # Add domains your agent needs to access
+      # Add domains your agent needs to access via tools
       # - api.example.com
       # - "*.googleapis.com"
     deny:

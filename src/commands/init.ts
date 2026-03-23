@@ -144,11 +144,35 @@ async function registerExisting(
 
   const entry = await addProject(name, projectDir, processor);
 
-  // Ensure raw directories exist (Layer 0)
-  await ensureRawDirs(projectDir);
+  // Ensure directories exist
+  await mkdir(join(projectDir, "openclaw", "config"), { recursive: true });
   await mkdir(join(projectDir, "openclaw", "processed"), { recursive: true });
   await mkdir(join(projectDir, "logs"), { recursive: true });
+  await ensureRawDirs(projectDir);
   console.log("✓ Created raw/ + processed/ + logs/ directories");
+
+  // Generate docker-compose.openclaw.yml (always — this is what claw-farm up uses)
+  const composePath = join(projectDir, "docker-compose.openclaw.yml");
+  const composeContent =
+    processor === "mem0"
+      ? mem0ComposeTemplate(name, entry.port)
+      : baseComposeTemplate(name, entry.port);
+  await Bun.write(composePath, composeContent);
+  console.log("✓ Generated docker-compose.openclaw.yml");
+
+  // Backup and update openclaw.json5 to use api-proxy
+  const configPath = join(projectDir, "openclaw", "config", "openclaw.json5");
+  try {
+    const existing = await Bun.file(configPath).text();
+    // Backup existing config
+    const backupPath = configPath + ".backup";
+    await Bun.write(backupPath, existing);
+    console.log(`✓ Backed up existing openclaw.json5 → openclaw.json5.backup`);
+  } catch {
+    // No existing config — that's fine
+  }
+  await Bun.write(configPath, openclawConfigTemplate(name, processor));
+  console.log("✓ Generated openclaw/config/openclaw.json5 (routes through api-proxy)");
 
   // Add policy.yaml if missing
   const policyPath = join(projectDir, "openclaw", "config", "policy.yaml");
@@ -173,6 +197,34 @@ async function registerExisting(
     console.log("✓ Generated api-proxy/ (key isolation + PII filter)");
   }
 
+  // Ensure .env.example exists
+  const envExamplePath = join(projectDir, ".env.example");
+  try {
+    await Bun.file(envExamplePath).text();
+    console.log("✓ .env.example already exists — skipped");
+  } catch {
+    const envContent = processor === "mem0"
+      ? "GEMINI_API_KEY=\nMEM0_API_KEY=\n"
+      : "GEMINI_API_KEY=\n";
+    await Bun.write(envExamplePath, envContent);
+    console.log("✓ Generated .env.example");
+  }
+
+  // Ensure .env exists (copy from .env.example if missing)
+  const envPath = join(projectDir, ".env");
+  try {
+    await Bun.file(envPath).text();
+    console.log("✓ .env already exists — skipped");
+  } catch {
+    try {
+      const example = await Bun.file(envExamplePath).text();
+      await Bun.write(envPath, example);
+      console.log("✓ Created .env from .env.example (fill in your API keys!)");
+    } catch {
+      // No .env.example either — skip
+    }
+  }
+
   // Write project config
   await writeProjectConfig(projectDir, {
     name,
@@ -183,12 +235,11 @@ async function registerExisting(
 
   console.log(`✓ Registered in global registry (port: ${entry.port})`);
 
-  // Show migration guide
   console.log(`\n✅ Existing project "${name}" registered!`);
-  console.log(`\n⚠️  Migration notes:`);
-  console.log(`  Your existing docker-compose.yml is untouched.`);
-  console.log(`  To use claw-farm's secure compose (api-proxy + hardening):`);
-  console.log(`    1. Review the generated api-proxy/ and policy.yaml`);
-  console.log(`    2. Run: claw-farm up ${name}  (uses docker-compose.openclaw.yml)`);
-  console.log(`    3. Or keep your existing compose and use claw-farm for registry only\n`);
+  console.log(`\nYour existing docker-compose.yml is untouched.`);
+  console.log(`claw-farm uses docker-compose.openclaw.yml (newly generated).`);
+  console.log(`\nNext steps:`);
+  console.log(`  1. Check .env has your GEMINI_API_KEY`);
+  console.log(`  2. Run: claw-farm up ${name}`);
+  console.log(`  3. Open: http://localhost:${entry.port}\n`);
 }
