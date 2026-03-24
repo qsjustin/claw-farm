@@ -6,6 +6,7 @@ import { downCommand } from "./commands/down.ts";
 import { listCommand } from "./commands/list.ts";
 import { memoryRebuildCommand } from "./commands/memory-rebuild.ts";
 import { cloudComposeCommand } from "./commands/cloud-compose.ts";
+import { upgradeCommand } from "./commands/upgrade.ts";
 
 const VERSION = "0.1.0";
 
@@ -19,6 +20,7 @@ Usage:
   claw-farm up [name|--all]              Start Docker Compose
   claw-farm down [name|--all]            Stop Docker Compose
   claw-farm list                         Show all projects with status
+  claw-farm upgrade [name]               Re-generate claw-farm files with latest templates
   claw-farm memory:rebuild [name]        Rebuild processed memory from raw data
   claw-farm cloud:compose [outfile]      Generate unified cloud deploy compose
 
@@ -56,6 +58,9 @@ async function main() {
       case "list":
       case "ls":
         await listCommand();
+        break;
+      case "upgrade":
+        await upgradeCommand(commandArgs);
         break;
       case "memory:rebuild":
         await memoryRebuildCommand(commandArgs);
