@@ -67,6 +67,7 @@ services:
       OPENCLAW_AUDIT_LOG: /home/node/.openclaw/logs/audit.jsonl
     networks:
       - proxy-net
+      - host-net
     read_only: true
     tmpfs:
       - /tmp:size=100M
@@ -91,5 +92,8 @@ services:
 networks:
   proxy-net:
     internal: true
+  host-net:
+    # External network for host port binding (ports: directive requires non-internal network)
+    # api-proxy stays on proxy-net only — no direct host exposure
 `;
 }

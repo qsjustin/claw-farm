@@ -115,16 +115,21 @@ my-agent/
 │   │  │ Holds        │    │ NO API keys     │ │     │
 │   │  │ GEMINI_API_  │    │ Loads SOUL.md   │ │     │
 │   │  │ KEY          │    │ R/W MEMORY.md   │ │     │
-│   │  │ :8080        │    │ :18789 → host   │ │     │
-│   │  └──────┬───────┘    └──────────────────┘ │     │
-│   │         │                                  │     │
-│   └─────────┼──────────────────────────────────┘     │
-│             │                                        │
-│             ▼  External network                      │
-│     generativelanguage.googleapis.com                │
-└─────────────────────────────────────────────────────┘
-      │
-      ▼
+│   │  │ :8080        │    │                  │ │     │
+│   │  └──────┬───────┘    └────────┬─────────┘ │     │
+│   │         │                     │            │     │
+│   └─────────┼─────────────────────┼────────────┘     │
+│             │                     │                   │
+│             ▼  External           │                   │
+│     generativelanguage.           │                   │
+│       googleapis.com              │                   │
+│                                   │                   │
+│   ┌─ host-net ────────────────────┼────────────┐     │
+│   │                     ┌─────────┘            │     │
+│   │                     │  :18789 → host       │     │
+│   └─────────────────────┼──────────────────────┘     │
+└─────────────────────────┼────────────────────────────┘
+                          ▼
   localhost:18789 ──→ Browser dashboard
 ```
 
@@ -168,9 +173,10 @@ my-agent/
 ```
 
 **Network isolation rules:**
-- `proxy-net`: Only api-proxy has outbound access. OpenClaw exits only through the proxy.
-- `frontend`: OpenClaw ↔ Mem0 only. No external access.
-- `backend`: Mem0 ↔ Qdrant only. No external access.
+- `proxy-net` (internal): api-proxy ↔ OpenClaw communication. api-proxy has outbound to Gemini API.
+- `host-net`: OpenClaw host port binding only. api-proxy is NOT on this network.
+- `frontend` (internal, mem0 only): OpenClaw ↔ Mem0 only. No external access.
+- `backend` (internal, mem0 only): Mem0 ↔ Qdrant only. No external access.
 
 ## 4. Security Data Flow
 
