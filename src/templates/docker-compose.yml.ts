@@ -42,10 +42,11 @@ services:
     ports:
       - "127.0.0.1:${port}:18789"
     volumes:
-      - ./openclaw/config:/home/node/.openclaw:ro
+      # Config files mounted individually (OpenClaw needs to write temp files in .openclaw/)
+      - ./openclaw/config/openclaw.json5:/home/node/.openclaw/openclaw.json5:ro
+      - ./openclaw/config/policy.yaml:/home/node/.openclaw/policy.yaml:ro
       - ./openclaw/workspace:/home/node/.openclaw/workspace
       - ./openclaw/raw/sessions:/home/node/.openclaw/sessions
-      - ./openclaw/config/policy.yaml:/home/node/.openclaw/policy.yaml:ro
       - openclaw-logs:/home/node/.openclaw/logs
     environment:
       # No GEMINI_API_KEY here — agent cannot see it
@@ -58,6 +59,7 @@ services:
     tmpfs:
       - /tmp:size=100M
       - /home/node/.cache:size=200M
+      - /home/node/.openclaw/tmp:size=50M
     security_opt:
       - no-new-privileges:true
     cap_drop:
