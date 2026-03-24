@@ -124,10 +124,10 @@ export async function cloudComposeCommand(args: string[]): Promise<void> {
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 1G
           cpus: "1.0"
         reservations:
-          memory: 128M
+          memory: 256M
     depends_on:
       ${name}-api-proxy:
         condition: service_healthy
