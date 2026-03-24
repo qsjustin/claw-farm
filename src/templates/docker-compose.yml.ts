@@ -59,7 +59,7 @@ services:
     tmpfs:
       - /tmp:size=100M
       - /home/node/.cache:size=200M
-      - /home/node/.openclaw/tmp:size=50M
+      - /home/node/.openclaw:size=50M
     security_opt:
       - no-new-privileges:true
     cap_drop:
