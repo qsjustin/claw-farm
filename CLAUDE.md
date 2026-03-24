@@ -14,6 +14,18 @@ Multi OpenClaw instance manager — scaffold, run, and deploy AI agents with per
 > | `CLAUDE.md` (this file) | AI agent + developer instructions | On convention/rule changes |
 >
 > **`docs/ARCHITECTURE.md` is the single source of truth for architecture.** Other docs follow it. On conflict, ARCHITECTURE.md wins.
+>
+> ### Checklist: Adding a new command or template
+>
+> When you add a new CLI command (`src/commands/`) or template (`src/templates/`), you **MUST** update ALL of the following:
+>
+> 1. `docs/ARCHITECTURE.md` — Section 1 CLI diagram + any relevant sections
+> 2. `docs/ko/ARCHITECTURE.md` — Korean translation of the same changes
+> 3. `CLAUDE.md` — Architecture summary tree AND Commands section
+> 4. `README.md` — Commands table
+> 5. `src/index.ts` — HELP text (already required for the code to work)
+>
+> **Missing even one of these is a bug.** Treat doc updates as part of the PR, not a follow-up.
 
 ## Project Overview
 
@@ -28,10 +40,10 @@ Multi OpenClaw instance manager — scaffold, run, and deploy AI agents with per
 
 ```
 claw-farm CLI
-  ├── commands/        # init, up, down, list, spawn, despawn, instances, memory:rebuild, cloud:compose
+  ├── commands/        # init, up, down, list, spawn, despawn, instances, upgrade, memory:rebuild, cloud:compose
   ├── lib/             # registry, compose, config, ports, raw-collector, instance, migrate, api
   ├── processors/      # interface, builtin (MEMORY.md), mem0 (Qdrant)
-  └── templates/       # docker-compose, docker-compose.instance, CONTEXT.template, openclaw.json5, SOUL.md, ...
+  └── templates/       # docker-compose, docker-compose.instance, docker-compose.mem0, CONTEXT.template, openclaw.json5, SOUL.md, policy.yaml, api-proxy, nginx-proxy
 ```
 
 **Multi-Instance:** `init --multi` creates `template/` + `instances/` structure. `spawn --user` creates per-user isolated instances with shared template files.
@@ -56,6 +68,7 @@ bun run src/index.ts despawn <project> --user <id> # Stop + remove instance
 bun run src/index.ts instances <project>           # List all instances
 bun run src/index.ts list                          # Show all projects
 bun run src/index.ts memory:rebuild [name]         # Rebuild Layer 1 from raw
+bun run src/index.ts upgrade [name]                 # Re-generate templates to latest
 bun run src/index.ts cloud:compose [outfile]       # Generate cloud compose
 ```
 

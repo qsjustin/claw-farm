@@ -74,6 +74,7 @@ This will:
 | `claw-farm despawn <project> --user <id>` | Stop and remove instance |
 | `claw-farm instances <project>` | List all instances for a project |
 | `claw-farm list` | Show all projects + status |
+| `claw-farm upgrade [name]` | Re-generate claw-farm files with latest templates |
 | `claw-farm memory:rebuild [name]` | Rebuild memory from raw data |
 | `claw-farm cloud:compose [outfile]` | Generate cloud deployment compose |
 

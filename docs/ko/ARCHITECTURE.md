@@ -27,6 +27,20 @@
 │  │ 등록     │ │ compose  │ │ 출력     │ │ 재구축           │   │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘   │
 │                                                                 │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐   │
+│  │  spawn   │ │ despawn  │ │instances │ │ cloud:compose    │   │
+│  │          │ │          │ │          │ │                   │   │
+│  │ 인스턴스  │ │ 정지 +   │ │ 프로젝트별│ │ 전체 합쳐서      │   │
+│  │ 생성     │ │ 제거     │ │ 목록     │ │ 단일 compose     │   │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘   │
+│                                                                 │
+│  ┌──────────┐                                                   │
+│  │ upgrade  │                                                   │
+│  │          │                                                   │
+│  │ 템플릿   │                                                   │
+│  │ 재생성   │                                                   │
+│  └──────────┘                                                   │
+│                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  글로벌 레지스트리  ~/.claw-farm/registry.json            │   │
 │  │                                                          │   │
@@ -70,6 +84,10 @@ my-agent/
 │   └── processed/                  ← Layer 1: 날려도 됨, 리빌드 가능
 │
 ├── logs/                           ← 감사 로그
+│
+├── nginx/                          ← (cloud:compose 시 생성)
+│   └── nginx.conf                     클라우드 배포용 리버스 프록시
+│                                      (인증, 속도 제한, TLS 종단)
 │
 ├── mem0/                           ← (--processor mem0 일 때만)
 │   ├── mem0_server.py
@@ -247,23 +265,136 @@ my-agent/
 - Processing layer는 언제든 갈아끼움 (새 방법론 나오면 바로 테스트)
 - `claw-farm memory:rebuild` 한 방으로 원본에서 재인덱싱
 
-## 6. 멀티 인스턴스 운영
+## 6. 멀티 인스턴스 아키텍처 (템플릿 + 유저별 격리)
+
+### 싱글 인스턴스 (기본)
+
+프로젝트 하나 = OpenClaw 인스턴스 하나. 기존과 동일.
+
+### 멀티 인스턴스 (`--multi`)
+
+여러 유저가 하나의 프로젝트를 공유할 때 (예: dog-agent), 각 유저는 격리된 메모리와 컨텍스트를 가지면서 동일한 에이전트 성격과 스킬을 공유.
+
+```
+dog-agent/                             ← 프로젝트 루트
+├── .claw-farm.json                    ← multiInstance: true
+├── .gitignore                         ← instances/, *.env
+├── api-proxy/                         ← 공유 보안 사이드카 (git 추적)
+│
+├── template/                          ← ★ 공유 파일 (git 추적, 읽기 전용 마운트)
+│   ├── SOUL.md                            에이전트 성격 (모든 유저 동일)
+│   ├── AGENTS.md                          행동 규칙 (모든 유저 동일)
+│   ├── skills/                            커스텀 스킬 (모든 유저 동일)
+│   ├── CONTEXT.template.md                플레이스홀더: {{USER_ID}}, {{NAME}} 등
+│   └── config/
+│       ├── openclaw.json5
+│       └── policy.yaml
+│
+└── instances/                         ← ★ 유저별 데이터 (gitignored)
+    ├── alice/
+    │   ├── docker-compose.openclaw.yml    인스턴스별 compose
+    │   ├── CONTEXT.md                     "강아지: 뽀삐, 3살 말티즈"
+    │   ├── MEMORY.md                      Alice의 대화 기억
+    │   ├── raw/sessions/
+    │   ├── raw/workspace-snapshots/
+    │   ├── processed/
+    │   └── logs/
+    │
+    └── bob/
+        ├── docker-compose.openclaw.yml
+        ├── CONTEXT.md                     "강아지: 맥스, 5살 골든리트리버"
+        ├── MEMORY.md                      Bob의 대화 기억
+        ├── raw/sessions/
+        └── ...
+```
+
+**핵심 설계:**
+- `SOUL.md` (공유): "나는 강아지 전문 AI" — 모든 유저 동일
+- `CONTEXT.md` (유저별): "강아지: 뽀삐, 3살 말티즈, 닭고기 알러지" — 항상 로드
+- `MEMORY.md` (유저별): 축적된 대화 기억 — 유저별 격리
+- `template/` → git 추적. `instances/` → gitignored (유저 데이터는 로컬 유지)
+
+### 인스턴스별 컨테이너 격리
+
+각 인스턴스는 고유 컨테이너 이름과 포트로 독립된 Docker Compose 스택 실행:
+
+```
+$ claw-farm instances dog-agent
+┌──────────────────┬─────────┬───────────┐
+│ alice             │ 18790   │ 🟢 running │
+│ bob               │ 18791   │ 🟢 running │
+└──────────────────┴─────────┴───────────┘
+```
+
+공유 템플릿 파일은 읽기 전용으로 각 인스턴스에 마운트:
+```yaml
+volumes:
+  # 설정 파일 개별 마운트 (상위 디렉토리 쉐도잉 방지)
+  - ../../template/config/openclaw.json5:/...openclaw.json5:ro
+  - ../../template/config/policy.yaml:/...policy.yaml:ro
+  # 공유 워크스페이스 파일
+  - ../../template/SOUL.md:/...workspace/SOUL.md:ro
+  - ../../template/AGENTS.md:/...workspace/AGENTS.md:ro
+  - ../../template/skills:/...workspace/skills:ro
+  # 유저별 데이터
+  - ./CONTEXT.md:/...workspace/CONTEXT.md       # 유저별
+  - ./MEMORY.md:/...workspace/MEMORY.md         # 유저별
+```
+
+### 멀티 인스턴스 명령어
+
+```bash
+claw-farm init dog-agent --multi             # template/ 구조 생성
+claw-farm spawn dog-agent --user alice \
+  --context name=Poppy breed=Maltese age=3   # 템플릿에서 인스턴스 생성
+claw-farm spawn dog-agent --user bob         # 다른 인스턴스, 다른 포트
+claw-farm instances dog-agent                # 모든 인스턴스 목록
+claw-farm up dog-agent --user alice          # 특정 인스턴스 시작
+claw-farm down dog-agent --user bob          # 특정 인스턴스 중지
+claw-farm despawn dog-agent --user bob       # 인스턴스 제거
+```
+
+### 프로그래밍 API (가입 플로우용)
+
+```typescript
+import { spawn, despawn, listInstances } from "@permissionlabs/claw-farm";
+
+// 유저 가입 → 에이전트 인스턴스 생성
+const { port } = await spawn({
+  project: "dog-agent",
+  userId: "user-123",
+  context: { name: "Poppy", breed: "Maltese", age: "3" },
+});
+
+// 유저의 에이전트: http://localhost:${port}
+```
+
+### 마이그레이션 (싱글 → 멀티)
+
+싱글 인스턴스 프로젝트에서 첫 `spawn` 시 자동 마이그레이션:
+1. 기존 `openclaw/workspace/`에서 `template/` 생성 (SOUL.md, AGENTS.md, skills/, config/)
+2. 레지스트리와 설정에 `multiInstance: true` 설정
+3. `instances/`용 `.gitignore` 생성
+
+### 멀티 프로젝트 개요
 
 ```
 localhost
     │
-    ├── :18789  dog-agent    (mem0)    /permissionlabs/dog-agent
-    ├── :18790  tamagochi    (builtin) /permissionlabs/tamagochi
-    ├── :18791  tutor-bot    (mem0)    /permissionlabs/tutor-bot
+    ├── :18789  dog-agent    (builtin) multi: 2 instances
+    │   ├── :18790  alice
+    │   └── :18791  bob
+    ├── :18792  tamagochi    (builtin) single
+    ├── :18793  tutor-bot    (mem0)    single
     │
     │   $ claw-farm list
-    │   ┌──────────────┬───────┬───────────┐
-    │   │ dog-agent    │ 18789 │ 🟢 running │
-    │   │ tamagochi    │ 18790 │ ⚪ stopped │
-    │   │ tutor-bot    │ 18791 │ 🟢 running │
-    │   └──────────────┴───────┴───────────┘
+    │   ┌──────────────┬───────┬───────────┬────────────┐
+    │   │ dog-agent    │ 18789 │ 🟢 running │ 2          │
+    │   │ tamagochi    │ 18792 │ ⚪ stopped │ -          │
+    │   │ tutor-bot    │ 18793 │ 🟢 running │ -          │
+    │   └──────────────┴───────┴───────────┴────────────┘
     │
-    │   $ claw-farm up --all     # 전부 켜기
+    │   $ claw-farm up --all     # 전부 켜기 (모든 인스턴스 포함)
     │   $ claw-farm down --all   # 전부 끄기
     │
     ▼
