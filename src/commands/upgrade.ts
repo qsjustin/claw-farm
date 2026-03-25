@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { resolveProjectName, type ProjectEntry } from "../lib/registry.ts";
-import { readProjectConfig, mergeOpenclawConfig } from "../lib/config.ts";
+import { readProjectConfig, mergeOpenclawConfig, envExampleTemplate } from "../lib/config.ts";
 import { ensureRawDirs } from "../lib/raw-collector.ts";
 import { ensureTemplateDirs, ensureInstanceDirs, templateDir, instanceDir } from "../lib/instance.ts";
 import { baseComposeTemplate } from "../templates/docker-compose.yml.ts";
@@ -21,15 +21,17 @@ export async function upgradeCommand(args: string[]): Promise<void> {
   const projectDir = entry.path;
   const config = await readProjectConfig(projectDir);
   const processor = config?.processor ?? entry.processor;
+  const llm = config?.llm ?? "gemini";
 
   console.log(`\n🔄 Upgrading ${projectName} to latest claw-farm templates...`);
   console.log(`   Processor: ${processor}`);
+  console.log(`   LLM provider: ${llm}`);
   console.log(`   Port: ${entry.port}`);
   console.log(`   Multi-instance: ${entry.multiInstance ? "yes" : "no"}`);
   console.log(`   Path: ${projectDir}\n`);
 
   if (entry.multiInstance) {
-    return upgradeMultiInstance(projectName, entry, projectDir, processor);
+    return upgradeMultiInstance(projectName, entry, projectDir, processor, llm);
   }
 
   // --- Single-instance upgrade (unchanged) ---
@@ -74,10 +76,7 @@ export async function upgradeCommand(args: string[]): Promise<void> {
   await Bun.write(join(proxyDir, "requirements.txt"), apiProxyRequirementsTemplate());
   console.log("✓ Updated api-proxy/ (key isolation + PII filter + secret scan)");
 
-  const envContent = processor === "mem0"
-    ? "# LLM Provider: gemini (default) | anthropic | openai-compat\n# LLM_PROVIDER=gemini\n\nGEMINI_API_KEY=\n# ANTHROPIC_API_KEY=\n# OPENAI_API_KEY=\n# OPENAI_COMPAT_BASE_URL=\n\nMEM0_API_KEY=\n"
-    : "# LLM Provider: gemini (default) | anthropic | openai-compat\n# LLM_PROVIDER=gemini\n\nGEMINI_API_KEY=\n# ANTHROPIC_API_KEY=\n# OPENAI_API_KEY=\n# OPENAI_COMPAT_BASE_URL=\n";
-  await Bun.write(join(projectDir, ".env.example"), envContent);
+  await Bun.write(join(projectDir, ".env.example"), envExampleTemplate(llm, processor));
   console.log("✓ Updated .env.example");
 
   console.log(`\n✅ ${projectName} upgraded!`);
@@ -92,6 +91,7 @@ async function upgradeMultiInstance(
   entry: ProjectEntry,
   projectDir: string,
   processor: "builtin" | "mem0",
+  llm: "gemini" | "anthropic" | "openai-compat" = "gemini",
 ): Promise<void> {
   // Upgrade shared template files
   const tmplDir = templateDir(projectDir);
@@ -125,10 +125,7 @@ async function upgradeMultiInstance(
   await Bun.write(join(proxyDir, "requirements.txt"), apiProxyRequirementsTemplate());
   console.log("✓ Updated api-proxy/ (key isolation + PII filter + secret scan)");
 
-  const envContent = processor === "mem0"
-    ? "# LLM Provider: gemini (default) | anthropic | openai-compat\n# LLM_PROVIDER=gemini\n\nGEMINI_API_KEY=\n# ANTHROPIC_API_KEY=\n# OPENAI_API_KEY=\n# OPENAI_COMPAT_BASE_URL=\n\nMEM0_API_KEY=\n"
-    : "# LLM Provider: gemini (default) | anthropic | openai-compat\n# LLM_PROVIDER=gemini\n\nGEMINI_API_KEY=\n# ANTHROPIC_API_KEY=\n# OPENAI_API_KEY=\n# OPENAI_COMPAT_BASE_URL=\n";
-  await Bun.write(join(projectDir, ".env.example"), envContent);
+  await Bun.write(join(projectDir, ".env.example"), envExampleTemplate(llm, processor));
   console.log("✓ Updated .env.example");
 
   // Regenerate per-instance compose files + ensure directories

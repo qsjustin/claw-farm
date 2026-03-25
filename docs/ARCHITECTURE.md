@@ -13,8 +13,8 @@
 │                        Developer                                 │
 │                                                                 │
 │  $ claw-farm init dog-agent --processor mem0                    │
-│  $ claw-farm init tamagochi                                     │
-│  $ claw-farm init tutor-bot --processor mem0                    │
+│  $ claw-farm init tamagochi --llm anthropic                     │
+│  $ claw-farm init tutor-bot --processor mem0 --llm openai-compat│
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                            ▼
@@ -60,8 +60,8 @@
 ```
 my-agent/
 │
-├── .claw-farm.json                 ← Project meta (name, port, processor)
-├── .env.example                    ← GEMINI_API_KEY= (fill this in)
+├── .claw-farm.json                 ← Project meta (name, port, processor, llm)
+├── .env.example                    ← LLM_PROVIDER + API keys (per --llm flag)
 ├── docker-compose.openclaw.yml     ← Full stack definition
 │
 ├── api-proxy/                      ← ★ Security sidecar (auto-generated)
@@ -476,5 +476,5 @@ my-project (before)                 my-project (after claw-farm init --existing)
 **Onboarding command:**
 ```bash
 cd /path/to/existing-project
-claw-farm init <name> --existing [--processor mem0]
+claw-farm init <name> --existing [--processor mem0] [--llm anthropic]
 ```

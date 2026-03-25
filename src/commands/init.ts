@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { addProject, loadRegistry, saveRegistry } from "../lib/registry.ts";
-import { writeProjectConfig } from "../lib/config.ts";
+import { writeProjectConfig, envExampleTemplate, type LlmProvider } from "../lib/config.ts";
 import { ensureRawDirs } from "../lib/raw-collector.ts";
 import { baseComposeTemplate } from "../templates/docker-compose.yml.ts";
 import { mem0ComposeTemplate } from "../templates/docker-compose.mem0.yml.ts";
@@ -35,20 +35,30 @@ export async function initCommand(args: string[]): Promise<void> {
     ? (args[args.indexOf("--processor") + 1] as "builtin" | "mem0")
     : "builtin";
 
+  const VALID_LLM_PROVIDERS = ["gemini", "anthropic", "openai-compat"] as const;
+  const llm: LlmProvider = args.includes("--llm")
+    ? (args[args.indexOf("--llm") + 1] as LlmProvider)
+    : "gemini";
+  if (!VALID_LLM_PROVIDERS.includes(llm)) {
+    console.error(`Invalid LLM provider: "${llm}". Must be one of: ${VALID_LLM_PROVIDERS.join(", ")}`);
+    process.exit(1);
+  }
+
   const existing = args.includes("--existing");
   const multi = args.includes("--multi");
   const projectDir = process.cwd();
 
   if (existing) {
-    return registerExisting(name, projectDir, processor);
+    return registerExisting(name, projectDir, processor, llm);
   }
 
   if (multi) {
-    return initMulti(name, projectDir, processor);
+    return initMulti(name, projectDir, processor, llm);
   }
 
   console.log(`\n🐾 Initializing claw-farm project: ${name}`);
   console.log(`   Processor: ${processor}`);
+  console.log(`   LLM provider: ${llm}`);
   console.log(`   Directory: ${projectDir}\n`);
 
   // Register in global registry
@@ -113,6 +123,7 @@ export async function initCommand(args: string[]): Promise<void> {
     processor,
     port: entry.port,
     createdAt: entry.createdAt,
+    llm,
   });
   console.log("✓ Generated .claw-farm.json");
 
@@ -120,25 +131,15 @@ export async function initCommand(args: string[]): Promise<void> {
   if (processor === "mem0") {
     await mem0Processor.init(projectDir);
     console.log("✓ Generated mem0/ sidecar files");
-
-    // Write .env.example if not exists
-    try {
-      await Bun.file(join(projectDir, ".env.example")).text();
-    } catch {
-      await Bun.write(
-        join(projectDir, ".env.example"),
-        "GEMINI_API_KEY=\nMEM0_API_KEY=\n",
-      );
-    }
   } else {
     await builtinProcessor.init(projectDir);
+  }
 
-    // Write .env.example
-    try {
-      await Bun.file(join(projectDir, ".env.example")).text();
-    } catch {
-      await Bun.write(join(projectDir, ".env.example"), "GEMINI_API_KEY=\n");
-    }
+  // Write .env.example if not exists
+  try {
+    await Bun.file(join(projectDir, ".env.example")).text();
+  } catch {
+    await Bun.write(join(projectDir, ".env.example"), envExampleTemplate(llm, processor));
   }
 
   console.log(`\n✅ Project "${name}" initialized!`);
@@ -152,6 +153,7 @@ async function registerExisting(
   name: string,
   projectDir: string,
   processor: "builtin" | "mem0",
+  llm: LlmProvider = "gemini",
 ): Promise<void> {
   console.log(`\n🐾 Registering existing project: ${name}`);
 
@@ -216,10 +218,7 @@ async function registerExisting(
     await Bun.file(envExamplePath).text();
     console.log("✓ .env.example already exists — skipped");
   } catch {
-    const envContent = processor === "mem0"
-      ? "# LLM Provider: gemini (default) | anthropic | openai-compat\n# LLM_PROVIDER=gemini\n\nGEMINI_API_KEY=\n# ANTHROPIC_API_KEY=\n# OPENAI_API_KEY=\n# OPENAI_COMPAT_BASE_URL=\n\nMEM0_API_KEY=\n"
-      : "# LLM Provider: gemini (default) | anthropic | openai-compat\n# LLM_PROVIDER=gemini\n\nGEMINI_API_KEY=\n# ANTHROPIC_API_KEY=\n# OPENAI_API_KEY=\n# OPENAI_COMPAT_BASE_URL=\n";
-    await Bun.write(envExamplePath, envContent);
+    await Bun.write(envExamplePath, envExampleTemplate(llm, processor));
     console.log("✓ Generated .env.example");
   }
 
@@ -244,6 +243,7 @@ async function registerExisting(
     processor,
     port: entry.port,
     createdAt: entry.createdAt,
+    llm,
   });
 
   console.log(`✓ Registered in global registry (port: ${entry.port})`);
@@ -252,7 +252,7 @@ async function registerExisting(
   console.log(`\nYour existing docker-compose.yml is untouched.`);
   console.log(`claw-farm uses docker-compose.openclaw.yml (newly generated).`);
   console.log(`\nNext steps:`);
-  console.log(`  1. Check .env has your GEMINI_API_KEY`);
+  console.log(`  1. Check .env has your API keys (provider: ${llm})`);
   console.log(`  2. Run: claw-farm up ${name}`);
   console.log(`  3. Open: http://localhost:${entry.port}\n`);
 }
@@ -261,9 +261,11 @@ async function initMulti(
   name: string,
   projectDir: string,
   processor: "builtin" | "mem0",
+  llm: LlmProvider = "gemini",
 ): Promise<void> {
   console.log(`\n🐾 Initializing multi-instance project: ${name}`);
   console.log(`   Processor: ${processor}`);
+  console.log(`   LLM provider: ${llm}`);
   console.log(`   Mode: multi-instance`);
   console.log(`   Directory: ${projectDir}\n`);
 
@@ -316,10 +318,7 @@ async function initMulti(
   console.log("✓ Generated api-proxy/ (key isolation + PII filter)");
 
   // Write .env.example
-  const envContent = processor === "mem0"
-    ? "GEMINI_API_KEY=\nMEM0_API_KEY=\n"
-    : "GEMINI_API_KEY=\n";
-  await Bun.write(join(projectDir, ".env.example"), envContent);
+  await Bun.write(join(projectDir, ".env.example"), envExampleTemplate(llm, processor));
   console.log("✓ Generated .env.example");
 
   // Write .gitignore
@@ -336,6 +335,7 @@ async function initMulti(
     port: entry.port,
     createdAt: entry.createdAt,
     multiInstance: true,
+    llm,
   });
   console.log("✓ Generated .claw-farm.json");
 

@@ -20,6 +20,7 @@ Usage:
   claw-farm init <name>                  Scaffold OpenClaw project in current directory
   claw-farm init <name> --multi          Scaffold multi-instance project (template/ structure)
   claw-farm init <name> --processor mem0 Scaffold with Mem0+Qdrant memory
+  claw-farm init <name> --llm <provider> Set LLM provider (gemini|anthropic|openai-compat)
   claw-farm init <name> --existing       Register existing setup without scaffolding
   claw-farm up [name|--all]              Start Docker Compose
   claw-farm up <name> --user <id>        Start specific instance

@@ -58,6 +58,7 @@ claw-farm CLI
 bun run src/index.ts init <name>                   # Scaffold project
 bun run src/index.ts init <name> --multi           # Scaffold multi-instance project
 bun run src/index.ts init <name> --processor mem0  # With Mem0+Qdrant
+bun run src/index.ts init <name> --llm anthropic   # Set LLM provider (gemini|anthropic|openai-compat)
 bun run src/index.ts init <name> --existing        # Register existing + add security layer
 bun run src/index.ts up [name|--all]               # Start containers
 bun run src/index.ts up <name> --user <id>         # Start specific instance

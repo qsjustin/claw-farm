@@ -11,8 +11,8 @@
 │                        개발자                                    │
 │                                                                 │
 │  $ claw-farm init dog-agent --processor mem0                    │
-│  $ claw-farm init tamagochi                                     │
-│  $ claw-farm init tutor-bot --processor mem0                    │
+│  $ claw-farm init tamagochi --llm anthropic                     │
+│  $ claw-farm init tutor-bot --processor mem0 --llm openai-compat│
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                            ▼
@@ -58,8 +58,8 @@
 ```
 my-agent/
 │
-├── .claw-farm.json                 ← 프로젝트 메타 (이름, 포트, 프로세서)
-├── .env.example                    ← GEMINI_API_KEY= (이것만 채우면 됨)
+├── .claw-farm.json                 ← 프로젝트 메타 (이름, 포트, 프로세서, llm)
+├── .env.example                    ← LLM_PROVIDER + API 키 (--llm 플래그에 따라)
 ├── docker-compose.openclaw.yml     ← 전체 스택 정의
 │
 ├── api-proxy/                      ← ★ 보안 사이드카 (자동 생성)
@@ -474,5 +474,5 @@ dog-agent (기존)                    dog-agent (claw-farm 등록 후)
 **온보딩 명령:**
 ```bash
 cd /path/to/existing-project
-claw-farm init <name> --existing [--processor mem0]
+claw-farm init <name> --existing [--processor mem0] [--llm anthropic]
 ```
