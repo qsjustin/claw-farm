@@ -60,6 +60,7 @@ services:
       # Per-instance files (read-write)
       - ./USER.md:/home/node/.openclaw/workspace/USER.md
       - ./MEMORY.md:/home/node/.openclaw/workspace/MEMORY.md
+      - ./memory:/home/node/.openclaw/workspace/memory
       - ./raw/sessions:/home/node/.openclaw/sessions
       - ./logs:/home/node/.openclaw/logs
     environment:

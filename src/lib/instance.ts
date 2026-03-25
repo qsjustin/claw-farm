@@ -31,6 +31,7 @@ export async function ensureInstanceDirs(
   await mkdir(join(instDir, "raw", "workspace-snapshots"), { recursive: true, mode: 0o700 });
   await mkdir(join(instDir, "processed"), { recursive: true, mode: 0o700 });
   await mkdir(join(instDir, "logs"), { recursive: true, mode: 0o700 });
+  await mkdir(join(instDir, "memory"), { recursive: true, mode: 0o700 });
   return instDir;
 }
 
