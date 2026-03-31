@@ -1,6 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type { RuntimeType } from "../runtimes/interface.ts";
+
 const REGISTRY_DIR = join(homedir(), ".claw-farm");
 const REGISTRY_PATH = join(REGISTRY_DIR, "registry.json");
 const LOCK_PATH = join(REGISTRY_DIR, "registry.lock");
@@ -9,7 +11,7 @@ const LOCK_PATH = join(REGISTRY_DIR, "registry.lock");
 export const SAFE_NAME_REGEX = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 /** Flags that consume the next arg as their value. */
-const FLAGS_WITH_VALUES = new Set(["--processor", "--llm", "--user", "--context"]);
+const FLAGS_WITH_VALUES = new Set(["--processor", "--llm", "--user", "--context", "--runtime", "--proxy-mode", "--to"]);
 
 /** Find first positional arg, skipping flags and their values. */
 export function findPositionalArg(args: string[], exclude?: string[]): string | undefined {
@@ -43,6 +45,7 @@ export interface ProjectEntry {
   processor: "builtin" | "mem0";
   createdAt: string;
   multiInstance?: boolean;
+  runtime?: RuntimeType;
   instances?: Record<string, InstanceEntry>;
 }
 
@@ -190,6 +193,7 @@ export async function addProject(
   name: string,
   path: string,
   processor: "builtin" | "mem0",
+  runtime?: RuntimeType,
 ): Promise<ProjectEntry> {
   validateName(name, "project name");
 
@@ -204,6 +208,7 @@ export async function addProject(
       port,
       processor,
       createdAt: new Date().toISOString(),
+      ...(runtime && runtime !== "openclaw" ? { runtime } : {}),
     };
     reg.projects[name] = entry;
     await saveRegistry(reg);

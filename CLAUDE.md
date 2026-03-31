@@ -40,9 +40,10 @@ Multi OpenClaw instance manager — scaffold, run, and deploy AI agents with per
 
 ```
 claw-farm CLI
-  ├── commands/        # init, up, down, list, spawn, despawn, instances, upgrade, memory:rebuild, cloud:compose
+  ├── commands/        # init, up, down, list, spawn, despawn, instances, upgrade, migrate-runtime, memory:rebuild, cloud:compose
   ├── lib/             # registry, compose, config, ports, raw-collector, instance, migrate, api
   ├── processors/      # interface, builtin (MEMORY.md), mem0 (Qdrant)
+  ├── runtimes/        # interface, openclaw (~1.5GB), picoclaw (~20MB Go)
   └── templates/       # docker-compose, docker-compose.instance, docker-compose.mem0, USER.template, openclaw.json, SOUL.md, policy.yaml, api-proxy, nginx-proxy
 ```
 
@@ -55,7 +56,9 @@ claw-farm CLI
 ## Commands
 
 ```bash
-bun run src/index.ts init <name>                   # Scaffold project
+bun run src/index.ts init <name>                   # Scaffold project (default: openclaw)
+bun run src/index.ts init <name> --runtime picoclaw # Use picoclaw runtime (~20MB Go)
+bun run src/index.ts init <name> --proxy-mode shared # Share api-proxy across instances
 bun run src/index.ts init <name> --multi           # Scaffold multi-instance project
 bun run src/index.ts init <name> --processor mem0  # With Mem0+Qdrant
 bun run src/index.ts init <name> --llm anthropic   # Set LLM provider (gemini|anthropic|openai-compat)
@@ -71,6 +74,7 @@ bun run src/index.ts list                          # Show all projects
 bun run src/index.ts memory:rebuild [name]         # Rebuild Layer 1 from raw
 bun run src/index.ts upgrade [name]                 # Re-generate templates to latest
 bun run src/index.ts upgrade [name] --force-policy  # Upgrade + overwrite policy.yaml
+bun run src/index.ts migrate-runtime <project> --to <runtime>  # Switch runtime (e.g., openclaw → picoclaw)
 bun run src/index.ts cloud:compose [outfile]       # Generate cloud compose
 ```
 
@@ -115,6 +119,8 @@ Look for `.claw-farm.json` in the project root:
 ```json
 {
   "name": "project-name",
+  "runtime": "openclaw" or "picoclaw",
+  "proxyMode": "per-instance" or "shared",
   "processor": "builtin" or "mem0",
   "port": 18789,
   "createdAt": "2026-03-20T...",
@@ -146,6 +152,39 @@ Look for `.claw-farm.json` in the project root:
 | `instances/<user>/openclaw/workspace/USER.md` | Per-user context (filled) | Yes — user-specific info |
 | `instances/<user>/openclaw/workspace/MEMORY.md` | Per-user memory | Yes — isolated per user |
 | `instances/<user>/openclaw/sessions/` | Per-user immutable logs | **NEVER delete or modify** |
+
+### Key files (picoclaw, single-instance)
+
+| File | Purpose | Can you edit? |
+|------|---------|---------------|
+| `picoclaw/workspace/SOUL.md` | Agent personality & behavior rules | Yes — this defines who you are |
+| `picoclaw/workspace/memory/MEMORY.md` | Accumulated agent memory | Yes — picoclaw updates this automatically |
+| `picoclaw/workspace/skills/` | Custom skills directory | Yes — add new skills here |
+| `picoclaw/config.json` | LLM + tools + policy config (single file) | Only if user asks |
+| `picoclaw/workspace/sessions/` | Session logs | **NEVER delete or modify** |
+| `api-proxy/api_proxy.py` | Security proxy | Only if user asks |
+| `docker-compose.picoclaw.yml` | Container orchestration | Only if user asks |
+
+### Key files (picoclaw, multi-instance)
+
+| File | Purpose | Can you edit? |
+|------|---------|---------------|
+| `template/SOUL.md` | Shared agent personality | Yes — shared across all instances |
+| `template/AGENTS.md` | Shared behavior rules | Yes — shared across all instances |
+| `template/skills/` | Shared custom skills | Yes — shared across all instances |
+| `template/config/config.json` | Shared picoclaw config | Only if user asks |
+| `instances/<user>/picoclaw/workspace/USER.md` | Per-user context (filled) | Yes — user-specific info |
+| `instances/<user>/picoclaw/workspace/memory/MEMORY.md` | Per-user memory | Yes — isolated per user |
+| `instances/<user>/picoclaw/workspace/sessions/` | Per-user session logs | **NEVER delete or modify** |
+
+### Runtime and proxyMode selection guide
+
+When working in a project managed by claw-farm, check `.claw-farm.json` for `runtime` and `proxyMode`:
+
+- **runtime: "openclaw"** — Use `openclaw/` paths. Config is `openclaw.json` + `policy.yaml`. Memory at `workspace/MEMORY.md`.
+- **runtime: "picoclaw"** — Use `picoclaw/` paths. Config is single `config.json`. Memory at `workspace/memory/MEMORY.md`. Sessions at `workspace/sessions/`.
+- **proxyMode: "per-instance"** — Each instance has its own api-proxy. Secrets are isolated per user.
+- **proxyMode: "shared"** — All instances share one api-proxy. Same API key for all. Do not store per-user secrets in the proxy.
 
 ### Security rules
 1. **API keys are NOT in your environment.** They're in the api-proxy container. Don't look for them.

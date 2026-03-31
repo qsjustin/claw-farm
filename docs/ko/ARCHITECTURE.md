@@ -13,6 +13,8 @@
 │  $ claw-farm init dog-agent --processor mem0                    │
 │  $ claw-farm init tamagochi --llm anthropic                     │
 │  $ claw-farm init tutor-bot --processor mem0 --llm openai-compat│
+│  $ claw-farm init lite-bot --runtime picoclaw                   │
+│  $ claw-farm init shared-bot --runtime picoclaw --proxy-mode shared│
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                            ▼
@@ -58,7 +60,7 @@
 ```
 my-agent/
 │
-├── .claw-farm.json                 ← 프로젝트 메타 (이름, 포트, 프로세서, llm)
+├── .claw-farm.json                 ← 프로젝트 메타 (이름, 포트, 프로세서, llm, runtime, proxyMode)
 ├── .env.example                    ← LLM_PROVIDER + API 키 (--llm 플래그에 따라)
 ├── docker-compose.openclaw.yml     ← 전체 스택 정의
 │
@@ -469,3 +471,207 @@ dog-agent (기존)                    dog-agent (claw-farm 등록 후)
 cd /path/to/existing-project
 claw-farm init <name> --existing [--processor mem0] [--llm anthropic]
 ```
+
+## 8. 런타임 추상화
+
+claw-farm은 `src/runtimes/`의 `AgentRuntime` 인터페이스를 통해 여러 에이전트 런타임을 지원합니다.
+
+```
+src/
+├── runtimes/
+│   ├── interface.ts        ← AgentRuntime 인터페이스 정의
+│   ├── openclaw.ts         ← OpenClaw 런타임 (~1.5GB, 풀 기능)
+│   ├── picoclaw.ts         ← picoclaw 런타임 (~20MB, 경량 Go)
+│   └── index.ts            ← 런타임 리졸버 (이름으로)
+├── commands/
+├── lib/
+├── processors/
+└── templates/
+```
+
+### AgentRuntime 인터페이스
+
+각 런타임이 구현하는 메서드:
+- **scaffoldProject()** — 프로젝트 파일 생성 (compose, config, workspace)
+- **scaffoldInstance()** — 유저별 인스턴스 파일 생성
+- **getComposeFile()** — 런타임의 compose 파일명 반환
+- **getWorkspacePaths()** — 런타임별 경로 반환 (config, memory, sessions)
+
+### 런타임 선택
+
+```bash
+claw-farm init my-agent                          # 기본값: openclaw
+claw-farm init my-agent --runtime openclaw       # 명시적: OpenClaw
+claw-farm init my-agent --runtime picoclaw       # 경량: picoclaw
+```
+
+`runtime` 필드는 `.claw-farm.json`에 저장:
+```json
+{
+  "name": "my-agent",
+  "runtime": "picoclaw",
+  "proxyMode": "per-instance",
+  "processor": "builtin",
+  "port": 18789
+}
+```
+
+### 런타임 비교
+
+| | OpenClaw | picoclaw |
+|---|---|---|
+| **이미지 크기** | ~1.5GB | ~20MB (75배 가벼움) |
+| **언어** | Node.js | Go |
+| **설정** | openclaw.json + policy.yaml | 단일 config.json |
+| **메모리 경로** | workspace/MEMORY.md | workspace/memory/MEMORY.md |
+| **세션** | sessions/ (.jsonl) | workspace/sessions/ |
+| **적합한 용도** | 풀 기능 에이전트, 풍부한 플러그인 생태계 | 경량 에이전트, 리소스 제한 환경 |
+| **멀티 에이전트** | 유저별 격리 (spawn) | 내장 역할(role) 기반 (유저별 아님) |
+
+## 9. proxyMode: 공유 vs 인스턴스별 API 프록시
+
+`--proxy-mode` 플래그는 인스턴스 간 `api-proxy` 배포 방식을 제어합니다.
+
+```bash
+claw-farm init my-agent --runtime picoclaw --proxy-mode shared
+claw-farm init my-agent --runtime picoclaw --proxy-mode per-instance  # 기본값
+```
+
+### per-instance (기본값)
+
+각 유저 인스턴스마다 자체 api-proxy 컨테이너 배포. OpenClaw과 동일한 모델.
+
+```
+instances/alice/  →  alice-agent + alice-api-proxy
+instances/bob/    →  bob-agent   + bob-api-proxy
+```
+
+- 유저별 완전한 시크릿 격리 (각 프록시에 다른 키 가능)
+- 리소스 사용량 높음 (인스턴스당 프록시 하나)
+
+### shared
+
+모든 유저 인스턴스가 프로젝트 수준의 단일 api-proxy 컨테이너 공유.
+
+```
+api-proxy/        →  shared-api-proxy (전체 하나)
+instances/alice/  →  alice-agent ──→ shared-api-proxy
+instances/bob/    →  bob-agent   ──→ shared-api-proxy
+```
+
+- 리소스 사용량 낮음 (프록시 하나)
+- 모든 인스턴스가 동일한 API 키 사용
+- 유저별 시크릿 격리 불가 (docs/SECURITY.md 참조)
+
+## 10. picoclaw 파일 구조
+
+### 싱글 인스턴스 (picoclaw)
+
+```
+my-agent/
+│
+├── .claw-farm.json                 ← runtime: "picoclaw", proxyMode: "per-instance"
+├── .env.example                    ← LLM_PROVIDER + API 키
+├── docker-compose.picoclaw.yml     ← picoclaw 스택 정의
+│
+├── api-proxy/                      ← 보안 사이드카 (OpenClaw과 동일)
+│   ├── api_proxy.py
+│   ├── Dockerfile
+│   └── requirements.txt
+│
+├── picoclaw/                       ← picoclaw 컨테이너에 마운트
+│   ├── config.json                 ← 단일 설정 파일 (LLM + 도구 + 정책)
+│   └── workspace/
+│       ├── SOUL.md                     성격/행동 규칙
+│       ├── memory/
+│       │   └── MEMORY.md               대화 통해 자동 축적
+│       ├── sessions/                   세션 로그
+│       └── skills/                     커스텀 스킬
+│
+├── raw/                            ← 워크스페이스 스냅샷
+│   └── workspace-snapshots/
+├── processed/                      ← Layer 1: 날려도 됨, 리빌드 가능
+└── logs/                           ← API 프록시 감사 로그
+```
+
+### 멀티 인스턴스 (picoclaw)
+
+```
+dog-agent/
+├── .claw-farm.json                    ← runtime: "picoclaw", multiInstance: true
+├── api-proxy/                         ← 공유 또는 인스턴스별 (proxyMode에 따라)
+│
+├── template/
+│   ├── SOUL.md                            공유 성격
+│   ├── AGENTS.md                          공유 행동 규칙
+│   ├── skills/                            공유 스킬
+│   ├── USER.template.md                   유저별 플레이스홀더
+│   └── config/
+│       └── config.json                    picoclaw 설정 (단일 파일)
+│
+└── instances/
+    ├── alice/
+    │   ├── docker-compose.picoclaw.yml
+    │   ├── picoclaw/
+    │   │   ├── config.json                    template/config/에서 복사
+    │   │   └── workspace/
+    │   │       ├── USER.md                    Alice의 컨텍스트
+    │   │       ├── memory/
+    │   │       │   └── MEMORY.md              Alice의 기억
+    │   │       └── sessions/                  Alice의 세션
+    │   ├── raw/workspace-snapshots/
+    │   └── processed/
+    │
+    └── bob/
+        └── ...                                alice와 동일한 구조
+```
+
+## 11. picoclaw 컨테이너 토폴로지
+
+### 로컬 개발 (picoclaw, 인스턴스별 프록시)
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    Docker                             │
+│                                                      │
+│   ┌─ proxy-net ──────────────────────────────┐       │
+│   │                                           │       │
+│   │  ┌──────────────┐    ┌──────────────────┐│       │
+│   │  │  api-proxy   │    │ picoclaw-gateway ││       │
+│   │  │              │◄───│                  ││       │
+│   │  │ API 키 보유   │    │ ~20MB Go 바이너리 ││       │
+│   │  │              │    │ 키 없음           ││       │
+│   │  │ :8080        │    │ :18789 → 호스트   ││       │
+│   │  └──────┬───────┘    └──────────────────┘│       │
+│   └─────────┼────────────────────────────────┘       │
+│             ▼                                        │
+│     LLM API 엔드포인트                                │
+└──────────────────────────────────────────────────────┘
+      │
+      ▼
+  localhost:18789 ──→ 에이전트 인터페이스
+```
+
+### 로컬 개발 (picoclaw, 공유 프록시)
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                         Docker                            │
+│                                                          │
+│   ┌─ proxy-net ──────────────────────────────────┐       │
+│   │                                               │       │
+│   │  ┌──────────────┐                             │       │
+│   │  │  api-proxy   │  (공유, 전체 하나)            │       │
+│   │  │  :8080       │◄──────┬──────────┐          │       │
+│   │  └──────┬───────┘       │          │          │       │
+│   │         │          ┌────┴───┐ ┌────┴───┐      │       │
+│   │         │          │ alice  │ │  bob   │      │       │
+│   │         │          │ :18790 │ │ :18791 │      │       │
+│   │         │          └────────┘ └────────┘      │       │
+│   └─────────┼────────────────────────────────────┘       │
+│             ▼                                            │
+│     LLM API 엔드포인트                                    │
+└──────────────────────────────────────────────────────────┘
+```
+
+**picoclaw 멀티 에이전트 참고:** picoclaw에는 단일 인스턴스 내에서 에이전트 역할(예: 연구자, 작성자, 리뷰어)을 정의하는 내장 멀티 에이전트 기능이 있습니다. 이것은 유저별 격리를 제공하는 claw-farm의 멀티 인스턴스 모델과 다릅니다. picoclaw의 역할은 하나의 컨테이너 안에서 실행되고, claw-farm의 인스턴스는 별도의 데이터를 가진 별도의 컨테이너입니다.

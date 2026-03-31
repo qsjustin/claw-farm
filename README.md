@@ -1,14 +1,15 @@
 # claw-farm
 
-Multi OpenClaw instance manager — scaffold, run, and deploy AI agents with persistent memory.
+Multi-runtime AI agent manager — scaffold, run, and deploy agents with persistent memory. Supports OpenClaw and picoclaw runtimes.
 
 ## Features
 
-- **One-command scaffolding**: `claw-farm init my-agent` creates a full OpenClaw project with Docker Compose, config, and memory structure
+- **One-command scaffolding**: `claw-farm init my-agent` creates a full agent project with Docker Compose, config, and memory structure
+- **Multi-runtime**: OpenClaw (full-featured, ~1.5GB) or picoclaw (lightweight Go, ~20MB)
 - **Security by default**: API proxy sidecar isolates keys from the agent, auto-redacts PII, scans LLM responses for secrets
 - **2-Layer Memory Architecture**: Raw data is immutable (never deleted), processing layer is swappable
 - **Multiple processors**: Builtin (MEMORY.md) or Mem0+Qdrant for semantic vector search
-- **Multi-instance management**: Run multiple OpenClaw agents with auto-assigned ports
+- **Multi-instance management**: Run multiple agents with auto-assigned ports
 - **Cloud-ready**: Generate unified docker-compose for Coolify/Hetzner deployment
 
 ## Install
@@ -62,7 +63,9 @@ This will:
 
 | Command | Description |
 |---------|-------------|
-| `claw-farm init <name>` | Scaffold OpenClaw project |
+| `claw-farm init <name>` | Scaffold agent project (default: OpenClaw) |
+| `claw-farm init <name> --runtime <rt>` | Set runtime (openclaw\|picoclaw) |
+| `claw-farm init <name> --proxy-mode <mode>` | Set proxy mode (per-instance\|shared) |
 | `claw-farm init <name> --multi` | Scaffold multi-instance project (template/ structure) |
 | `claw-farm init <name> --processor mem0` | Scaffold with Mem0+Qdrant |
 | `claw-farm init <name> --llm <provider>` | Set LLM provider (gemini\|anthropic\|openai-compat) |
@@ -104,6 +107,26 @@ claw-farm instances dog-agent
 
 Each user gets: isolated MEMORY.md, their own USER.md, own port.
 Shared across users: SOUL.md, AGENTS.md, skills/, config/.
+
+## picoclaw Runtime
+
+picoclaw is a lightweight Go-based agent runtime (~20MB vs OpenClaw's ~1.5GB). Use it when you need resource-efficient agents or are deploying many instances.
+
+```bash
+# Scaffold with picoclaw
+claw-farm init my-agent --runtime picoclaw
+
+# With shared proxy (all instances share one api-proxy)
+claw-farm init my-agent --runtime picoclaw --proxy-mode shared --multi
+```
+
+**Key differences from OpenClaw:**
+- Single `config.json` instead of `openclaw.json` + `policy.yaml`
+- Memory at `workspace/memory/MEMORY.md` (not `workspace/MEMORY.md`)
+- Sessions at `workspace/sessions/` (not a separate `sessions/` directory)
+- 75x smaller container image
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full picoclaw architecture diagrams.
 
 ## Security Architecture
 

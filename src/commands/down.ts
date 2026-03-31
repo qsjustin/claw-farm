@@ -1,8 +1,35 @@
 import { join } from "node:path";
 import { resolveProjectName, loadRegistry, getInstance, findPositionalArg } from "../lib/registry.ts";
-import { runCompose } from "../lib/compose.ts";
+import { readProjectConfig } from "../lib/config.ts";
+import { runCompose, sharedProxyConnect } from "../lib/compose.ts";
 import { snapshotWorkspace } from "../lib/raw-collector.ts";
 import { instanceDir } from "../lib/instance.ts";
+import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
+
+/** Stop shared proxy compose if no instances remain running. */
+async function stopSharedProxy(
+  projectDir: string,
+  projectName: string,
+  runtimeType: RuntimeType,
+  proxyMode: ProxyMode,
+): Promise<void> {
+  if (proxyMode !== "shared" || runtimeType === "openclaw") return;
+  const proxyComposePath = join(projectDir, "docker-compose.proxy.yml");
+  try {
+    await Bun.file(proxyComposePath).text();
+  } catch {
+    return; // No proxy compose file
+  }
+  console.log(`\n■ Stopping shared api-proxy...`);
+  try {
+    await runCompose(projectDir, "down", {
+      composePath: proxyComposePath,
+      projectName: `${projectName}-proxy`,
+    });
+  } catch {
+    // Best effort
+  }
+}
 
 export async function downCommand(args: string[]): Promise<void> {
   const all = args.includes("--all");
@@ -18,6 +45,11 @@ export async function downCommand(args: string[]): Promise<void> {
     }
     for (const name of names) {
       const project = reg.projects[name];
+      const config = await readProjectConfig(project.path);
+      const runtimeType: RuntimeType = config?.runtime ?? project.runtime ?? "openclaw";
+      const runtime = getRuntime(runtimeType);
+      const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+
       if (project.multiInstance) {
         const userIds = Object.keys(project.instances ?? {});
         for (const uid of userIds) {
@@ -28,13 +60,16 @@ export async function downCommand(args: string[]): Promise<void> {
             await runCompose(project.path, "down", {
               composePath,
               projectName: `${name}-${uid}`,
+              connectContainer: sharedProxyConnect(name, uid, runtimeType, proxyMode),
             });
           } catch {}
         }
+        // Stop shared proxy after all instances
+        await stopSharedProxy(project.path, name, runtimeType, proxyMode);
       } else {
         console.log(`\n■ Stopping ${name}...`);
         try {
-          await snapshotWorkspace(project.path);
+          await snapshotWorkspace(project.path, runtimeType);
         } catch {}
         await runCompose(project.path, "down");
       }
@@ -45,6 +80,10 @@ export async function downCommand(args: string[]): Promise<void> {
 
   const name = findPositionalArg(args);
   const { name: projectName, entry } = await resolveProjectName(name);
+  const config = await readProjectConfig(entry.path);
+  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
+  const runtime = getRuntime(runtimeType);
+  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
 
   if (entry.multiInstance && userId) {
     const instance = await getInstance(projectName, userId);
@@ -57,6 +96,7 @@ export async function downCommand(args: string[]): Promise<void> {
     await runCompose(entry.path, "down", {
       composePath,
       projectName: `${projectName}-${userId}`,
+      connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
     });
     console.log(`\n✅ ${projectName}/${userId} stopped.`);
     return;
@@ -76,16 +116,19 @@ export async function downCommand(args: string[]): Promise<void> {
         await runCompose(entry.path, "down", {
           composePath,
           projectName: `${projectName}-${uid}`,
+          connectContainer: sharedProxyConnect(projectName, uid, runtimeType, proxyMode),
         });
       } catch {}
     }
+    // Stop shared proxy after all instances are down
+    await stopSharedProxy(entry.path, projectName, runtimeType, proxyMode);
     console.log(`\n✅ All ${userIds.length} instance(s) of ${projectName} stopped.`);
     return;
   }
 
   // Single-instance mode
   try {
-    await snapshotWorkspace(entry.path);
+    await snapshotWorkspace(entry.path, runtimeType);
     console.log("✓ Workspace snapshot saved");
   } catch {}
 

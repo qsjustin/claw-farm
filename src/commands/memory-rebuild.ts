@@ -5,6 +5,7 @@ import { readProjectConfig } from "../lib/config.ts";
 import { instanceDir } from "../lib/instance.ts";
 import { builtinProcessor } from "../processors/builtin.ts";
 import { mem0Processor } from "../processors/mem0.ts";
+import type { RuntimeType } from "../runtimes/interface.ts";
 
 export async function memoryRebuildCommand(args: string[]): Promise<void> {
   const userIdx = args.indexOf("--user");
@@ -14,11 +15,12 @@ export async function memoryRebuildCommand(args: string[]): Promise<void> {
 
   const config = await readProjectConfig(entry.path);
   const processor = config?.processor ?? entry.processor;
+  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
 
   if (entry.multiInstance && userId) {
     // Rebuild specific instance memory
     console.log(`\n🔄 Rebuilding memory for ${projectName}/${userId}...`);
-    await rebuildInstanceMemory(entry.path, userId, processor);
+    await rebuildInstanceMemory(entry.path, userId, processor, runtimeType);
     console.log(`\n✅ Memory rebuild complete for ${projectName}/${userId}.\n`);
     return;
   }
@@ -30,7 +32,7 @@ export async function memoryRebuildCommand(args: string[]): Promise<void> {
     console.log(`\n🔄 Rebuilding memory for all ${userIds.length} instance(s) of ${projectName}...`);
     for (const uid of userIds) {
       console.log(`\n  → ${uid}`);
-      await rebuildInstanceMemory(entry.path, uid, processor);
+      await rebuildInstanceMemory(entry.path, uid, processor, runtimeType);
     }
     console.log(`\n✅ Memory rebuild complete for ${projectName}.\n`);
     return;
@@ -52,13 +54,22 @@ async function rebuildInstanceMemory(
   projectDir: string,
   userId: string,
   processor: "builtin" | "mem0" = "builtin",
+  runtimeType: RuntimeType = "openclaw",
 ): Promise<void> {
   const instDir = instanceDir(projectDir, userId);
+  const rtDir = runtimeType === "picoclaw" ? "picoclaw" : "openclaw";
+
+  // Determine session and memory paths based on runtime
+  const sessionsDir = runtimeType === "picoclaw"
+    ? join(instDir, rtDir, "workspace", "sessions")
+    : join(instDir, rtDir, "sessions");
+  const memoryPath = runtimeType === "picoclaw"
+    ? join(instDir, rtDir, "workspace", "memory", "MEMORY.md")
+    : join(instDir, rtDir, "workspace", "MEMORY.md");
 
   if (processor === "mem0") {
     // Re-index sessions from instance into Qdrant
     console.log("    Mem0 processor: re-indexing from instance sessions...");
-    const sessionsDir = join(instDir, "openclaw", "sessions");
     try {
       const files = await readdir(sessionsDir);
       const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
@@ -85,7 +96,7 @@ async function rebuildInstanceMemory(
     }
     const latest = snapshots.sort().at(-1)!;
     const memoryContent = await Bun.file(join(snapshotsDir, latest, "MEMORY.md")).text();
-    await Bun.write(join(instDir, "openclaw", "workspace", "MEMORY.md"), memoryContent);
+    await Bun.write(memoryPath, memoryContent);
     console.log(`    Rebuilt MEMORY.md from snapshot: ${latest}`);
   } catch {
     console.log("    No snapshots available — skipping rebuild");

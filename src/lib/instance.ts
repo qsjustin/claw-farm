@@ -1,6 +1,7 @@
 import { join, resolve, sep } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { validateName } from "./registry.ts";
+import type { RuntimeType } from "../runtimes/interface.ts";
 
 /**
  * Instance directory helpers for multi-instance projects.
@@ -21,17 +22,34 @@ export function templateDir(projectDir: string): string {
   return join(projectDir, "template");
 }
 
+/**
+ * Create per-instance directory structure.
+ * Directory layout differs by runtime:
+ * - openclaw: openclaw/workspace/, openclaw/sessions/, openclaw/logs/
+ * - picoclaw: picoclaw/workspace/, picoclaw/workspace/memory/, picoclaw/workspace/sessions/
+ */
 export async function ensureInstanceDirs(
   projectDir: string,
   userId: string,
+  runtime?: RuntimeType,
 ): Promise<string> {
   validateName(userId, "user ID");
   const instDir = instanceDir(projectDir, userId);
-  // Container mount directory (openclaw/ = /home/node/.openclaw)
-  // Use 0o755 so container's node user (uid 1000) can read/write on Linux hosts
-  await mkdir(join(instDir, "openclaw", "workspace", "memory"), { recursive: true, mode: 0o755 });
-  await mkdir(join(instDir, "openclaw", "sessions"), { recursive: true, mode: 0o755 });
-  await mkdir(join(instDir, "openclaw", "logs"), { recursive: true, mode: 0o755 });
+  const rt = runtime ?? "openclaw";
+
+  if (rt === "picoclaw") {
+    // picoclaw workspace structure: sessions/ and memory/ are under workspace/
+    await mkdir(join(instDir, "picoclaw", "workspace", "memory"), { recursive: true, mode: 0o755 });
+    await mkdir(join(instDir, "picoclaw", "workspace", "sessions"), { recursive: true, mode: 0o755 });
+    await mkdir(join(instDir, "picoclaw", "workspace", "state"), { recursive: true, mode: 0o755 });
+    await mkdir(join(instDir, "picoclaw", "workspace", "skills"), { recursive: true, mode: 0o755 });
+  } else {
+    // OpenClaw workspace structure
+    await mkdir(join(instDir, "openclaw", "workspace", "memory"), { recursive: true, mode: 0o755 });
+    await mkdir(join(instDir, "openclaw", "sessions"), { recursive: true, mode: 0o755 });
+    await mkdir(join(instDir, "openclaw", "logs"), { recursive: true, mode: 0o755 });
+  }
+
   // API proxy logs directory (mounted as ./logs:/logs in api-proxy service)
   await mkdir(join(instDir, "logs"), { recursive: true, mode: 0o755 });
   // Memory pipeline directories (not in container)

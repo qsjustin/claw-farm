@@ -10,30 +10,41 @@ import { upgradeCommand } from "./commands/upgrade.ts";
 import { spawnCommand } from "./commands/spawn.ts";
 import { despawnCommand } from "./commands/despawn.ts";
 import { instancesCommand } from "./commands/instances.ts";
+import { migrateRuntimeCommand } from "./commands/migrate-runtime.ts";
 
 const VERSION = "0.2.0";
 
 const HELP = `
-claw-farm v${VERSION} — Multi OpenClaw Instance Manager
+claw-farm v${VERSION} — Multi Agent Instance Manager
 
 Usage:
-  claw-farm init <name>                  Scaffold OpenClaw project in current directory
-  claw-farm init <name> --multi          Scaffold multi-instance project (template/ structure)
-  claw-farm init <name> --processor mem0 Scaffold with Mem0+Qdrant memory
-  claw-farm init <name> --llm <provider> Set LLM provider (gemini|anthropic|openai-compat)
-  claw-farm init <name> --existing       Register existing setup without scaffolding
-  claw-farm up [name|--all]              Start Docker Compose
-  claw-farm up <name> --user <id>        Start specific instance
-  claw-farm down [name|--all]            Stop Docker Compose
-  claw-farm down <name> --user <id>      Stop specific instance
-  claw-farm list                         Show all projects with status
-  claw-farm spawn <project> --user <id>  Create and start a new instance from template
-  claw-farm despawn <project> --user <id> Stop and remove an instance
-  claw-farm instances <project>          List all instances for a project
-  claw-farm upgrade [name]               Re-generate claw-farm files with latest templates
-  claw-farm upgrade [name] --force-policy Upgrade and overwrite policy.yaml
-  claw-farm memory:rebuild [name]        Rebuild processed memory from raw data
-  claw-farm cloud:compose [outfile]      Generate unified cloud deploy compose
+  claw-farm init <name>                    Scaffold agent project in current directory
+  claw-farm init <name> --multi            Scaffold multi-instance project (template/ structure)
+  claw-farm init <name> --runtime <rt>     Set agent runtime (openclaw|picoclaw)
+  claw-farm init <name> --processor mem0   Scaffold with Mem0+Qdrant memory
+  claw-farm init <name> --llm <provider>   Set LLM provider (gemini|anthropic|openai-compat)
+  claw-farm init <name> --existing         Register existing setup without scaffolding
+  claw-farm up [name|--all]                Start Docker Compose
+  claw-farm up <name> --user <id>          Start specific instance
+  claw-farm down [name|--all]              Stop Docker Compose
+  claw-farm down <name> --user <id>        Stop specific instance
+  claw-farm list                           Show all projects with status
+  claw-farm spawn <project> --user <id>    Create and start a new instance from template
+  claw-farm despawn <project> --user <id>  Stop and remove an instance
+  claw-farm instances <project>            List all instances for a project
+  claw-farm upgrade [name]                 Re-generate claw-farm files with latest templates
+  claw-farm upgrade [name] --force-policy  Upgrade and overwrite policy.yaml
+  claw-farm migrate-runtime <project> --to <runtime>  Switch runtime (e.g., openclaw → picoclaw)
+  claw-farm memory:rebuild [name]          Rebuild processed memory from raw data
+  claw-farm cloud:compose [outfile]        Generate unified cloud deploy compose
+
+Runtimes:
+  openclaw       Full-featured agent runtime (Node.js, ~1.5GB/instance, default)
+  picoclaw       Lightweight Go runtime (~20MB/instance, 75x lighter)
+
+Proxy modes (--proxy-mode):
+  per-instance   Each instance gets its own api-proxy (default for openclaw)
+  shared         All instances share one api-proxy (default for picoclaw)
 
 Spawn options:
   --context k=v k2=v2   Fill USER.template.md placeholders (space-separated)
@@ -91,6 +102,9 @@ async function main() {
         break;
       case "memory:rebuild":
         await memoryRebuildCommand(commandArgs);
+        break;
+      case "migrate-runtime":
+        await migrateRuntimeCommand(commandArgs);
         break;
       case "cloud:compose":
         await cloudComposeCommand(commandArgs);

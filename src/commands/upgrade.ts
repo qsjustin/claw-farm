@@ -15,6 +15,7 @@ import {
   apiProxyDockerfileTemplate,
   apiProxyRequirementsTemplate,
 } from "../templates/api-proxy.ts";
+import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
 
 async function fileExists(path: string): Promise<boolean> {
   return Bun.file(path).exists();
@@ -184,8 +185,12 @@ export async function upgradeCommand(args: string[]): Promise<void> {
   const config = await readProjectConfig(projectDir);
   const processor = config?.processor ?? entry.processor;
   const llm = config?.llm ?? "gemini";
+  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
+  const runtime = getRuntime(runtimeType);
+  const rtDir = runtime.runtimeDirName;
 
   console.log(`\n🔄 Upgrading ${projectName} to latest claw-farm templates...`);
+  console.log(`   Runtime: ${runtimeType}`);
   console.log(`   Processor: ${processor}`);
   console.log(`   LLM provider: ${llm}`);
   console.log(`   Port: ${entry.port}`);
@@ -193,29 +198,31 @@ export async function upgradeCommand(args: string[]): Promise<void> {
   console.log(`   Path: ${projectDir}\n`);
 
   if (entry.multiInstance) {
-    return upgradeMultiInstance(args, projectName, entry, projectDir, processor, llm);
+    return upgradeMultiInstance(args, projectName, entry, projectDir, processor, llm, runtimeType);
   }
 
   // --- Single-instance upgrade ---
 
-  // Migrate old directory layout if needed
-  await migrateSingleInstanceLayout(projectDir);
+  // Migrate old directory layout if needed (OpenClaw only)
+  if (runtimeType === "openclaw") {
+    await migrateSingleInstanceLayout(projectDir);
+  }
 
-  await mkdir(join(projectDir, "openclaw", "workspace", "skills"), { recursive: true });
+  await mkdir(join(projectDir, rtDir, "workspace", "skills"), { recursive: true });
   await mkdir(join(projectDir, "processed"), { recursive: true });
   await mkdir(join(projectDir, "logs"), { recursive: true });
-  await ensureRawDirs(projectDir);
+  await ensureRawDirs(projectDir, runtimeType);
 
   const composeContent =
     processor === "mem0"
       ? mem0ComposeTemplate(projectName, entry.port)
-      : baseComposeTemplate(projectName, entry.port);
+      : runtime.composeTemplate(projectName, entry.port);
   await Bun.write(join(projectDir, "docker-compose.openclaw.yml"), composeContent);
   console.log("✓ Updated docker-compose.openclaw.yml");
 
-  const configPath = join(projectDir, "openclaw", "openclaw.json");
+  const configPath = join(projectDir, rtDir, runtime.configFileName);
   const forcePolicy = args.includes("--force-policy");
-  const templateConfig = openclawConfigTemplate(projectName, processor, llm);
+  const templateConfig = runtime.configTemplate(projectName, processor, llm);
   let existingConfig: string | null = null;
   try {
     existingConfig = await Bun.file(configPath).text();
@@ -224,24 +231,29 @@ export async function upgradeCommand(args: string[]): Promise<void> {
   }
   if (existingConfig) {
     await Bun.write(configPath + ".backup", existingConfig);
-    await Bun.write(configPath, mergeOpenclawConfig(templateConfig, existingConfig));
-    console.log("✓ Merged openclaw/openclaw.json (user settings preserved, backup → .backup)");
+    await Bun.write(configPath, runtime.mergeConfig(templateConfig, existingConfig));
+    console.log(`✓ Merged ${rtDir}/${runtime.configFileName} (user settings preserved, backup → .backup)`);
   } else {
     await Bun.write(configPath, templateConfig);
-    console.log("✓ Created openclaw/openclaw.json");
+    console.log(`✓ Created ${rtDir}/${runtime.configFileName}`);
   }
 
-  const policyPath = join(projectDir, "openclaw", "policy.yaml");
-  if (forcePolicy) {
-    await Bun.write(policyPath, policyTemplate(projectName));
-    console.log("✓ Overwritten openclaw/policy.yaml (--force-policy)");
-  } else {
-    try {
-      await Bun.file(policyPath).text();
-      console.log("✓ openclaw/policy.yaml already exists — skipped (use --force-policy to overwrite)");
-    } catch {
-      await Bun.write(policyPath, policyTemplate(projectName));
-      console.log("✓ Created openclaw/policy.yaml");
+  // Additional config files (e.g., policy.yaml for openclaw)
+  for (const configFile of runtime.additionalConfigFiles) {
+    const cfgPath = join(projectDir, rtDir, configFile);
+    if (configFile === "policy.yaml") {
+      if (forcePolicy) {
+        await Bun.write(cfgPath, policyTemplate(projectName));
+        console.log(`✓ Overwritten ${rtDir}/${configFile} (--force-policy)`);
+      } else {
+        try {
+          await Bun.file(cfgPath).text();
+          console.log(`✓ ${rtDir}/${configFile} already exists — skipped (use --force-policy to overwrite)`);
+        } catch {
+          await Bun.write(cfgPath, policyTemplate(projectName));
+          console.log(`✓ Created ${rtDir}/${configFile}`);
+        }
+      }
     }
   }
 
@@ -269,14 +281,20 @@ async function upgradeMultiInstance(
   projectDir: string,
   processor: "builtin" | "mem0",
   llm: "gemini" | "anthropic" | "openai-compat" = "gemini",
+  runtimeType: RuntimeType = "openclaw",
 ): Promise<void> {
+  const runtime = getRuntime(runtimeType);
+  const rtDir = runtime.runtimeDirName;
+  const config = await readProjectConfig(projectDir);
+  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+
   // Upgrade shared template files
   const tmplDir = templateDir(projectDir);
   await ensureTemplateDirs(projectDir);
 
-  const configPath = join(tmplDir, "config", "openclaw.json");
+  const configPath = join(tmplDir, "config", runtime.configFileName);
   const forcePolicy = args.includes("--force-policy");
-  const templateConfig = openclawConfigTemplate(projectName, processor, llm);
+  const templateConfig = runtime.configTemplate(projectName, processor, llm);
   let existingConfig: string | null = null;
   try {
     existingConfig = await Bun.file(configPath).text();
@@ -285,24 +303,29 @@ async function upgradeMultiInstance(
   }
   if (existingConfig) {
     await Bun.write(configPath + ".backup", existingConfig);
-    await Bun.write(configPath, mergeOpenclawConfig(templateConfig, existingConfig));
-    console.log("✓ Merged template/config/openclaw.json (user settings preserved, backup → .backup)");
+    await Bun.write(configPath, runtime.mergeConfig(templateConfig, existingConfig));
+    console.log(`✓ Merged template/config/${runtime.configFileName} (user settings preserved, backup → .backup)`);
   } else {
     await Bun.write(configPath, templateConfig);
-    console.log("✓ Created template/config/openclaw.json");
+    console.log(`✓ Created template/config/${runtime.configFileName}`);
   }
 
-  const policyPath = join(tmplDir, "config", "policy.yaml");
-  if (forcePolicy) {
-    await Bun.write(policyPath, policyTemplate(projectName));
-    console.log("✓ Overwritten template/config/policy.yaml (--force-policy)");
-  } else {
-    try {
-      await Bun.file(policyPath).text();
-      console.log("✓ template/config/policy.yaml already exists — skipped (use --force-policy to overwrite)");
-    } catch {
-      await Bun.write(policyPath, policyTemplate(projectName));
-      console.log("✓ Created template/config/policy.yaml");
+  // Additional config files (e.g., policy.yaml for openclaw)
+  for (const configFile of runtime.additionalConfigFiles) {
+    const cfgPath = join(tmplDir, "config", configFile);
+    if (configFile === "policy.yaml") {
+      if (forcePolicy) {
+        await Bun.write(cfgPath, policyTemplate(projectName));
+        console.log(`✓ Overwritten template/config/${configFile} (--force-policy)`);
+      } else {
+        try {
+          await Bun.file(cfgPath).text();
+          console.log(`✓ template/config/${configFile} already exists — skipped (use --force-policy to overwrite)`);
+        } catch {
+          await Bun.write(cfgPath, policyTemplate(projectName));
+          console.log(`✓ Created template/config/${configFile}`);
+        }
+      }
     }
   }
 
@@ -325,34 +348,45 @@ async function upgradeMultiInstance(
       const inst = instances[userId];
       const instDir = instanceDir(projectDir, userId);
 
-      // Migrate old layout → new layout if needed
-      const migrated = await migrateInstanceLayout(instDir, join(tmplDir, "config"));
-      if (migrated) migratedCount++;
+      // Migrate old layout → new layout if needed (OpenClaw only)
+      if (runtimeType === "openclaw") {
+        const migrated = await migrateInstanceLayout(instDir, join(tmplDir, "config"));
+        if (migrated) migratedCount++;
+      }
 
       // Ensure all required directories exist
-      await ensureInstanceDirs(projectDir, userId);
+      await ensureInstanceDirs(projectDir, userId, runtimeType);
 
       // Merge template config into instance (preserves per-instance customizations)
-      const instConfigPath = join(instDir, "openclaw", "openclaw.json");
-      const tmplConfigContent = await Bun.file(join(tmplDir, "config", "openclaw.json")).text().catch(() => "");
+      const instConfigPath = join(instDir, rtDir, runtime.configFileName);
+      const tmplConfigContent = await Bun.file(join(tmplDir, "config", runtime.configFileName)).text().catch(() => "");
       if (tmplConfigContent) {
         const instConfigContent = await Bun.file(instConfigPath).text().catch(() => "");
         if (instConfigContent) {
-          await Bun.write(instConfigPath, mergeOpenclawConfig(tmplConfigContent, instConfigContent));
+          await Bun.write(instConfigPath, runtime.mergeConfig(tmplConfigContent, instConfigContent));
         } else {
           await Bun.write(instConfigPath, tmplConfigContent);
         }
       }
-      // Policy: only copy if instance doesn't have one yet (preserve per-instance customizations)
-      const instPolicyPath = join(instDir, "openclaw", "policy.yaml");
-      if (!await fileExists(instPolicyPath)) {
-        await copyFile(join(tmplDir, "config", "policy.yaml"), instPolicyPath);
+
+      // Additional config files: only copy if instance doesn't have one yet
+      for (const configFile of runtime.additionalConfigFiles) {
+        const instCfgPath = join(instDir, rtDir, configFile);
+        if (!await fileExists(instCfgPath)) {
+          await copyFile(join(tmplDir, "config", configFile), instCfgPath);
+        }
       }
 
       // Copy shared template files (SOUL.md, AGENTS.md, skills/) into instance workspace
-      await copyTemplateFiles(tmplDir, join(instDir, "openclaw", "workspace"));
+      await copyTemplateFiles(tmplDir, join(instDir, rtDir, "workspace"));
 
-      const composeContent = instanceComposeTemplate(projectName, userId, inst.port);
+      // Regenerate compose
+      let composeContent: string;
+      if (runtimeType === "openclaw") {
+        composeContent = instanceComposeTemplate(projectName, userId, inst.port);
+      } else {
+        composeContent = runtime.instanceComposeTemplate(projectName, userId, inst.port, proxyMode);
+      }
       await Bun.write(join(instDir, "docker-compose.openclaw.yml"), composeContent);
     }
     console.log(`✓ Updated ${instanceIds.length} instance(s) (compose + template files + directories)`);

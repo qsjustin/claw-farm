@@ -15,6 +15,8 @@
 │  $ claw-farm init dog-agent --processor mem0                    │
 │  $ claw-farm init tamagochi --llm anthropic                     │
 │  $ claw-farm init tutor-bot --processor mem0 --llm openai-compat│
+│  $ claw-farm init lite-bot --runtime picoclaw                   │
+│  $ claw-farm init shared-bot --runtime picoclaw --proxy-mode shared│
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                            ▼
@@ -60,7 +62,7 @@
 ```
 my-agent/
 │
-├── .claw-farm.json                 ← Project meta (name, port, processor, llm)
+├── .claw-farm.json                 ← Project meta (name, port, processor, llm, runtime, proxyMode)
 ├── .env.example                    ← LLM_PROVIDER + API keys (per --llm flag)
 ├── docker-compose.openclaw.yml     ← Full stack definition
 │
@@ -471,3 +473,207 @@ my-project (before)                 my-project (after claw-farm init --existing)
 cd /path/to/existing-project
 claw-farm init <name> --existing [--processor mem0] [--llm anthropic]
 ```
+
+## 8. Runtime Abstraction
+
+claw-farm supports multiple agent runtimes through the `AgentRuntime` interface in `src/runtimes/`.
+
+```
+src/
+├── runtimes/
+│   ├── interface.ts        ← AgentRuntime interface definition
+│   ├── openclaw.ts         ← OpenClaw runtime (~1.5GB, full-featured)
+│   ├── picoclaw.ts         ← picoclaw runtime (~20MB, lightweight Go)
+│   └── index.ts            ← Runtime resolver (by name)
+├── commands/
+├── lib/
+├── processors/
+└── templates/
+```
+
+### AgentRuntime Interface
+
+Each runtime implements:
+- **scaffoldProject()** — Generate project files (compose, config, workspace)
+- **scaffoldInstance()** — Generate per-user instance files
+- **getComposeFile()** — Return the compose filename for the runtime
+- **getWorkspacePaths()** — Return runtime-specific paths (config, memory, sessions)
+
+### Runtime Selection
+
+```bash
+claw-farm init my-agent                          # Default: openclaw
+claw-farm init my-agent --runtime openclaw       # Explicit: OpenClaw
+claw-farm init my-agent --runtime picoclaw       # Lightweight: picoclaw
+```
+
+The `runtime` field is stored in `.claw-farm.json`:
+```json
+{
+  "name": "my-agent",
+  "runtime": "picoclaw",
+  "proxyMode": "per-instance",
+  "processor": "builtin",
+  "port": 18789
+}
+```
+
+### When to Use Each Runtime
+
+| | OpenClaw | picoclaw |
+|---|---|---|
+| **Image size** | ~1.5GB | ~20MB (75x lighter) |
+| **Language** | Node.js | Go |
+| **Config** | openclaw.json + policy.yaml | Single config.json |
+| **Memory path** | workspace/MEMORY.md | workspace/memory/MEMORY.md |
+| **Sessions** | sessions/ (.jsonl) | workspace/sessions/ |
+| **Best for** | Full-featured agents, rich plugin ecosystem | Lightweight agents, resource-constrained environments |
+| **Multi-agent** | Per-user isolation (spawn) | Built-in roles (not per-user) |
+
+## 9. proxyMode: Shared vs Per-Instance API Proxy
+
+The `--proxy-mode` flag controls how `api-proxy` is deployed across instances.
+
+```bash
+claw-farm init my-agent --runtime picoclaw --proxy-mode shared
+claw-farm init my-agent --runtime picoclaw --proxy-mode per-instance  # default
+```
+
+### per-instance (default)
+
+Each user instance gets its own api-proxy container. This is the same model as OpenClaw.
+
+```
+instances/alice/  →  alice-agent + alice-api-proxy
+instances/bob/    →  bob-agent   + bob-api-proxy
+```
+
+- Full secret isolation per user (each proxy can have different keys)
+- Higher resource usage (one proxy per instance)
+
+### shared
+
+All user instances share a single api-proxy container at the project level.
+
+```
+api-proxy/        →  shared-api-proxy (one for all)
+instances/alice/  →  alice-agent ──→ shared-api-proxy
+instances/bob/    →  bob-agent   ──→ shared-api-proxy
+```
+
+- Lower resource usage (one proxy total)
+- All instances use the same API key
+- Cannot isolate per-user secrets (see docs/SECURITY.md)
+
+## 10. picoclaw File Structure
+
+### Single-Instance (picoclaw)
+
+```
+my-agent/
+│
+├── .claw-farm.json                 ← runtime: "picoclaw", proxyMode: "per-instance"
+├── .env.example                    ← LLM_PROVIDER + API keys
+├── docker-compose.picoclaw.yml     ← picoclaw stack definition
+│
+├── api-proxy/                      ← Security sidecar (same as OpenClaw)
+│   ├── api_proxy.py
+│   ├── Dockerfile
+│   └── requirements.txt
+│
+├── picoclaw/                       ← Mounted into picoclaw container
+│   ├── config.json                 ← Single config file (LLM + tools + policies)
+│   └── workspace/
+│       ├── SOUL.md                     Personality & behavior rules
+│       ├── memory/
+│       │   └── MEMORY.md               Accumulated via conversations
+│       ├── sessions/                   Session logs
+│       └── skills/                     Custom skills
+│
+├── raw/                            ← Workspace snapshots
+│   └── workspace-snapshots/
+├── processed/                      ← Layer 1: disposable, rebuildable
+└── logs/                           ← API proxy audit logs
+```
+
+### Multi-Instance (picoclaw)
+
+```
+dog-agent/
+├── .claw-farm.json                    ← runtime: "picoclaw", multiInstance: true
+├── api-proxy/                         ← Shared or per-instance (depends on proxyMode)
+│
+├── template/
+│   ├── SOUL.md                            Shared personality
+│   ├── AGENTS.md                          Shared behavior rules
+│   ├── skills/                            Shared skills
+│   ├── USER.template.md                   Per-user placeholders
+│   └── config/
+│       └── config.json                    picoclaw config (single file)
+│
+└── instances/
+    ├── alice/
+    │   ├── docker-compose.picoclaw.yml
+    │   ├── picoclaw/
+    │   │   ├── config.json                    Copied from template/config/
+    │   │   └── workspace/
+    │   │       ├── USER.md                    Alice's context
+    │   │       ├── memory/
+    │   │       │   └── MEMORY.md              Alice's memory
+    │   │       └── sessions/                  Alice's sessions
+    │   ├── raw/workspace-snapshots/
+    │   └── processed/
+    │
+    └── bob/
+        └── ...                                Same structure as alice
+```
+
+## 11. picoclaw Container Topology
+
+### Local Development (picoclaw, per-instance proxy)
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    Docker                             │
+│                                                      │
+│   ┌─ proxy-net ──────────────────────────────┐       │
+│   │                                           │       │
+│   │  ┌──────────────┐    ┌──────────────────┐│       │
+│   │  │  api-proxy   │    │ picoclaw-gateway ││       │
+│   │  │              │◄───│                  ││       │
+│   │  │ Holds API    │    │ ~20MB Go binary  ││       │
+│   │  │ keys         │    │ NO API keys      ││       │
+│   │  │ :8080        │    │ :18789 → host    ││       │
+│   │  └──────┬───────┘    └──────────────────┘│       │
+│   └─────────┼────────────────────────────────┘       │
+│             ▼                                        │
+│     LLM API endpoint                                 │
+└──────────────────────────────────────────────────────┘
+      │
+      ▼
+  localhost:18789 ──→ Agent interface
+```
+
+### Local Development (picoclaw, shared proxy)
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                         Docker                            │
+│                                                          │
+│   ┌─ proxy-net ──────────────────────────────────┐       │
+│   │                                               │       │
+│   │  ┌──────────────┐                             │       │
+│   │  │  api-proxy   │  (shared, one for all)      │       │
+│   │  │  :8080       │◄──────┬──────────┐          │       │
+│   │  └──────┬───────┘       │          │          │       │
+│   │         │          ┌────┴───┐ ┌────┴───┐      │       │
+│   │         │          │ alice  │ │  bob   │      │       │
+│   │         │          │ :18790 │ │ :18791 │      │       │
+│   │         │          └────────┘ └────────┘      │       │
+│   └─────────┼────────────────────────────────────┘       │
+│             ▼                                            │
+│     LLM API endpoint                                     │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Note on picoclaw multi-agent:** picoclaw has a built-in multi-agent feature for defining agent roles (e.g., researcher, writer, reviewer) within a single instance. This is different from claw-farm's multi-instance model which provides per-user isolation. picoclaw's roles run inside one container; claw-farm's instances are separate containers with separate data.

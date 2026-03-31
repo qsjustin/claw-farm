@@ -3,9 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { addProject, loadRegistry, saveRegistry, findPositionalArg } from "../lib/registry.ts";
 import { writeProjectConfig, envExampleTemplate, type LlmProvider } from "../lib/config.ts";
 import { ensureRawDirs } from "../lib/raw-collector.ts";
-import { baseComposeTemplate } from "../templates/docker-compose.yml.ts";
 import { mem0ComposeTemplate } from "../templates/docker-compose.mem0.yml.ts";
-import { openclawConfigTemplate } from "../templates/openclaw.json.ts";
 import { soulTemplate } from "../templates/SOUL.md.ts";
 import { policyTemplate } from "../templates/policy.yaml.ts";
 import {
@@ -17,11 +15,12 @@ import { builtinProcessor } from "../processors/builtin.ts";
 import { mem0Processor } from "../processors/mem0.ts";
 import { ensureTemplateDirs, templateDir } from "../lib/instance.ts";
 import { userTemplateContent } from "../templates/USER.template.md.ts";
+import { getRuntime, type RuntimeType } from "../runtimes/index.ts";
 
 export async function initCommand(args: string[]): Promise<void> {
   const name = findPositionalArg(args);
   if (!name) {
-    console.error("Usage: claw-farm init <name> [--processor mem0] [--existing] [--multi]");
+    console.error("Usage: claw-farm init <name> [--runtime openclaw|picoclaw] [--processor mem0] [--existing] [--multi]");
     process.exit(1);
   }
 
@@ -57,55 +56,103 @@ export async function initCommand(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // Parse --runtime flag
+  const VALID_RUNTIMES = ["openclaw", "picoclaw"] as const;
+  const runtimeIdx = args.indexOf("--runtime");
+  const runtimeArg = runtimeIdx !== -1 ? args[runtimeIdx + 1] : undefined;
+  if (runtimeIdx !== -1 && (!runtimeArg || runtimeArg.startsWith("-"))) {
+    console.error(`Missing value for --runtime. Must be one of: ${VALID_RUNTIMES.join(", ")}`);
+    process.exit(1);
+  }
+  const runtimeType: RuntimeType = (runtimeArg as RuntimeType) ?? "openclaw";
+  if (runtimeIdx !== -1 && !(VALID_RUNTIMES as readonly string[]).includes(runtimeType)) {
+    console.error(`Invalid runtime: "${runtimeType}". Must be one of: ${VALID_RUNTIMES.join(", ")}`);
+    process.exit(1);
+  }
+
+  const runtime = getRuntime(runtimeType);
+
+  // Parse --proxy-mode flag
+  const VALID_PROXY_MODES = ["shared", "per-instance"] as const;
+  const proxyModeIdx = args.indexOf("--proxy-mode");
+  const proxyModeArg = proxyModeIdx !== -1 ? args[proxyModeIdx + 1] : undefined;
+  if (proxyModeIdx !== -1 && (!proxyModeArg || proxyModeArg.startsWith("-"))) {
+    console.error(`Missing value for --proxy-mode. Must be one of: ${VALID_PROXY_MODES.join(", ")}`);
+    process.exit(1);
+  }
+  const proxyMode = (proxyModeArg as "shared" | "per-instance") ?? runtime.defaultProxyMode;
+  if (proxyModeIdx !== -1 && !(VALID_PROXY_MODES as readonly string[]).includes(proxyMode)) {
+    console.error(`Invalid proxy mode: "${proxyMode}". Must be one of: ${VALID_PROXY_MODES.join(", ")}`);
+    process.exit(1);
+  }
+
+  // Block unsupported combinations
+  if (processor === "mem0" && runtimeType === "picoclaw") {
+    console.error("Error: mem0 processor is not yet supported with picoclaw runtime.");
+    console.error("Use --processor builtin (default) with --runtime picoclaw.");
+    process.exit(1);
+  }
+
   const existing = args.includes("--existing");
   const multi = args.includes("--multi");
   const projectDir = process.cwd();
 
   if (existing) {
-    return registerExisting(name, projectDir, processor, llm);
+    return registerExisting(name, projectDir, processor, llm, runtimeType, proxyMode);
   }
 
   if (multi) {
-    return initMulti(name, projectDir, processor, llm);
+    return initMulti(name, projectDir, processor, llm, runtimeType, proxyMode);
   }
 
   console.log(`\n🐾 Initializing claw-farm project: ${name}`);
+  console.log(`   Runtime: ${runtimeType}`);
   console.log(`   Processor: ${processor}`);
   console.log(`   LLM provider: ${llm}`);
   console.log(`   Directory: ${projectDir}\n`);
 
   // Register in global registry
-  const entry = await addProject(name, projectDir, processor);
+  const entry = await addProject(name, projectDir, processor, runtimeType);
   console.log(`✓ Registered in global registry (port: ${entry.port})`);
 
   // Create directory structure
-  await mkdir(join(projectDir, "openclaw", "workspace", "skills"), { recursive: true });
+  const rtDir = runtime.runtimeDirName;
+  await mkdir(join(projectDir, rtDir, "workspace", "skills"), { recursive: true });
+  if (runtimeType === "picoclaw") {
+    // picoclaw stores sessions and state under workspace/
+    await mkdir(join(projectDir, rtDir, "workspace", "sessions"), { recursive: true });
+    await mkdir(join(projectDir, rtDir, "workspace", "state"), { recursive: true });
+  }
   await mkdir(join(projectDir, "processed"), { recursive: true });
   await mkdir(join(projectDir, "logs"), { recursive: true });
-  await ensureRawDirs(projectDir);
-  console.log("✓ Created openclaw/ directory structure");
+  await ensureRawDirs(projectDir, runtimeType);
+  console.log(`✓ Created ${rtDir}/ directory structure`);
 
   // Write docker-compose
   const composeContent =
     processor === "mem0"
       ? mem0ComposeTemplate(name, entry.port)
-      : baseComposeTemplate(name, entry.port);
+      : runtime.composeTemplate(name, entry.port);
   await Bun.write(join(projectDir, "docker-compose.openclaw.yml"), composeContent);
   console.log("✓ Generated docker-compose.openclaw.yml");
 
-  // Write OpenClaw config
+  // Write runtime config
   await Bun.write(
-    join(projectDir, "openclaw", "openclaw.json"),
-    openclawConfigTemplate(name, processor, llm),
+    join(projectDir, rtDir, runtime.configFileName),
+    runtime.configTemplate(name, processor, llm),
   );
-  console.log("✓ Generated openclaw/openclaw.json");
+  console.log(`✓ Generated ${rtDir}/${runtime.configFileName}`);
 
-  // Write policy.yaml (tool access restrictions)
-  await Bun.write(
-    join(projectDir, "openclaw", "policy.yaml"),
-    policyTemplate(name),
-  );
-  console.log("✓ Generated openclaw/policy.yaml");
+  // Write additional config files (e.g., policy.yaml for openclaw)
+  for (const configFile of runtime.additionalConfigFiles) {
+    if (configFile === "policy.yaml") {
+      await Bun.write(
+        join(projectDir, rtDir, configFile),
+        policyTemplate(name),
+      );
+      console.log(`✓ Generated ${rtDir}/${configFile}`);
+    }
+  }
 
   // Write API Proxy sidecar (key isolation + PII filter)
   const proxyDir = join(projectDir, "api-proxy");
@@ -117,17 +164,21 @@ export async function initCommand(args: string[]): Promise<void> {
 
   // Write SOUL.md
   await Bun.write(
-    join(projectDir, "openclaw", "workspace", "SOUL.md"),
+    join(projectDir, rtDir, "workspace", "SOUL.md"),
     soulTemplate(name),
   );
-  console.log("✓ Generated openclaw/workspace/SOUL.md");
+  console.log(`✓ Generated ${rtDir}/workspace/SOUL.md`);
 
-  // Write initial MEMORY.md
+  // Write initial MEMORY.md (picoclaw uses workspace/memory/MEMORY.md)
+  const memoryDir = runtimeType === "picoclaw"
+    ? join(projectDir, rtDir, "workspace", "memory")
+    : join(projectDir, rtDir, "workspace");
+  await mkdir(memoryDir, { recursive: true });
   await Bun.write(
-    join(projectDir, "openclaw", "workspace", "MEMORY.md"),
+    join(memoryDir, "MEMORY.md"),
     `# ${name} — Memory\n\n> This file is updated automatically as the agent learns from conversations.\n`,
   );
-  console.log("✓ Generated openclaw/workspace/MEMORY.md");
+  console.log(`✓ Generated MEMORY.md`);
 
   // Write project config
   await writeProjectConfig(projectDir, {
@@ -136,6 +187,7 @@ export async function initCommand(args: string[]): Promise<void> {
     port: entry.port,
     createdAt: entry.createdAt,
     llm,
+    ...(runtimeType !== "openclaw" ? { runtime: runtimeType } : {}),
   });
   console.log("✓ Generated .claw-farm.json");
 
@@ -166,16 +218,21 @@ async function registerExisting(
   projectDir: string,
   processor: "builtin" | "mem0",
   llm: LlmProvider = "gemini",
+  runtimeType: RuntimeType = "openclaw",
+  proxyMode: "shared" | "per-instance" = "per-instance",
 ): Promise<void> {
+  const runtime = getRuntime(runtimeType);
+  const rtDir = runtime.runtimeDirName;
+
   console.log(`\n🐾 Registering existing project: ${name}`);
 
-  const entry = await addProject(name, projectDir, processor);
+  const entry = await addProject(name, projectDir, processor, runtimeType);
 
   // Ensure directories exist
-  await mkdir(join(projectDir, "openclaw", "workspace"), { recursive: true });
+  await mkdir(join(projectDir, rtDir, "workspace"), { recursive: true });
   await mkdir(join(projectDir, "processed"), { recursive: true });
   await mkdir(join(projectDir, "logs"), { recursive: true });
-  await ensureRawDirs(projectDir);
+  await ensureRawDirs(projectDir, runtimeType);
   console.log("✓ Created directories");
 
   // Generate docker-compose.openclaw.yml (always — this is what claw-farm up uses)
@@ -183,31 +240,35 @@ async function registerExisting(
   const composeContent =
     processor === "mem0"
       ? mem0ComposeTemplate(name, entry.port)
-      : baseComposeTemplate(name, entry.port);
+      : runtime.composeTemplate(name, entry.port);
   await Bun.write(composePath, composeContent);
   console.log("✓ Generated docker-compose.openclaw.yml");
 
-  // Backup and update openclaw.json to use api-proxy
-  const configPath = join(projectDir, "openclaw", "openclaw.json");
+  // Backup and update config to use api-proxy
+  const configPath = join(projectDir, rtDir, runtime.configFileName);
   try {
-    const existing = await Bun.file(configPath).text();
+    const existingContent = await Bun.file(configPath).text();
     const backupPath = configPath + ".backup";
-    await Bun.write(backupPath, existing);
-    console.log(`✓ Backed up existing openclaw.json → openclaw.json.backup`);
+    await Bun.write(backupPath, existingContent);
+    console.log(`✓ Backed up existing ${runtime.configFileName} → ${runtime.configFileName}.backup`);
   } catch {
     // No existing config — that's fine
   }
-  await Bun.write(configPath, openclawConfigTemplate(name, processor, llm));
-  console.log("✓ Generated openclaw/openclaw.json (routes through api-proxy)");
+  await Bun.write(configPath, runtime.configTemplate(name, processor, llm));
+  console.log(`✓ Generated ${rtDir}/${runtime.configFileName} (routes through api-proxy)`);
 
-  // Add policy.yaml if missing
-  const policyPath = join(projectDir, "openclaw", "policy.yaml");
-  try {
-    await Bun.file(policyPath).text();
-    console.log("✓ policy.yaml already exists — skipped");
-  } catch {
-    await Bun.write(policyPath, policyTemplate(name));
-    console.log("✓ Generated openclaw/policy.yaml");
+  // Add additional config files if missing
+  for (const configFile of runtime.additionalConfigFiles) {
+    const cfgPath = join(projectDir, rtDir, configFile);
+    try {
+      await Bun.file(cfgPath).text();
+      console.log(`✓ ${configFile} already exists — skipped`);
+    } catch {
+      if (configFile === "policy.yaml") {
+        await Bun.write(cfgPath, policyTemplate(name));
+      }
+      console.log(`✓ Generated ${rtDir}/${configFile}`);
+    }
   }
 
   // Add api-proxy if missing
@@ -255,6 +316,7 @@ async function registerExisting(
     port: entry.port,
     createdAt: entry.createdAt,
     llm,
+    ...(runtimeType !== "openclaw" ? { runtime: runtimeType } : {}),
   });
 
   console.log(`✓ Registered in global registry (port: ${entry.port})`);
@@ -273,21 +335,29 @@ async function initMulti(
   projectDir: string,
   processor: "builtin" | "mem0",
   llm: LlmProvider = "gemini",
+  runtimeType: RuntimeType = "openclaw",
+  proxyMode: "shared" | "per-instance" = "per-instance",
 ): Promise<void> {
+  const runtime = getRuntime(runtimeType);
+
   console.log(`\n🐾 Initializing multi-instance project: ${name}`);
+  console.log(`   Runtime: ${runtimeType}`);
   console.log(`   Processor: ${processor}`);
   console.log(`   LLM provider: ${llm}`);
   console.log(`   Mode: multi-instance`);
   console.log(`   Directory: ${projectDir}\n`);
 
   // Register in global registry (with multiInstance flag)
-  const entry = await addProject(name, projectDir, processor);
+  const entry = await addProject(name, projectDir, processor, runtimeType);
 
   // Set multiInstance in registry
   const { loadRegistry: loadReg, saveRegistry: saveReg } = await import("../lib/registry.ts");
   const reg = await loadReg();
   reg.projects[name].multiInstance = true;
   reg.projects[name].instances = {};
+  if (runtimeType !== "openclaw") {
+    reg.projects[name].runtime = runtimeType;
+  }
   await saveReg(reg);
   console.log(`✓ Registered in global registry (port: ${entry.port}, multi-instance)`);
 
@@ -309,16 +379,21 @@ async function initMulti(
 
   // Write config files
   await Bun.write(
-    join(tmplDir, "config", "openclaw.json"),
-    openclawConfigTemplate(name, processor, llm),
+    join(tmplDir, "config", runtime.configFileName),
+    runtime.configTemplate(name, processor, llm),
   );
-  console.log("✓ Generated template/config/openclaw.json");
+  console.log(`✓ Generated template/config/${runtime.configFileName}`);
 
-  await Bun.write(
-    join(tmplDir, "config", "policy.yaml"),
-    policyTemplate(name),
-  );
-  console.log("✓ Generated template/config/policy.yaml");
+  // Write additional config files
+  for (const configFile of runtime.additionalConfigFiles) {
+    if (configFile === "policy.yaml") {
+      await Bun.write(
+        join(tmplDir, "config", configFile),
+        policyTemplate(name),
+      );
+      console.log(`✓ Generated template/config/${configFile}`);
+    }
+  }
 
   // Write API Proxy sidecar
   const proxyDir = join(projectDir, "api-proxy");
@@ -339,6 +414,13 @@ async function initMulti(
   );
   console.log("✓ Generated .gitignore");
 
+  // Write shared proxy compose if proxyMode=shared
+  if (proxyMode === "shared" && runtime.proxyComposeTemplate) {
+    const proxyComposePath = join(projectDir, "docker-compose.proxy.yml");
+    await Bun.write(proxyComposePath, runtime.proxyComposeTemplate(name));
+    console.log("✓ Generated docker-compose.proxy.yml (shared api-proxy)");
+  }
+
   // Write project config
   await writeProjectConfig(projectDir, {
     name,
@@ -347,6 +429,8 @@ async function initMulti(
     createdAt: entry.createdAt,
     multiInstance: true,
     llm,
+    ...(runtimeType !== "openclaw" ? { runtime: runtimeType } : {}),
+    ...(proxyMode !== "per-instance" ? { proxyMode } : {}),
   });
   console.log("✓ Generated .claw-farm.json");
 

@@ -1,5 +1,7 @@
 import { join } from "node:path";
 
+import type { RuntimeType, ProxyMode } from "../runtimes/interface.ts";
+
 export type LlmProvider = "gemini" | "anthropic" | "openai-compat";
 
 export interface ClawFarmConfig {
@@ -9,6 +11,8 @@ export interface ClawFarmConfig {
   createdAt: string;
   multiInstance?: boolean;
   llm?: LlmProvider;
+  runtime?: RuntimeType;
+  proxyMode?: ProxyMode;
 }
 
 /**

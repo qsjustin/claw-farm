@@ -21,7 +21,8 @@ export async function migrateToMulti(
   const config = await readProjectConfig(projectDir);
   if (config?.multiInstance) return;
 
-  const wsDir = join(projectDir, "openclaw", "workspace");
+  const runtimeDirName = config?.runtime === "picoclaw" ? "picoclaw" : "openclaw";
+  const wsDir = join(projectDir, runtimeDirName, "workspace");
   const tmplDir = templateDir(projectDir);
 
   // Step 1: Create template/ from existing shared files
@@ -50,8 +51,8 @@ export async function migrateToMulti(
   // Copy config files → template/config/ (check both old and new layout)
   await mkdir(join(tmplDir, "config"), { recursive: true });
   // New layout: openclaw/openclaw.json
-  await copyIfExists(join(projectDir, "openclaw", "openclaw.json"), join(tmplDir, "config", "openclaw.json"));
-  await copyIfExists(join(projectDir, "openclaw", "policy.yaml"), join(tmplDir, "config", "policy.yaml"));
+  await copyIfExists(join(projectDir, runtimeDirName, config?.runtime === "picoclaw" ? "config.json" : "openclaw.json"), join(tmplDir, "config", config?.runtime === "picoclaw" ? "config.json" : "openclaw.json"));
+  await copyIfExists(join(projectDir, runtimeDirName, "policy.yaml"), join(tmplDir, "config", "policy.yaml"));
   // Old layout fallback: openclaw/config/
   if (!await fileExists(join(tmplDir, "config", "openclaw.json"))) {
     await copyIfExists(join(projectDir, "openclaw", "config", "openclaw.json"), join(tmplDir, "config", "openclaw.json"));
@@ -68,42 +69,57 @@ export async function migrateToMulti(
 
   // Step 2: Migrate existing user data to instances/default/
   const defaultInstDir = join(projectDir, "instances", "default");
-  await mkdir(join(defaultInstDir, "openclaw", "workspace", "memory"), { recursive: true, mode: 0o755 });
-  await mkdir(join(defaultInstDir, "openclaw", "sessions"), { recursive: true, mode: 0o755 });
-  await mkdir(join(defaultInstDir, "openclaw", "logs"), { recursive: true, mode: 0o755 });
+  if (runtimeDirName === "picoclaw") {
+    await mkdir(join(defaultInstDir, "picoclaw", "workspace", "memory"), { recursive: true, mode: 0o755 });
+    await mkdir(join(defaultInstDir, "picoclaw", "workspace", "sessions"), { recursive: true, mode: 0o755 });
+    await mkdir(join(defaultInstDir, "picoclaw", "workspace", "state"), { recursive: true, mode: 0o755 });
+  } else {
+    await mkdir(join(defaultInstDir, "openclaw", "workspace", "memory"), { recursive: true, mode: 0o755 });
+    await mkdir(join(defaultInstDir, "openclaw", "sessions"), { recursive: true, mode: 0o755 });
+    await mkdir(join(defaultInstDir, "openclaw", "logs"), { recursive: true, mode: 0o755 });
+  }
   await mkdir(join(defaultInstDir, "raw", "workspace-snapshots"), { recursive: true, mode: 0o755 });
   await mkdir(join(defaultInstDir, "processed"), { recursive: true, mode: 0o755 });
 
   // Copy config files to instance
-  await copyIfExists(join(tmplDir, "config", "openclaw.json"), join(defaultInstDir, "openclaw", "openclaw.json"));
-  await copyIfExists(join(tmplDir, "config", "policy.yaml"), join(defaultInstDir, "openclaw", "policy.yaml"));
+  const configFileName = runtimeDirName === "picoclaw" ? "config.json" : "openclaw.json";
+  await copyIfExists(join(tmplDir, "config", configFileName), join(defaultInstDir, runtimeDirName, configFileName));
+  if (runtimeDirName === "openclaw") {
+    await copyIfExists(join(tmplDir, "config", "policy.yaml"), join(defaultInstDir, runtimeDirName, "policy.yaml"));
+  }
 
   // Move MEMORY.md to default instance
-  await copyIfExists(join(wsDir, "MEMORY.md"), join(defaultInstDir, "openclaw", "workspace", "MEMORY.md"));
+  const memoryDest = runtimeDirName === "picoclaw"
+    ? join(defaultInstDir, runtimeDirName, "workspace", "memory", "MEMORY.md")
+    : join(defaultInstDir, runtimeDirName, "workspace", "MEMORY.md");
+  await copyIfExists(join(wsDir, "MEMORY.md"), memoryDest);
+  // picoclaw stores memory under workspace/memory/
+  if (runtimeDirName === "picoclaw") {
+    await copyIfExists(join(wsDir, "memory", "MEMORY.md"), memoryDest);
+  }
 
   // Create a USER.md for the default instance
-  if (!await fileExists(join(defaultInstDir, "openclaw", "workspace", "USER.md"))) {
+  if (!await fileExists(join(defaultInstDir, runtimeDirName, "workspace", "USER.md"))) {
     await Bun.write(
-      join(defaultInstDir, "openclaw", "workspace", "USER.md"),
+      join(defaultInstDir, runtimeDirName, "workspace", "USER.md"),
       `# ${projectName} — User Profile (default)\n\n- User ID: default\n- Migrated from single-instance mode\n`,
     );
   }
 
-  // Copy raw session logs (check both old and new layout)
-  for (const sessionsDir of [
-    join(projectDir, "openclaw", "sessions"),
-    join(projectDir, "openclaw", "raw", "sessions"),
-  ]) {
+  // Copy raw session logs (check runtime-specific locations)
+  const sessionsSrc = runtimeDirName === "picoclaw"
+    ? [join(projectDir, runtimeDirName, "workspace", "sessions")]
+    : [join(projectDir, "openclaw", "sessions"), join(projectDir, "openclaw", "raw", "sessions")];
+  const sessionsDest = runtimeDirName === "picoclaw"
+    ? join(defaultInstDir, runtimeDirName, "workspace", "sessions")
+    : join(defaultInstDir, "openclaw", "sessions");
+  for (const sessionsDir of sessionsSrc) {
     try {
       const files = await readdir(sessionsDir);
       for (const file of files) {
-        await cp(
-          join(sessionsDir, file),
-          join(defaultInstDir, "openclaw", "sessions", file),
-          { recursive: true },
-        );
+        await cp(join(sessionsDir, file), join(sessionsDest, file), { recursive: true });
       }
-      break; // Found sessions, stop checking
+      break;
     } catch {
       // Try next location
     }

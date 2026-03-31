@@ -22,6 +22,8 @@ import { instanceComposeTemplate } from "../templates/docker-compose.instance.ym
 import { fillUserTemplate } from "../templates/USER.template.md.ts";
 import { runCompose } from "./compose.ts";
 import { migrateToMulti } from "./migrate.ts";
+import { getRuntime } from "../runtimes/index.ts";
+import type { RuntimeType, ProxyMode } from "../runtimes/interface.ts";
 
 export type { InstanceEntry };
 
@@ -40,6 +42,11 @@ export async function spawn(options: {
   const projectDir = entry.path;
   const config = await readProjectConfig(projectDir);
 
+  // Determine runtime
+  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
+  const runtime = getRuntime(runtimeType);
+  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+
   // Auto-migrate if needed
   if (!entry.multiInstance && !config?.multiInstance) {
     await migrateToMulti(projectName, projectDir);
@@ -50,14 +57,25 @@ export async function spawn(options: {
 
   // From here, if anything fails, we must roll back the registry entry
   try {
-    // Create instance dirs
-    const instDir = await ensureInstanceDirs(projectDir, userId);
+    // Create instance dirs (runtime-aware)
+    const instDir = await ensureInstanceDirs(projectDir, userId, runtimeType);
+    const rtDir = runtime.runtimeDirName;
 
     // Copy config files from template to instance
     const tmplDir = templateDir(projectDir);
-    for (const configFile of ["openclaw.json", "policy.yaml"]) {
-      const src = join(tmplDir, "config", configFile);
-      const dest = join(instDir, "openclaw", configFile);
+
+    // Copy main config file
+    const configSrc = join(tmplDir, "config", runtime.configFileName);
+    const configDest = join(instDir, rtDir, runtime.configFileName);
+    const configFile = Bun.file(configSrc);
+    if (await configFile.exists()) {
+      await Bun.write(configDest, await configFile.arrayBuffer());
+    }
+
+    // Copy additional config files (e.g., policy.yaml for openclaw)
+    for (const additionalFile of runtime.additionalConfigFiles) {
+      const src = join(tmplDir, "config", additionalFile);
+      const dest = join(instDir, rtDir, additionalFile);
       const file = Bun.file(src);
       if (await file.exists()) {
         await Bun.write(dest, await file.arrayBuffer());
@@ -65,14 +83,12 @@ export async function spawn(options: {
     }
 
     // Copy shared template files (SOUL.md, AGENTS.md, skills/) into instance workspace
-    // Copied instead of overlay-mounted for Docker Desktop compatibility
-    await copyTemplateFiles(tmplDir, join(instDir, "openclaw", "workspace"));
+    const workspaceDir = join(instDir, rtDir, "workspace");
+    await copyTemplateFiles(tmplDir, workspaceDir);
 
     // Fill USER.md — only write if file doesn't already exist (preserve on re-spawn with --keep-data)
-    // OpenClaw auto-loads USER.md into the system prompt (CONTEXT.md is NOT auto-loaded)
-    const userPath = join(instDir, "openclaw", "workspace", "USER.md");
+    const userPath = join(instDir, rtDir, "workspace", "USER.md");
     if (!await fileExists(userPath)) {
-      const tmplDir = templateDir(projectDir);
       let userContent: string;
       try {
         const template = await Bun.file(join(tmplDir, "USER.template.md")).text();
@@ -90,7 +106,10 @@ export async function spawn(options: {
     }
 
     // Initial MEMORY.md — only write if file doesn't already exist
-    const memoryPath = join(instDir, "openclaw", "workspace", "MEMORY.md");
+    // picoclaw uses workspace/memory/MEMORY.md, openclaw uses workspace/MEMORY.md
+    const memoryPath = runtimeType === "picoclaw"
+      ? join(instDir, rtDir, "workspace", "memory", "MEMORY.md")
+      : join(instDir, rtDir, "workspace", "MEMORY.md");
     if (!await fileExists(memoryPath)) {
       await Bun.write(
         memoryPath,
@@ -99,15 +118,47 @@ export async function spawn(options: {
     }
 
     // Write compose (always regenerate)
-    const composeContent = instanceComposeTemplate(projectName, userId, port);
+    let composeContent: string;
+    if (runtimeType === "openclaw") {
+      // OpenClaw uses its own instance compose template (always per-instance proxy)
+      composeContent = instanceComposeTemplate(projectName, userId, port);
+    } else {
+      composeContent = runtime.instanceComposeTemplate(projectName, userId, port, proxyMode);
+    }
     const composePath = join(instDir, "docker-compose.openclaw.yml");
     await Bun.write(composePath, composeContent);
 
     // Start if requested
     if (autoStart) {
+      // Ensure shared proxy is running (generates compose if needed, starts it)
+      if (proxyMode === "shared" && runtimeType !== "openclaw") {
+        const proxyComposePath = join(projectDir, "docker-compose.proxy.yml");
+        try {
+          await Bun.file(proxyComposePath).text();
+        } catch {
+          // Generate proxy compose if missing
+          if (runtime.proxyComposeTemplate) {
+            await Bun.write(proxyComposePath, runtime.proxyComposeTemplate(projectName));
+          }
+        }
+        await runCompose(projectDir, "up", {
+          composePath: proxyComposePath,
+          projectName: `${projectName}-proxy`,
+        });
+      }
+
+      // For shared proxy mode: after compose up, connect the shared api-proxy
+      // container to this instance's isolated network (hub-and-spoke topology).
+      // Docker Compose v2 names networks as: {project}_{network}
+      const composeProject = `${projectName}-${userId}`;
+      const connectContainer = (proxyMode === "shared" && runtimeType !== "openclaw")
+        ? { container: `${projectName}-api-proxy`, network: `${composeProject}_instance-net` }
+        : undefined;
+
       await runCompose(projectDir, "up", {
         composePath,
-        projectName: `${projectName}-${userId}`,
+        projectName: composeProject,
+        connectContainer,
       });
     }
 
@@ -141,10 +192,22 @@ export async function despawn(
   // Stop containers first
   const instDir = instanceDir(projectDir, userId);
   const composePath = join(instDir, "docker-compose.openclaw.yml");
+
+  // Determine if shared proxy mode — need to disconnect api-proxy from instance network
+  const config = await readProjectConfig(projectDir);
+  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
+  const runtime = getRuntime(runtimeType);
+  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+  const composeProject = `${projectName}-${userId}`;
+  const connectContainer = (proxyMode === "shared" && runtimeType !== "openclaw")
+    ? { container: `${projectName}-api-proxy`, network: `${composeProject}_instance-net` }
+    : undefined;
+
   try {
     await runCompose(projectDir, "down", {
       composePath,
-      projectName: `${projectName}-${userId}`,
+      projectName: composeProject,
+      connectContainer,
     });
   } catch (err) {
     console.warn(`⚠ Could not stop containers: ${(err as Error).message}`);
@@ -175,10 +238,14 @@ async function fileExists(path: string): Promise<boolean> {
  * Copy shared template files (SOUL.md, AGENTS.md, skills/) into instance workspace.
  * Always overwrites — template changes should propagate to all instances.
  */
-export async function copyTemplateFiles(tmplDir: string, workspaceDir: string): Promise<void> {
+export async function copyTemplateFiles(
+  tmplDir: string,
+  workspaceDir: string,
+  sharedFiles: string[] = ["SOUL.md", "AGENTS.md"],
+): Promise<void> {
   await mkdir(workspaceDir, { recursive: true });
   // Copy individual shared files
-  for (const file of ["SOUL.md", "AGENTS.md"]) {
+  for (const file of sharedFiles) {
     const src = Bun.file(join(tmplDir, file));
     if (await src.exists()) {
       await Bun.write(join(workspaceDir, file), await src.arrayBuffer());

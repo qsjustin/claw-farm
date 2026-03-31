@@ -199,3 +199,37 @@ openclaw security audit --json       # Machine-readable output
 2. Examine session transcripts
 3. Check config change history
 4. Re-run `openclaw security audit --deep`
+
+---
+
+## 8. proxyMode Security Implications
+
+claw-farm supports two api-proxy deployment modes via the `--proxy-mode` flag. The choice has direct security implications.
+
+### per-instance (default)
+
+Each user instance has its own api-proxy container.
+
+- **Secret isolation:** Each proxy can hold different API keys. User A's key is never accessible to User B's agent container.
+- **Audit isolation:** Each proxy writes its own audit log. Per-user forensics are straightforward.
+- **Blast radius:** A compromised proxy only exposes one user's credentials.
+- **Same security model as OpenClaw's default architecture.**
+
+### shared
+
+All user instances share a single api-proxy container at the project level.
+
+- **No per-user secret isolation:** All instances use the same API key. If one agent is compromised, the shared key is exposed to all.
+- **Shared audit log:** All users' requests appear in the same log. Per-user attribution requires parsing request metadata.
+- **Larger blast radius:** A compromised shared proxy exposes the key used by all instances.
+- **Use only when:** All instances are trusted equally (e.g., same organization, same trust level) and resource efficiency is more important than per-user key isolation.
+
+### Container Isolation (unchanged by proxyMode)
+
+Regardless of proxyMode, each user instance runs in its own container with:
+- Separate filesystem (read_only, tmpfs)
+- Separate network namespace
+- Separate memory/CPU limits
+- No cross-instance volume sharing
+
+This applies to both OpenClaw and picoclaw runtimes. The picoclaw runtime uses per-user containers in the same isolation pattern as OpenClaw, despite picoclaw's smaller footprint (~20MB vs ~1.5GB).

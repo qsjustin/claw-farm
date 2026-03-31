@@ -44,16 +44,19 @@ export async function cloudComposeCommand(args: string[]): Promise<void> {
     const entry = reg.projects[name];
     const config = await readProjectConfig(entry.path);
     const processor = config?.processor ?? entry.processor;
+    const runtimeType = config?.runtime ?? entry.runtime ?? "openclaw";
     const ports = portRange(entry.port);
     const proxyNet = `${name}-proxy-net`;
     usedNetworks.add(proxyNet);
+    const containerName = runtimeType === "picoclaw" ? `${name}-picoclaw` : `${name}-openclaw`;
+    const gatewayPort = runtimeType === "picoclaw" ? 18790 : ports.openclaw;
     nginxProjects.push({
       name,
-      port: ports.openclaw,
-      containerName: `${name}-openclaw`,
+      port: gatewayPort,
+      containerName,
     });
 
-    // API Proxy: proxy-net (internal, ↔ openclaw) + egress-net (outbound to Gemini)
+    // API Proxy: proxy-net (internal, ↔ agent) + egress-net (outbound to LLM API)
     services += `  ${name}-api-proxy:
     build: ./${name}/api-proxy
     expose:
@@ -93,16 +96,52 @@ export async function cloudComposeCommand(args: string[]): Promise<void> {
 
 `;
 
-    // OpenClaw: proxy-net (internal only) — NO internet, NO port binding
+    // Agent gateway: proxy-net (internal only) — NO internet, NO port binding
     // nginx proxies to it via proxy-net
-    const openclawNetworks = [proxyNet];
-    const openclawDeps = [`      ${name}-api-proxy:\n        condition: service_healthy`];
+    const agentNetworks = [proxyNet];
+    const agentDeps = [`      ${name}-api-proxy:\n        condition: service_healthy`];
     if (processor === "mem0") {
       const frontendNet = `${name}-frontend`;
-      openclawNetworks.push(frontendNet);
-      openclawDeps.push(`      ${name}-mem0:\n        condition: service_healthy`);
+      agentNetworks.push(frontendNet);
+      agentDeps.push(`      ${name}-mem0:\n        condition: service_healthy`);
     }
-    services += `  ${name}-openclaw:
+
+    if (runtimeType === "picoclaw") {
+      services += `  ${name}-picoclaw:
+    image: ghcr.io/sipeed/picoclaw:latest
+    expose:
+      - "18790"
+    volumes:
+      - ./${name}/picoclaw:/root/.picoclaw
+    environment:
+      PICOCLAW_PROXY_URL: http://${name}-api-proxy:8080
+    networks:
+${agentNetworks.map((n) => `      - ${n}`).join("\n")}
+    read_only: true
+    tmpfs:
+      - /tmp:size=50M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 18790 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    depends_on:
+${agentDeps.join("\n")}
+    restart: unless-stopped
+
+`;
+    } else {
+      services += `  ${name}-openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     expose:
       - "18789"
@@ -114,7 +153,7 @@ export async function cloudComposeCommand(args: string[]): Promise<void> {
       OPENCLAW_SANDBOX: 1
       OPENCLAW_AUDIT_LOG: /home/node/.openclaw/logs/audit.jsonl
     networks:
-${openclawNetworks.map((n) => `      - ${n}`).join("\n")}
+${agentNetworks.map((n) => `      - ${n}`).join("\n")}
     read_only: true
     tmpfs:
       - /tmp:size=100M
@@ -131,10 +170,11 @@ ${openclawNetworks.map((n) => `      - ${n}`).join("\n")}
         reservations:
           memory: 256M
     depends_on:
-${openclawDeps.join("\n")}
+${agentDeps.join("\n")}
     restart: unless-stopped
 
 `;
+    }
 
     if (processor === "mem0") {
       const backendNet = `${name}-backend`;
