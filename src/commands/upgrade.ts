@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { mkdir, readdir, cp, rename, rm } from "node:fs/promises";
 import { resolveProjectName, findPositionalArg, type ProjectEntry } from "../lib/registry.ts";
 import { copyTemplateFiles } from "../lib/api.ts";
-import { readProjectConfig, mergeOpenclawConfig, envExampleTemplate } from "../lib/config.ts";
+import { readProjectConfig, resolveRuntimeConfig, mergeOpenclawConfig, envExampleTemplate } from "../lib/config.ts";
 import { ensureRawDirs } from "../lib/raw-collector.ts";
 import { ensureTemplateDirs, ensureInstanceDirs, templateDir, instanceDir } from "../lib/instance.ts";
 import { baseComposeTemplate } from "../templates/docker-compose.yml.ts";
@@ -12,19 +12,8 @@ import { openclawConfigTemplate } from "../templates/openclaw.json.ts";
 import { policyTemplate } from "../templates/policy.yaml.ts";
 import { writeApiProxyFiles } from "../templates/api-proxy.ts";
 import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
-
-async function fileExists(path: string): Promise<boolean> {
-  return Bun.file(path).exists();
-}
-
-async function dirExists(path: string): Promise<boolean> {
-  try {
-    await readdir(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
+import { fileExists, dirExists } from "../lib/fs-utils.ts";
+import { COMPOSE_FILENAME } from "../lib/compose.ts";
 
 async function moveContents(srcDir: string, destDir: string): Promise<void> {
   let files: string[];
@@ -181,8 +170,7 @@ export async function upgradeCommand(args: string[]): Promise<void> {
   const config = await readProjectConfig(projectDir);
   const processor = config?.processor ?? entry.processor;
   const llm = config?.llm ?? "gemini";
-  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
-  const runtime = getRuntime(runtimeType);
+  const { runtimeType, runtime, proxyMode: resolvedProxyMode } = resolveRuntimeConfig(config, entry);
   const rtDir = runtime.runtimeDirName;
 
   console.log(`\n🔄 Upgrading ${projectName} to latest claw-farm templates...`);
@@ -204,7 +192,7 @@ export async function upgradeCommand(args: string[]): Promise<void> {
     await migrateSingleInstanceLayout(projectDir);
   }
 
-  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+  const proxyMode = resolvedProxyMode;
 
   await mkdir(join(projectDir, rtDir, "workspace", "skills"), { recursive: true });
   await mkdir(join(projectDir, "processed"), { recursive: true });
@@ -215,7 +203,7 @@ export async function upgradeCommand(args: string[]): Promise<void> {
     processor === "mem0"
       ? mem0ComposeTemplate(projectName, entry.port)
       : runtime.composeTemplate(projectName, entry.port, proxyMode);
-  await Bun.write(join(projectDir, "docker-compose.openclaw.yml"), composeContent);
+  await Bun.write(join(projectDir, COMPOSE_FILENAME), composeContent);
   console.log("✓ Updated docker-compose.openclaw.yml");
 
   const configPath = join(projectDir, rtDir, runtime.configFileName);
@@ -285,7 +273,7 @@ async function upgradeMultiInstance(
   const runtime = getRuntime(runtimeType);
   const rtDir = runtime.runtimeDirName;
   const config = await readProjectConfig(projectDir);
-  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode; // upgradeMultiInstance uses passed runtimeType, not entry
 
   // Upgrade shared template files
   const tmplDir = templateDir(projectDir);
@@ -387,7 +375,7 @@ async function upgradeMultiInstance(
       } else {
         composeContent = runtime.instanceComposeTemplate(projectName, userId, inst.port, proxyMode);
       }
-      await Bun.write(join(instDir, "docker-compose.openclaw.yml"), composeContent);
+      await Bun.write(join(instDir, COMPOSE_FILENAME), composeContent);
     }
     console.log(`✓ Updated ${instanceIds.length} instance(s) (compose + template files + directories)`);
     if (migratedCount > 0) {

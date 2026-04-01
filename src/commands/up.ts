@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { resolveProjectName, loadRegistry, getInstance, findPositionalArg } from "../lib/registry.ts";
-import { readProjectConfig } from "../lib/config.ts";
-import { runCompose, sharedProxyConnect } from "../lib/compose.ts";
+import { readProjectConfig, resolveRuntimeConfig } from "../lib/config.ts";
+import { runCompose, sharedProxyConnect, COMPOSE_FILENAME } from "../lib/compose.ts";
 import { snapshotWorkspace } from "../lib/raw-collector.ts";
 import { instanceDir } from "../lib/instance.ts";
 import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
@@ -15,9 +15,7 @@ async function ensureSharedProxy(
 ): Promise<void> {
   if (proxyMode !== "shared" || runtimeType === "openclaw") return;
   const proxyComposePath = join(projectDir, "docker-compose.proxy.yml");
-  try {
-    await Bun.file(proxyComposePath).text();
-  } catch {
+  if (!await Bun.file(proxyComposePath).exists()) {
     // Proxy compose not found — generate it
     const runtime = getRuntime(runtimeType);
     if (runtime.proxyComposeTemplate) {
@@ -46,23 +44,21 @@ export async function upCommand(args: string[]): Promise<void> {
     for (const name of names) {
       const project = reg.projects[name];
       const config = await readProjectConfig(project.path);
-      const runtimeType: RuntimeType = config?.runtime ?? project.runtime ?? "openclaw";
-      const runtime = getRuntime(runtimeType);
-      const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+      const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, project);
 
       if (project.multiInstance) {
         await ensureSharedProxy(project.path, name, runtimeType, proxyMode);
         const userIds = Object.keys(project.instances ?? {});
-        for (const uid of userIds) {
+        await Promise.all(userIds.map(async (uid) => {
           console.log(`\n▶ Starting ${name}/${uid}...`);
           const instDir = instanceDir(project.path, uid);
-          const composePath = join(instDir, "docker-compose.openclaw.yml");
+          const composePath = join(instDir, COMPOSE_FILENAME);
           await runCompose(project.path, "up", {
             composePath,
             projectName: `${name}-${uid}`,
             connectContainer: sharedProxyConnect(name, uid, runtimeType, proxyMode),
           });
-        }
+        }));
       } else {
         console.log(`\n▶ Starting ${name}...`);
         await runCompose(project.path, "up");
@@ -75,9 +71,7 @@ export async function upCommand(args: string[]): Promise<void> {
   const name = findPositionalArg(args);
   const { name: projectName, entry } = await resolveProjectName(name);
   const config = await readProjectConfig(entry.path);
-  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
-  const runtime = getRuntime(runtimeType);
-  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+  const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
 
   if (entry.multiInstance && userId) {
     // Start specific instance
@@ -87,7 +81,7 @@ export async function upCommand(args: string[]): Promise<void> {
     await ensureSharedProxy(entry.path, projectName, runtimeType, proxyMode);
 
     const instDir = instanceDir(entry.path, userId);
-    const composePath = join(instDir, "docker-compose.openclaw.yml");
+    const composePath = join(instDir, COMPOSE_FILENAME);
 
     console.log(`\n▶ Starting ${projectName}/${userId}...`);
     await runCompose(entry.path, "up", {
@@ -109,16 +103,16 @@ export async function upCommand(args: string[]): Promise<void> {
 
     await ensureSharedProxy(entry.path, projectName, runtimeType, proxyMode);
 
-    for (const uid of userIds) {
+    await Promise.all(userIds.map(async (uid) => {
       console.log(`\n▶ Starting ${projectName}/${uid}...`);
       const instDir = instanceDir(entry.path, uid);
-      const composePath = join(instDir, "docker-compose.openclaw.yml");
+      const composePath = join(instDir, COMPOSE_FILENAME);
       await runCompose(entry.path, "up", {
         composePath,
         projectName: `${projectName}-${uid}`,
         connectContainer: sharedProxyConnect(projectName, uid, runtimeType, proxyMode),
       });
-    }
+    }));
     console.log(`\n✅ All ${userIds.length} instance(s) of ${projectName} started.`);
     return;
   }

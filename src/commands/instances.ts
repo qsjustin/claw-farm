@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { resolveProjectName, listInstances as listRegistryInstances, findPositionalArg } from "../lib/registry.ts";
 import { instanceDir } from "../lib/instance.ts";
-import { getComposeStatus } from "../lib/compose.ts";
+import { getComposeStatus, COMPOSE_FILENAME } from "../lib/compose.ts";
 
 export async function instancesCommand(args: string[]): Promise<void> {
   const projectArg = findPositionalArg(args);
@@ -25,9 +25,9 @@ export async function instancesCommand(args: string[]): Promise<void> {
   console.log(`│ User ID          │ Port    │ Status    │ Created              │`);
   console.log(`├──────────────────┼─────────┼───────────┼──────────────────────┤`);
 
-  for (const inst of instances) {
+  const rows = await Promise.all(instances.map(async (inst) => {
     const instDir_ = instanceDir(entry.path, inst.userId);
-    const composePath = join(instDir_, "docker-compose.openclaw.yml");
+    const composePath = join(instDir_, COMPOSE_FILENAME);
     let status: string;
     try {
       status = await getComposeStatus(entry.path, {
@@ -37,6 +37,10 @@ export async function instancesCommand(args: string[]): Promise<void> {
     } catch {
       status = "unknown";
     }
+    return { inst, status };
+  }));
+
+  for (const { inst, status } of rows) {
     const statusIcon = status === "running" ? "🟢" : status === "stopped" ? "⚪" : "❓";
 
     const userCol = inst.userId.padEnd(16).slice(0, 16);

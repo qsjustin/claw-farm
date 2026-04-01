@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { resolveProjectName, findPositionalArg } from "../lib/registry.ts";
-import { readProjectConfig } from "../lib/config.ts";
+import { readProjectConfig, resolveRuntimeConfig } from "../lib/config.ts";
 import { instanceDir } from "../lib/instance.ts";
 import { builtinProcessor } from "../processors/builtin.ts";
 import { mem0Processor } from "../processors/mem0.ts";
@@ -15,7 +15,7 @@ export async function memoryRebuildCommand(args: string[]): Promise<void> {
 
   const config = await readProjectConfig(entry.path);
   const processor = config?.processor ?? entry.processor;
-  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
+  const { runtimeType } = resolveRuntimeConfig(config, entry);
 
   if (entry.multiInstance && userId) {
     // Rebuild specific instance memory
@@ -42,9 +42,9 @@ export async function memoryRebuildCommand(args: string[]): Promise<void> {
   console.log(`\n🔄 Rebuilding memory for ${projectName}...`);
 
   if (processor === "mem0") {
-    await mem0Processor.rebuild(entry.path);
+    await mem0Processor.rebuild(entry.path, runtimeType);
   } else {
-    await builtinProcessor.rebuild(entry.path);
+    await builtinProcessor.rebuild(entry.path, runtimeType);
   }
 
   console.log(`\n✅ Memory rebuild complete for ${projectName}.\n`);

@@ -5,9 +5,15 @@
  * In cloud:compose, nginx is the only container with a published port.
  * openclaw sits on an internal network — nginx proxies to it.
  */
+import { safeYamlIdentifier } from "../lib/validate.ts";
+
 export function nginxProxyTemplate(
   projects: Array<{ name: string; port: number; containerName: string }>,
 ): string {
+  for (const p of projects) {
+    safeYamlIdentifier(p.name, "project name");
+    safeYamlIdentifier(p.containerName, "container name");
+  }
   const upstreams = projects
     .map(
       (p) => `upstream ${p.name.replace(/-/g, "_")} {

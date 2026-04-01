@@ -10,5 +10,5 @@ export interface MemoryProcessor {
   init(projectDir: string): Promise<void>;
 
   /** Rebuild processed data from raw Layer 0 data */
-  rebuild(projectDir: string): Promise<void>;
+  rebuild(projectDir: string, runtimeType?: "openclaw" | "picoclaw"): Promise<void>;
 }

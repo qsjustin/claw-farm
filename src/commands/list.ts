@@ -16,9 +16,13 @@ export async function listCommand(): Promise<void> {
   console.log("│ Name         │ Runtime  │ Port    │ Status    │ Instances  │ Path                           │");
   console.log("├──────────────┼──────────┼─────────┼───────────┼────────────┼────────────────────────────────┤");
 
-  for (const name of names) {
+  const rows = await Promise.all(names.map(async (name) => {
     const entry = reg.projects[name];
     const status = await getComposeStatus(entry.path);
+    return { name, entry, status };
+  }));
+
+  for (const { name, entry, status } of rows) {
     const statusIcon = status === "running" ? "🟢" : status === "stopped" ? "⚪" : "❓";
 
     const nameCol = name.padEnd(12).slice(0, 12);

@@ -6,22 +6,12 @@ import {
   saveRegistry,
   findPositionalArg,
 } from "../lib/registry.ts";
-import { readProjectConfig, writeProjectConfig } from "../lib/config.ts";
-import { runCompose } from "../lib/compose.ts";
+import { readProjectConfig, resolveRuntimeConfig, writeProjectConfig } from "../lib/config.ts";
+import { runCompose, COMPOSE_FILENAME } from "../lib/compose.ts";
 import { instanceDir, templateDir, ensureInstanceDirs } from "../lib/instance.ts";
 import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
 import { policyTemplate } from "../templates/policy.yaml.ts";
-
-async function fileExists(path: string): Promise<boolean> {
-  return Bun.file(path).exists();
-}
-
-async function copyIfExists(src: string, dest: string): Promise<void> {
-  const file = Bun.file(src);
-  if (!await file.exists()) return;
-  const content = await file.arrayBuffer();
-  await Bun.write(dest, content);
-}
+import { fileExists, copyIfExists } from "../lib/fs-utils.ts";
 
 async function copyDirContents(srcDir: string, destDir: string): Promise<void> {
   let files: string[];
@@ -131,8 +121,8 @@ async function migrateSingleInstance(
   // Regenerate docker-compose
   const composeContent = targetRuntime.composeTemplate(projectName,
     (await readProjectConfig(projectDir))?.port ?? 18789, proxyMode);
-  await Bun.write(join(projectDir, "docker-compose.openclaw.yml"), composeContent);
-  migrated.push("docker-compose.openclaw.yml");
+  await Bun.write(join(projectDir, COMPOSE_FILENAME), composeContent);
+  migrated.push(COMPOSE_FILENAME);
 
   return migrated;
 }
@@ -204,7 +194,7 @@ async function migrateInstance(
     port,
     proxyMode,
   );
-  await Bun.write(join(instDir, "docker-compose.openclaw.yml"), composeContent);
+  await Bun.write(join(instDir, COMPOSE_FILENAME), composeContent);
 
   // Migrate override file service names (e.g., openclaw-gateway → picoclaw-gateway)
   await migrateOverrideFile(instDir, sourceRuntime.name, targetRuntime.name);
@@ -274,7 +264,7 @@ export async function migrateRuntimeCommand(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const sourceRuntimeType: RuntimeType = config.runtime ?? entry.runtime ?? "openclaw";
+  const { runtimeType: sourceRuntimeType } = resolveRuntimeConfig(config, entry);
   const processor = config.processor ?? entry.processor;
   const llm = config.llm ?? "gemini";
 
@@ -309,7 +299,7 @@ export async function migrateRuntimeCommand(args: string[]): Promise<void> {
       const userIds = Object.keys(entry.instances ?? {});
       for (const uid of userIds) {
         const instDir = instanceDir(projectDir, uid);
-        const composePath = join(instDir, "docker-compose.openclaw.yml");
+        const composePath = join(instDir, COMPOSE_FILENAME);
         try {
           await runCompose(projectDir, "down", {
             composePath,

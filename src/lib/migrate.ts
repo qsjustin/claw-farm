@@ -1,9 +1,10 @@
 import { join } from "node:path";
 import { mkdir, cp, readdir } from "node:fs/promises";
-import { loadRegistry, saveRegistry } from "./registry.ts";
+import { loadRegistry, saveRegistry, withLock } from "./registry.ts";
 import { readProjectConfig, writeProjectConfig } from "./config.ts";
 import { ensureTemplateDirs, templateDir } from "./instance.ts";
 import { userTemplateContent } from "../templates/USER.template.md.ts";
+import { fileExists, copyIfExists } from "./fs-utils.ts";
 
 /**
  * Migrate a single-instance project to multi-instance mode.
@@ -69,17 +70,26 @@ export async function migrateToMulti(
 
   // Step 2: Migrate existing user data to instances/default/
   const defaultInstDir = join(projectDir, "instances", "default");
+  const commonDirs = [
+    mkdir(join(defaultInstDir, "raw", "workspace-snapshots"), { recursive: true, mode: 0o755 }),
+    mkdir(join(defaultInstDir, "processed"), { recursive: true, mode: 0o755 }),
+  ];
+
   if (runtimeDirName === "picoclaw") {
-    await mkdir(join(defaultInstDir, "picoclaw", "workspace", "memory"), { recursive: true, mode: 0o755 });
-    await mkdir(join(defaultInstDir, "picoclaw", "workspace", "sessions"), { recursive: true, mode: 0o755 });
-    await mkdir(join(defaultInstDir, "picoclaw", "workspace", "state"), { recursive: true, mode: 0o755 });
+    await Promise.all([
+      mkdir(join(defaultInstDir, "picoclaw", "workspace", "memory"), { recursive: true, mode: 0o755 }),
+      mkdir(join(defaultInstDir, "picoclaw", "workspace", "sessions"), { recursive: true, mode: 0o755 }),
+      mkdir(join(defaultInstDir, "picoclaw", "workspace", "state"), { recursive: true, mode: 0o755 }),
+      ...commonDirs,
+    ]);
   } else {
-    await mkdir(join(defaultInstDir, "openclaw", "workspace", "memory"), { recursive: true, mode: 0o755 });
-    await mkdir(join(defaultInstDir, "openclaw", "sessions"), { recursive: true, mode: 0o755 });
-    await mkdir(join(defaultInstDir, "openclaw", "logs"), { recursive: true, mode: 0o755 });
+    await Promise.all([
+      mkdir(join(defaultInstDir, "openclaw", "workspace", "memory"), { recursive: true, mode: 0o755 }),
+      mkdir(join(defaultInstDir, "openclaw", "sessions"), { recursive: true, mode: 0o755 }),
+      mkdir(join(defaultInstDir, "openclaw", "logs"), { recursive: true, mode: 0o755 }),
+      ...commonDirs,
+    ]);
   }
-  await mkdir(join(defaultInstDir, "raw", "workspace-snapshots"), { recursive: true, mode: 0o755 });
-  await mkdir(join(defaultInstDir, "processed"), { recursive: true, mode: 0o755 });
 
   // Copy config files to instance
   const configFileName = runtimeDirName === "picoclaw" ? "config.json" : "openclaw.json";
@@ -188,13 +198,15 @@ export async function migrateToMulti(
   }
 
   // Step 4: Set multiInstance in registry and config
-  const reg = await loadRegistry();
-  const project = reg.projects[projectName];
-  if (project) {
-    project.multiInstance = true;
-    if (!project.instances) project.instances = {};
-    await saveRegistry(reg);
-  }
+  await withLock(async () => {
+    const reg = await loadRegistry();
+    const project = reg.projects[projectName];
+    if (project) {
+      project.multiInstance = true;
+      if (!project.instances) project.instances = {};
+      await saveRegistry(reg);
+    }
+  });
 
   if (config) {
     config.multiInstance = true;
@@ -202,13 +214,3 @@ export async function migrateToMulti(
   }
 }
 
-async function copyIfExists(src: string, dest: string): Promise<void> {
-  const file = Bun.file(src);
-  if (!await file.exists()) return;
-  const content = await file.arrayBuffer();
-  await Bun.write(dest, content);
-}
-
-async function fileExists(path: string): Promise<boolean> {
-  return Bun.file(path).exists();
-}

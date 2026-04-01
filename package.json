@@ -12,7 +12,8 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target node",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "keywords": ["openclaw", "ai-agent", "docker", "memory", "cli"],
   "license": "MIT",

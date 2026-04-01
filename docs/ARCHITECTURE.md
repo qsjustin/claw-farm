@@ -487,6 +487,9 @@ src/
 │   └── index.ts            ← Runtime resolver (by name)
 ├── commands/
 ├── lib/
+│   ├── fs-utils.ts       ← Shared file/dir helpers (fileExists, copyIfExists, dirExists)
+│   ├── validate.ts       ← Input validation (safeYamlIdentifier)
+│   └── ...               ← registry, compose, config, ports, instance, migrate, api
 ├── processors/
 └── templates/
 ```

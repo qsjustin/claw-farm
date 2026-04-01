@@ -41,7 +41,7 @@ Multi OpenClaw instance manager — scaffold, run, and deploy AI agents with per
 ```
 claw-farm CLI
   ├── commands/        # init, up, down, list, spawn, despawn, instances, upgrade, migrate-runtime, memory:rebuild, cloud:compose
-  ├── lib/             # registry, compose, config, ports, raw-collector, instance, migrate, api
+  ├── lib/             # registry, compose, config, ports, raw-collector, instance, migrate, api, fs-utils, validate
   ├── processors/      # interface, builtin (MEMORY.md), mem0 (Qdrant)
   ├── runtimes/        # interface, openclaw (~1.5GB), picoclaw (~20MB Go)
   ├── templates/       # docker-compose, docker-compose.instance, docker-compose.mem0, USER.template, openclaw.json, SOUL.md, policy.yaml, api-proxy, nginx-proxy

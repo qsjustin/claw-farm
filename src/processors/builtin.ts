@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm, readdir } from "node:fs/promises";
 import type { MemoryProcessor } from "./interface.ts";
 
 /**
@@ -13,11 +13,10 @@ export const builtinProcessor: MemoryProcessor = {
     await mkdir(join(projectDir, "processed"), { recursive: true });
   },
 
-  async rebuild(projectDir: string) {
+  async rebuild(projectDir: string, runtimeType: "openclaw" | "picoclaw" = "openclaw") {
     const processedDir = join(projectDir, "processed");
 
     // Clear processed directory
-    const { rm } = await import("node:fs/promises");
     await rm(processedDir, { recursive: true, force: true });
     await mkdir(processedDir, { recursive: true });
 
@@ -25,7 +24,6 @@ export const builtinProcessor: MemoryProcessor = {
     // Rebuild simply creates a fresh MEMORY.md from the latest snapshot.
     const snapshotsDir = join(projectDir, "raw", "workspace-snapshots");
     try {
-      const { readdir } = await import("node:fs/promises");
       const snapshots = await readdir(snapshotsDir);
       if (snapshots.length === 0) {
         console.log("  No snapshots found — nothing to rebuild");
@@ -35,10 +33,10 @@ export const builtinProcessor: MemoryProcessor = {
       const memoryContent = await Bun.file(
         join(snapshotsDir, latest, "MEMORY.md"),
       ).text();
-      await Bun.write(
-        join(projectDir, "openclaw", "workspace", "MEMORY.md"),
-        memoryContent,
-      );
+      const memoryPath = runtimeType === "picoclaw"
+        ? join(projectDir, "picoclaw", "workspace", "memory", "MEMORY.md")
+        : join(projectDir, "openclaw", "workspace", "MEMORY.md");
+      await Bun.write(memoryPath, memoryContent);
       console.log(`  Rebuilt MEMORY.md from snapshot: ${latest}`);
     } catch {
       console.log("  No snapshots available — skipping rebuild");

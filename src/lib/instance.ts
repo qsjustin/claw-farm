@@ -37,24 +37,30 @@ export async function ensureInstanceDirs(
   const instDir = instanceDir(projectDir, userId);
   const rt = runtime ?? "openclaw";
 
+  const commonDirs = [
+    mkdir(join(instDir, "logs"), { recursive: true, mode: 0o755 }),
+    mkdir(join(instDir, "raw", "workspace-snapshots"), { recursive: true, mode: 0o755 }),
+    mkdir(join(instDir, "processed"), { recursive: true, mode: 0o755 }),
+  ];
+
   if (rt === "picoclaw") {
     // picoclaw workspace structure: sessions/ and memory/ are under workspace/
-    await mkdir(join(instDir, "picoclaw", "workspace", "memory"), { recursive: true, mode: 0o755 });
-    await mkdir(join(instDir, "picoclaw", "workspace", "sessions"), { recursive: true, mode: 0o755 });
-    await mkdir(join(instDir, "picoclaw", "workspace", "state"), { recursive: true, mode: 0o755 });
-    await mkdir(join(instDir, "picoclaw", "workspace", "skills"), { recursive: true, mode: 0o755 });
+    await Promise.all([
+      mkdir(join(instDir, "picoclaw", "workspace", "memory"), { recursive: true, mode: 0o755 }),
+      mkdir(join(instDir, "picoclaw", "workspace", "sessions"), { recursive: true, mode: 0o755 }),
+      mkdir(join(instDir, "picoclaw", "workspace", "state"), { recursive: true, mode: 0o755 }),
+      mkdir(join(instDir, "picoclaw", "workspace", "skills"), { recursive: true, mode: 0o755 }),
+      ...commonDirs,
+    ]);
   } else {
     // OpenClaw workspace structure
-    await mkdir(join(instDir, "openclaw", "workspace", "memory"), { recursive: true, mode: 0o755 });
-    await mkdir(join(instDir, "openclaw", "sessions"), { recursive: true, mode: 0o755 });
-    await mkdir(join(instDir, "openclaw", "logs"), { recursive: true, mode: 0o755 });
+    await Promise.all([
+      mkdir(join(instDir, "openclaw", "workspace", "memory"), { recursive: true, mode: 0o755 }),
+      mkdir(join(instDir, "openclaw", "sessions"), { recursive: true, mode: 0o755 }),
+      mkdir(join(instDir, "openclaw", "logs"), { recursive: true, mode: 0o755 }),
+      ...commonDirs,
+    ]);
   }
-
-  // API proxy logs directory (mounted as ./logs:/logs in api-proxy service)
-  await mkdir(join(instDir, "logs"), { recursive: true, mode: 0o755 });
-  // Memory pipeline directories (not in container)
-  await mkdir(join(instDir, "raw", "workspace-snapshots"), { recursive: true, mode: 0o755 });
-  await mkdir(join(instDir, "processed"), { recursive: true, mode: 0o755 });
   return instDir;
 }
 

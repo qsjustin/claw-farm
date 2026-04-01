@@ -485,6 +485,9 @@ src/
 │   └── index.ts            ← 런타임 리졸버 (이름으로)
 ├── commands/
 ├── lib/
+│   ├── fs-utils.ts       ← 공유 파일/디렉터리 헬퍼 (fileExists, copyIfExists, dirExists)
+│   ├── validate.ts       ← 입력 유효성 검사 (safeYamlIdentifier)
+│   └── ...               ← registry, compose, config, ports, instance, migrate, api
 ├── processors/
 └── templates/
 ```

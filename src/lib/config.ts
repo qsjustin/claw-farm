@@ -1,6 +1,9 @@
 import { join } from "node:path";
+import { chmod } from "node:fs/promises";
 
-import type { RuntimeType, ProxyMode } from "../runtimes/interface.ts";
+import type { RuntimeType, ProxyMode, AgentRuntime } from "../runtimes/interface.ts";
+import { getRuntime } from "../runtimes/index.ts";
+import type { ProjectEntry } from "./registry.ts";
 
 export type LlmProvider = "gemini" | "anthropic" | "openai-compat";
 
@@ -13,6 +16,20 @@ export interface ClawFarmConfig {
   llm?: LlmProvider;
   runtime?: RuntimeType;
   proxyMode?: ProxyMode;
+}
+
+/**
+ * Resolve runtime type, runtime instance, and proxy mode from config + registry entry.
+ * Centralises the repeated `config?.runtime ?? entry.runtime ?? "openclaw"` pattern.
+ */
+export function resolveRuntimeConfig(
+  config: ClawFarmConfig | null,
+  entry: Pick<ProjectEntry, "runtime">,
+): { runtimeType: RuntimeType; runtime: AgentRuntime; proxyMode: ProxyMode } {
+  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
+  const runtime = getRuntime(runtimeType);
+  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+  return { runtimeType, runtime, proxyMode };
 }
 
 /**
@@ -61,6 +78,7 @@ export async function writeProjectConfig(
 ): Promise<void> {
   const configPath = join(projectDir, ".claw-farm.json");
   await Bun.write(configPath, JSON.stringify(config, null, 2) + "\n");
+  await chmod(configPath, 0o600);
 }
 
 export async function readProjectConfig(

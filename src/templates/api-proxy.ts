@@ -11,6 +11,9 @@
  * and forwards to the actual LLM endpoint.
  */
 
+import { join } from "node:path";
+import { mkdir } from "node:fs/promises";
+
 export function apiProxyServerTemplate(): string {
   return `"""
 API Proxy — key injection + PII redaction + response secret scanning.
@@ -459,11 +462,11 @@ httpx==0.28.1
 
 /** Write all api-proxy files (api_proxy.py, Dockerfile, requirements.txt) into projectDir/api-proxy/. */
 export async function writeApiProxyFiles(projectDir: string): Promise<void> {
-  const { join } = await import("node:path");
-  const { mkdir } = await import("node:fs/promises");
   const proxyDir = join(projectDir, "api-proxy");
   await mkdir(proxyDir, { recursive: true });
-  await Bun.write(join(proxyDir, "api_proxy.py"), apiProxyServerTemplate());
-  await Bun.write(join(proxyDir, "Dockerfile"), apiProxyDockerfileTemplate());
-  await Bun.write(join(proxyDir, "requirements.txt"), apiProxyRequirementsTemplate());
+  await Promise.all([
+    Bun.write(join(proxyDir, "api_proxy.py"), apiProxyServerTemplate()),
+    Bun.write(join(proxyDir, "Dockerfile"), apiProxyDockerfileTemplate()),
+    Bun.write(join(proxyDir, "requirements.txt"), apiProxyRequirementsTemplate()),
+  ]);
 }

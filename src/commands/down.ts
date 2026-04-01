@@ -1,10 +1,10 @@
 import { join } from "node:path";
 import { resolveProjectName, loadRegistry, getInstance, findPositionalArg } from "../lib/registry.ts";
-import { readProjectConfig } from "../lib/config.ts";
-import { runCompose, sharedProxyConnect } from "../lib/compose.ts";
+import { readProjectConfig, resolveRuntimeConfig } from "../lib/config.ts";
+import { runCompose, sharedProxyConnect, COMPOSE_FILENAME } from "../lib/compose.ts";
 import { snapshotWorkspace } from "../lib/raw-collector.ts";
 import { instanceDir } from "../lib/instance.ts";
-import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
+import type { RuntimeType, ProxyMode } from "../runtimes/index.ts";
 
 /** Stop shared proxy compose if no instances remain running. */
 async function stopSharedProxy(
@@ -15,9 +15,7 @@ async function stopSharedProxy(
 ): Promise<void> {
   if (proxyMode !== "shared" || runtimeType === "openclaw") return;
   const proxyComposePath = join(projectDir, "docker-compose.proxy.yml");
-  try {
-    await Bun.file(proxyComposePath).text();
-  } catch {
+  if (!await Bun.file(proxyComposePath).exists()) {
     return; // No proxy compose file
   }
   console.log(`\n■ Stopping shared api-proxy...`);
@@ -46,16 +44,14 @@ export async function downCommand(args: string[]): Promise<void> {
     for (const name of names) {
       const project = reg.projects[name];
       const config = await readProjectConfig(project.path);
-      const runtimeType: RuntimeType = config?.runtime ?? project.runtime ?? "openclaw";
-      const runtime = getRuntime(runtimeType);
-      const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+      const { runtimeType, proxyMode } = resolveRuntimeConfig(config, project);
 
       if (project.multiInstance) {
         const userIds = Object.keys(project.instances ?? {});
-        for (const uid of userIds) {
+        await Promise.all(userIds.map(async (uid) => {
           console.log(`\n■ Stopping ${name}/${uid}...`);
           const instDir = instanceDir(project.path, uid);
-          const composePath = join(instDir, "docker-compose.openclaw.yml");
+          const composePath = join(instDir, COMPOSE_FILENAME);
           try {
             await runCompose(project.path, "down", {
               composePath,
@@ -63,7 +59,7 @@ export async function downCommand(args: string[]): Promise<void> {
               connectContainer: sharedProxyConnect(name, uid, runtimeType, proxyMode),
             });
           } catch {}
-        }
+        }));
         // Stop shared proxy after all instances
         await stopSharedProxy(project.path, name, runtimeType, proxyMode);
       } else {
@@ -81,16 +77,14 @@ export async function downCommand(args: string[]): Promise<void> {
   const name = findPositionalArg(args);
   const { name: projectName, entry } = await resolveProjectName(name);
   const config = await readProjectConfig(entry.path);
-  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
-  const runtime = getRuntime(runtimeType);
-  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+  const { runtimeType, proxyMode } = resolveRuntimeConfig(config, entry);
 
   if (entry.multiInstance && userId) {
     const instance = await getInstance(projectName, userId);
     if (!instance) throw new Error(`Instance "${userId}" not found in "${projectName}"`);
 
     const instDir = instanceDir(entry.path, userId);
-    const composePath = join(instDir, "docker-compose.openclaw.yml");
+    const composePath = join(instDir, COMPOSE_FILENAME);
 
     console.log(`\n■ Stopping ${projectName}/${userId}...`);
     await runCompose(entry.path, "down", {
@@ -108,10 +102,10 @@ export async function downCommand(args: string[]): Promise<void> {
       console.log(`No instances for "${projectName}".`);
       return;
     }
-    for (const uid of userIds) {
+    await Promise.all(userIds.map(async (uid) => {
       console.log(`\n■ Stopping ${projectName}/${uid}...`);
       const instDir = instanceDir(entry.path, uid);
-      const composePath = join(instDir, "docker-compose.openclaw.yml");
+      const composePath = join(instDir, COMPOSE_FILENAME);
       try {
         await runCompose(entry.path, "down", {
           composePath,
@@ -119,7 +113,7 @@ export async function downCommand(args: string[]): Promise<void> {
           connectContainer: sharedProxyConnect(projectName, uid, runtimeType, proxyMode),
         });
       } catch {}
-    }
+    }));
     // Stop shared proxy after all instances are down
     await stopSharedProxy(entry.path, projectName, runtimeType, proxyMode);
     console.log(`\n✅ All ${userIds.length} instance(s) of ${projectName} stopped.`);

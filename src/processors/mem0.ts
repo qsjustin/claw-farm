@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import type { MemoryProcessor } from "./interface.ts";
 
 /**
@@ -191,7 +191,7 @@ MEM0_API_KEY=
     );
   },
 
-  async rebuild(projectDir: string) {
+  async rebuild(projectDir: string, runtimeType: "openclaw" | "picoclaw" = "openclaw") {
     console.log(
       "  Mem0 processor rebuild: re-indexing from raw sessions into Qdrant...",
     );
@@ -199,8 +199,9 @@ MEM0_API_KEY=
       "  Note: Ensure Qdrant and Mem0 containers are running (claw-farm up)",
     );
 
-    const { readdir } = await import("node:fs/promises");
-    const sessionsDir = join(projectDir, "openclaw", "sessions");
+    const sessionsDir = runtimeType === "picoclaw"
+      ? join(projectDir, "picoclaw", "workspace", "sessions")
+      : join(projectDir, "openclaw", "sessions");
 
     try {
       const files = await readdir(sessionsDir);

@@ -6,7 +6,7 @@
  */
 
 import { join } from "node:path";
-import { mkdir, readdir, cp } from "node:fs/promises";
+import { mkdir, readdir, cp, rm } from "node:fs/promises";
 import {
   resolveProjectName,
   addInstance,
@@ -16,11 +16,12 @@ import {
   validateName,
   type InstanceEntry,
 } from "./registry.ts";
-import { readProjectConfig } from "./config.ts";
+import { readProjectConfig, resolveRuntimeConfig } from "./config.ts";
+import { fileExists } from "./fs-utils.ts";
 import { ensureInstanceDirs, instanceDir, templateDir } from "./instance.ts";
 import { instanceComposeTemplate } from "../templates/docker-compose.instance.yml.ts";
 import { fillUserTemplate } from "../templates/USER.template.md.ts";
-import { runCompose } from "./compose.ts";
+import { runCompose, COMPOSE_FILENAME } from "./compose.ts";
 import { migrateToMulti } from "./migrate.ts";
 import { getRuntime } from "../runtimes/index.ts";
 import type { RuntimeType, ProxyMode } from "../runtimes/interface.ts";
@@ -43,9 +44,7 @@ export async function spawn(options: {
   const config = await readProjectConfig(projectDir);
 
   // Determine runtime
-  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
-  const runtime = getRuntime(runtimeType);
-  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+  const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
 
   // Auto-migrate if needed
   if (!entry.multiInstance && !config?.multiInstance) {
@@ -64,23 +63,20 @@ export async function spawn(options: {
     // Copy config files from template to instance
     const tmplDir = templateDir(projectDir);
 
-    // Copy main config file
-    const configSrc = join(tmplDir, "config", runtime.configFileName);
-    const configDest = join(instDir, rtDir, runtime.configFileName);
-    const configFile = Bun.file(configSrc);
-    if (await configFile.exists()) {
-      await Bun.write(configDest, await configFile.arrayBuffer());
-    }
-
-    // Copy additional config files (e.g., policy.yaml for openclaw)
-    for (const additionalFile of runtime.additionalConfigFiles) {
-      const src = join(tmplDir, "config", additionalFile);
-      const dest = join(instDir, rtDir, additionalFile);
+    // Copy main config file + additional config files in parallel
+    const configFilesToCopy = [
+      { src: join(tmplDir, "config", runtime.configFileName), dest: join(instDir, rtDir, runtime.configFileName) },
+      ...runtime.additionalConfigFiles.map((f) => ({
+        src: join(tmplDir, "config", f),
+        dest: join(instDir, rtDir, f),
+      })),
+    ];
+    await Promise.all(configFilesToCopy.map(async ({ src, dest }) => {
       const file = Bun.file(src);
       if (await file.exists()) {
         await Bun.write(dest, await file.arrayBuffer());
       }
-    }
+    }));
 
     // Copy shared template files (SOUL.md, AGENTS.md, skills/) into instance workspace
     const workspaceDir = join(instDir, rtDir, "workspace");
@@ -124,7 +120,7 @@ export async function spawn(options: {
     } else {
       composeContent = runtime.instanceComposeTemplate(projectName, userId, port, proxyMode);
     }
-    const composePath = join(instDir, "docker-compose.openclaw.yml");
+    const composePath = join(instDir, COMPOSE_FILENAME);
     await Bun.write(composePath, composeContent);
 
     // Start if requested
@@ -132,9 +128,7 @@ export async function spawn(options: {
       // Ensure shared proxy is running (generates compose if needed, starts it)
       if (proxyMode === "shared" && runtimeType !== "openclaw") {
         const proxyComposePath = join(projectDir, "docker-compose.proxy.yml");
-        try {
-          await Bun.file(proxyComposePath).text();
-        } catch {
+        if (!await Bun.file(proxyComposePath).exists()) {
           // Generate proxy compose if missing
           if (runtime.proxyComposeTemplate) {
             await Bun.write(proxyComposePath, runtime.proxyComposeTemplate(projectName));
@@ -190,13 +184,11 @@ export async function despawn(
 
   // Stop containers first
   const instDir = instanceDir(projectDir, userId);
-  const composePath = join(instDir, "docker-compose.openclaw.yml");
+  const composePath = join(instDir, COMPOSE_FILENAME);
 
   // Determine if shared proxy mode — need to disconnect api-proxy from instance network
   const config = await readProjectConfig(projectDir);
-  const runtimeType: RuntimeType = config?.runtime ?? entry.runtime ?? "openclaw";
-  const runtime = getRuntime(runtimeType);
-  const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode;
+  const { runtimeType, proxyMode } = resolveRuntimeConfig(config, entry);
   const composeProject = `${projectName}-${userId}`;
   const connectContainer = (proxyMode === "shared" && runtimeType !== "openclaw")
     ? { container: `${projectName}-api-proxy`, network: `${composeProject}_instance-net` }
@@ -214,7 +206,6 @@ export async function despawn(
 
   // Remove data before registry (if data removal fails, registry still has the entry for retry)
   if (!options?.keepData) {
-    const { rm } = await import("node:fs/promises");
     await rm(instDir, { recursive: true, force: true });
   }
 
@@ -227,10 +218,6 @@ export async function listInstances(
 ): Promise<InstanceEntry[]> {
   const { name: projectName } = await resolveProjectName(project);
   return registryListInstances(projectName);
-}
-
-async function fileExists(path: string): Promise<boolean> {
-  return Bun.file(path).exists();
 }
 
 /**

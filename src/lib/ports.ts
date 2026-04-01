@@ -1,10 +1,3 @@
-import { loadRegistry } from "./registry.ts";
-
-export async function getNextPort(): Promise<number> {
-  const reg = await loadRegistry();
-  return reg.nextPort;
-}
-
 export function portRange(basePort: number) {
   return {
     openclaw: basePort,

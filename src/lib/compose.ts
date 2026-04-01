@@ -1,15 +1,9 @@
 import { join, dirname } from "node:path";
-import { access } from "node:fs/promises";
 import type { RuntimeType, ProxyMode } from "../runtimes/interface.ts";
+import { fileExists } from "./fs-utils.ts";
 
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
+/** Canonical claw-farm compose filename. Used for all single-instance and instance compose files. */
+export const COMPOSE_FILENAME = "docker-compose.openclaw.yml";
 
 export interface ComposeOptions {
   /** Override compose file path (default: docker-compose.openclaw.yml in projectDir) */
@@ -29,7 +23,7 @@ export async function runCompose(
   action: "up" | "down",
   options?: ComposeOptions,
 ): Promise<void> {
-  const composePath = options?.composePath ?? join(projectDir, "docker-compose.openclaw.yml");
+  const composePath = options?.composePath ?? join(projectDir, COMPOSE_FILENAME);
   const cwd = options?.composePath ? dirname(composePath) : projectDir;
 
   const args = ["docker", "compose", "-f", composePath];
@@ -126,7 +120,7 @@ export async function getComposeStatus(
   projectDir: string,
   options?: ComposeOptions,
 ): Promise<"running" | "stopped" | "unknown"> {
-  const composePath = options?.composePath ?? join(projectDir, "docker-compose.openclaw.yml");
+  const composePath = options?.composePath ?? join(projectDir, COMPOSE_FILENAME);
   const cwd = options?.composePath ? dirname(composePath) : projectDir;
 
   const args = ["docker", "compose", "-f", composePath];

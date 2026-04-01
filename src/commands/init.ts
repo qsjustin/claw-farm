@@ -1,9 +1,10 @@
 import { join } from "node:path";
-import { mkdir } from "node:fs/promises";
-import { addProject, loadRegistry, saveRegistry, findPositionalArg } from "../lib/registry.ts";
+import { mkdir, chmod } from "node:fs/promises";
+import { addProject, loadRegistry, saveRegistry, withLock, findPositionalArg } from "../lib/registry.ts";
 import { writeProjectConfig, envExampleTemplate, type LlmProvider } from "../lib/config.ts";
 import { ensureRawDirs } from "../lib/raw-collector.ts";
 import { mem0ComposeTemplate } from "../templates/docker-compose.mem0.yml.ts";
+import { COMPOSE_FILENAME } from "../lib/compose.ts";
 import { soulTemplate } from "../templates/SOUL.md.ts";
 import { policyTemplate } from "../templates/policy.yaml.ts";
 import { writeApiProxyFiles } from "../templates/api-proxy.ts";
@@ -129,7 +130,7 @@ export async function initCommand(args: string[]): Promise<void> {
     processor === "mem0"
       ? mem0ComposeTemplate(name, entry.port)
       : runtime.composeTemplate(name, entry.port, proxyMode);
-  await Bun.write(join(projectDir, "docker-compose.openclaw.yml"), composeContent);
+  await Bun.write(join(projectDir, COMPOSE_FILENAME), composeContent);
   console.log("✓ Generated docker-compose.openclaw.yml");
 
   // Write runtime config
@@ -183,7 +184,7 @@ export async function initCommand(args: string[]): Promise<void> {
     port: entry.port,
     createdAt: entry.createdAt,
     llm,
-    ...(runtimeType !== "openclaw" ? { runtime: runtimeType } : {}),
+    runtime: runtimeType,
     ...(proxyMode !== runtime.defaultProxyMode ? { proxyMode } : {}),
   });
   console.log("✓ Generated .claw-farm.json");
@@ -197,9 +198,7 @@ export async function initCommand(args: string[]): Promise<void> {
   }
 
   // Write .env.example if not exists
-  try {
-    await Bun.file(join(projectDir, ".env.example")).text();
-  } catch {
+  if (!await Bun.file(join(projectDir, ".env.example")).exists()) {
     await Bun.write(join(projectDir, ".env.example"), envExampleTemplate(llm, processor));
   }
 
@@ -233,7 +232,7 @@ async function registerExisting(
   console.log("✓ Created directories");
 
   // Generate docker-compose.openclaw.yml (always — this is what claw-farm up uses)
-  const composePath = join(projectDir, "docker-compose.openclaw.yml");
+  const composePath = join(projectDir, COMPOSE_FILENAME);
   const composeContent =
     processor === "mem0"
       ? mem0ComposeTemplate(name, entry.port)
@@ -299,6 +298,7 @@ async function registerExisting(
     try {
       const example = await Bun.file(envExamplePath).text();
       await Bun.write(envPath, example);
+      await chmod(envPath, 0o600);
       console.log("✓ Created .env from .env.example (fill in your API keys!)");
     } catch {
       // No .env.example either — skip
@@ -312,7 +312,7 @@ async function registerExisting(
     port: entry.port,
     createdAt: entry.createdAt,
     llm,
-    ...(runtimeType !== "openclaw" ? { runtime: runtimeType } : {}),
+    runtime: runtimeType,
     ...(proxyMode !== runtime.defaultProxyMode ? { proxyMode } : {}),
   });
 
@@ -348,14 +348,13 @@ async function initMulti(
   const entry = await addProject(name, projectDir, processor, runtimeType);
 
   // Set multiInstance in registry
-  const { loadRegistry: loadReg, saveRegistry: saveReg } = await import("../lib/registry.ts");
-  const reg = await loadReg();
-  reg.projects[name].multiInstance = true;
-  reg.projects[name].instances = {};
-  if (runtimeType !== "openclaw") {
+  await withLock(async () => {
+    const reg = await loadRegistry();
+    reg.projects[name].multiInstance = true;
+    reg.projects[name].instances = {};
     reg.projects[name].runtime = runtimeType;
-  }
-  await saveReg(reg);
+    await saveRegistry(reg);
+  });
   console.log(`✓ Registered in global registry (port: ${entry.port}, multi-instance)`);
 
   // Create template/ directory structure
@@ -426,7 +425,7 @@ async function initMulti(
     createdAt: entry.createdAt,
     multiInstance: true,
     llm,
-    ...(runtimeType !== "openclaw" ? { runtime: runtimeType } : {}),
+    runtime: runtimeType,
     ...(proxyMode !== runtime.defaultProxyMode ? { proxyMode } : {}),
   });
   console.log("✓ Generated .claw-farm.json");

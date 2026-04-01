@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { mkdir, writeFile, readFile, stat, unlink, copyFile, chmod } from "node:fs/promises";
 
 import type { RuntimeType } from "../runtimes/interface.ts";
 
@@ -62,12 +63,18 @@ function defaultRegistry(): Registry {
 }
 
 /**
+ * In-process mutex: prevents concurrent withLock calls within the same process
+ * from racing on the filesystem lock. The file lock handles cross-process safety;
+ * this queue handles same-process concurrency.
+ */
+let _inProcessLockChain: Promise<void> = Promise.resolve();
+
+/**
  * Acquire a file lock for registry mutations.
  * Uses O_EXCL to atomically create a lock file.
  * Retries with backoff for up to ~5 seconds.
  */
 async function acquireLock(): Promise<void> {
-  const { mkdir, writeFile } = await import("node:fs/promises");
   await mkdir(REGISTRY_DIR, { recursive: true, mode: 0o700 });
 
   const maxAttempts = 50;
@@ -80,15 +87,31 @@ async function acquireLock(): Promise<void> {
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
 
-      // Check if lock is stale (older than 30s)
+      // Check if lock is stale by reading the PID and verifying the process is alive
       try {
-        const { stat } = await import("node:fs/promises");
         const lockStat = await stat(LOCK_PATH);
         const ageMs = Date.now() - lockStat.mtimeMs;
         if (ageMs > 30_000) {
-          const { unlink } = await import("node:fs/promises");
-          await unlink(LOCK_PATH);
-          continue; // Retry immediately after removing stale lock
+          // Also verify the owning process is truly gone before unlinking
+          try {
+            const pidStr = await readFile(LOCK_PATH, "utf8");
+            const pid = parseInt(pidStr.trim(), 10);
+            if (!isNaN(pid)) {
+              try {
+                process.kill(pid, 0); // throws if process doesn't exist
+                // Process is still alive — not safe to steal the lock, keep waiting
+              } catch {
+                // Process is dead — safe to remove stale lock
+                await unlink(LOCK_PATH);
+                continue;
+              }
+            } else {
+              await unlink(LOCK_PATH);
+              continue;
+            }
+          } catch {
+            // Could not read PID or file vanished — retry
+          }
         }
       } catch {
         // Lock file disappeared between check and stat — retry
@@ -102,7 +125,6 @@ async function acquireLock(): Promise<void> {
 
 async function releaseLock(): Promise<void> {
   try {
-    const { unlink } = await import("node:fs/promises");
     await unlink(LOCK_PATH);
   } catch {
     // Lock already released — fine
@@ -112,14 +134,24 @@ async function releaseLock(): Promise<void> {
 /**
  * Run a callback with exclusive registry lock.
  * Ensures lock is always released, even on error.
+ * Uses an in-process promise chain to prevent same-process races,
+ * combined with a filesystem lock for cross-process safety.
  */
-async function withLock<T>(fn: () => Promise<T>): Promise<T> {
-  await acquireLock();
-  try {
-    return await fn();
-  } finally {
-    await releaseLock();
-  }
+export function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  const result = _inProcessLockChain.then(async () => {
+    await acquireLock();
+    try {
+      return await fn();
+    } finally {
+      await releaseLock();
+    }
+  });
+  // Advance the chain regardless of success/failure
+  _inProcessLockChain = result.then(
+    () => {},
+    () => {},
+  );
+  return result;
 }
 
 export async function loadRegistry(): Promise<Registry> {
@@ -140,7 +172,6 @@ export async function loadRegistry(): Promise<Registry> {
     if (err instanceof SyntaxError) {
       console.warn("⚠ Registry file is corrupted JSON, creating backup and using defaults");
       try {
-        const { copyFile } = await import("node:fs/promises");
         await copyFile(REGISTRY_PATH, REGISTRY_PATH + ".corrupted." + Date.now());
       } catch { /* best effort */ }
       return defaultRegistry();
@@ -150,7 +181,6 @@ export async function loadRegistry(): Promise<Registry> {
 }
 
 export async function saveRegistry(reg: Registry): Promise<void> {
-  const { mkdir, chmod } = await import("node:fs/promises");
   await mkdir(REGISTRY_DIR, { recursive: true, mode: 0o700 });
   await Bun.write(REGISTRY_PATH, JSON.stringify(reg, null, 2) + "\n");
   await chmod(REGISTRY_PATH, 0o600);
@@ -208,7 +238,7 @@ export async function addProject(
       port,
       processor,
       createdAt: new Date().toISOString(),
-      ...(runtime && runtime !== "openclaw" ? { runtime } : {}),
+      runtime: runtime ?? "openclaw",
     };
     reg.projects[name] = entry;
     await saveRegistry(reg);
