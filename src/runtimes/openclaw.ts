@@ -20,18 +20,17 @@ export const openclawRuntime: AgentRuntime = {
   runtimeDirName: "openclaw",
   defaultProxyMode: "per-instance",
 
-  composeTemplate(name: string, port: number): string {
-    return baseComposeTemplate(name, port);
+  composeTemplate(name: string, port: number, proxyMode?: ProxyMode): string {
+    return baseComposeTemplate(name, port, proxyMode ?? this.defaultProxyMode);
   },
 
   instanceComposeTemplate(
     projectName: string,
     userId: string,
     port: number,
-    _proxyMode: ProxyMode,
+    proxyMode: ProxyMode,
   ): string {
-    // OpenClaw always includes api-proxy in instance compose (per-instance is the only mode)
-    return instanceComposeTemplate(projectName, userId, port);
+    return instanceComposeTemplate(projectName, userId, port, proxyMode);
   },
 
   configTemplate(

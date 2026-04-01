@@ -6,16 +6,12 @@ import { ensureRawDirs } from "../lib/raw-collector.ts";
 import { mem0ComposeTemplate } from "../templates/docker-compose.mem0.yml.ts";
 import { soulTemplate } from "../templates/SOUL.md.ts";
 import { policyTemplate } from "../templates/policy.yaml.ts";
-import {
-  apiProxyServerTemplate,
-  apiProxyDockerfileTemplate,
-  apiProxyRequirementsTemplate,
-} from "../templates/api-proxy.ts";
+import { writeApiProxyFiles } from "../templates/api-proxy.ts";
 import { builtinProcessor } from "../processors/builtin.ts";
 import { mem0Processor } from "../processors/mem0.ts";
 import { ensureTemplateDirs, templateDir } from "../lib/instance.ts";
 import { userTemplateContent } from "../templates/USER.template.md.ts";
-import { getRuntime, type RuntimeType } from "../runtimes/index.ts";
+import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
 
 export async function initCommand(args: string[]): Promise<void> {
   const name = findPositionalArg(args);
@@ -80,7 +76,7 @@ export async function initCommand(args: string[]): Promise<void> {
     console.error(`Missing value for --proxy-mode. Must be one of: ${VALID_PROXY_MODES.join(", ")}`);
     process.exit(1);
   }
-  const proxyMode = (proxyModeArg as "shared" | "per-instance" | "none") ?? runtime.defaultProxyMode;
+  const proxyMode = (proxyModeArg as ProxyMode) ?? runtime.defaultProxyMode;
   if (proxyModeIdx !== -1 && !(VALID_PROXY_MODES as readonly string[]).includes(proxyMode)) {
     console.error(`Invalid proxy mode: "${proxyMode}". Must be one of: ${VALID_PROXY_MODES.join(", ")}`);
     process.exit(1);
@@ -132,7 +128,7 @@ export async function initCommand(args: string[]): Promise<void> {
   const composeContent =
     processor === "mem0"
       ? mem0ComposeTemplate(name, entry.port)
-      : runtime.composeTemplate(name, entry.port);
+      : runtime.composeTemplate(name, entry.port, proxyMode);
   await Bun.write(join(projectDir, "docker-compose.openclaw.yml"), composeContent);
   console.log("✓ Generated docker-compose.openclaw.yml");
 
@@ -156,11 +152,7 @@ export async function initCommand(args: string[]): Promise<void> {
 
   // Write API Proxy sidecar (key isolation + PII filter) — skip if proxyMode=none
   if (proxyMode !== "none") {
-    const proxyDir = join(projectDir, "api-proxy");
-    await mkdir(proxyDir, { recursive: true });
-    await Bun.write(join(proxyDir, "api_proxy.py"), apiProxyServerTemplate());
-    await Bun.write(join(proxyDir, "Dockerfile"), apiProxyDockerfileTemplate());
-    await Bun.write(join(proxyDir, "requirements.txt"), apiProxyRequirementsTemplate());
+    await writeApiProxyFiles(projectDir);
     console.log("✓ Generated api-proxy/ (key isolation + PII filter)");
   } else {
     console.log("✓ Skipped api-proxy/ (proxyMode: none)");
@@ -224,7 +216,7 @@ async function registerExisting(
   processor: "builtin" | "mem0",
   llm: LlmProvider = "gemini",
   runtimeType: RuntimeType = "openclaw",
-  proxyMode: "shared" | "per-instance" | "none" = "per-instance",
+  proxyMode: ProxyMode = "per-instance",
 ): Promise<void> {
   const runtime = getRuntime(runtimeType);
   const rtDir = runtime.runtimeDirName;
@@ -245,7 +237,7 @@ async function registerExisting(
   const composeContent =
     processor === "mem0"
       ? mem0ComposeTemplate(name, entry.port)
-      : runtime.composeTemplate(name, entry.port);
+      : runtime.composeTemplate(name, entry.port, proxyMode);
   await Bun.write(composePath, composeContent);
   console.log("✓ Generated docker-compose.openclaw.yml");
 
@@ -278,15 +270,10 @@ async function registerExisting(
 
   // Add api-proxy if missing — skip if proxyMode=none
   if (proxyMode !== "none") {
-    const proxyDir = join(projectDir, "api-proxy");
-    try {
-      await Bun.file(join(proxyDir, "api_proxy.py")).text();
+    if (await Bun.file(join(projectDir, "api-proxy", "api_proxy.py")).exists()) {
       console.log("✓ api-proxy/ already exists — skipped");
-    } catch {
-      await mkdir(proxyDir, { recursive: true });
-      await Bun.write(join(proxyDir, "api_proxy.py"), apiProxyServerTemplate());
-      await Bun.write(join(proxyDir, "Dockerfile"), apiProxyDockerfileTemplate());
-      await Bun.write(join(proxyDir, "requirements.txt"), apiProxyRequirementsTemplate());
+    } else {
+      await writeApiProxyFiles(projectDir);
       console.log("✓ Generated api-proxy/ (key isolation + PII filter)");
     }
   } else {
@@ -346,7 +333,7 @@ async function initMulti(
   processor: "builtin" | "mem0",
   llm: LlmProvider = "gemini",
   runtimeType: RuntimeType = "openclaw",
-  proxyMode: "shared" | "per-instance" | "none" = "per-instance",
+  proxyMode: ProxyMode = "per-instance",
 ): Promise<void> {
   const runtime = getRuntime(runtimeType);
 
@@ -407,11 +394,7 @@ async function initMulti(
 
   // Write API Proxy sidecar — skip if proxyMode=none
   if (proxyMode !== "none") {
-    const proxyDir = join(projectDir, "api-proxy");
-    await mkdir(proxyDir, { recursive: true });
-    await Bun.write(join(proxyDir, "api_proxy.py"), apiProxyServerTemplate());
-    await Bun.write(join(proxyDir, "Dockerfile"), apiProxyDockerfileTemplate());
-    await Bun.write(join(proxyDir, "requirements.txt"), apiProxyRequirementsTemplate());
+    await writeApiProxyFiles(projectDir);
     console.log("✓ Generated api-proxy/ (key isolation + PII filter)");
   } else {
     console.log("✓ Skipped api-proxy/ (proxyMode: none)");

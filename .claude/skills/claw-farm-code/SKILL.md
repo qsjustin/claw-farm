@@ -16,7 +16,7 @@ Look for `.claw-farm.json` in the project root:
 {
   "name": "project-name",
   "runtime": "openclaw" | "picoclaw",
-  "proxyMode": "per-instance" | "shared",
+  "proxyMode": "per-instance" | "shared" | "none",
   "processor": "builtin" | "mem0",
   "port": 18789,
   "multiInstance": true,
@@ -179,6 +179,9 @@ Each instance has its own api-proxy container. Secrets are isolated. Good for mu
 
 ### shared (default for picoclaw)
 One api-proxy serves all instances via hub-and-spoke Docker networking. The proxy connects to each instance's network. Same API key for all. Lighter resource usage.
+
+### none
+No api-proxy deployed. Project handles proxying internally. No claw-farm proxy overhead — project is responsible for its own API key management and PII filtering.
 
 ## When You Change Architecture
 

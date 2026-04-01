@@ -35,7 +35,7 @@ export interface AgentRuntime {
   defaultProxyMode: ProxyMode;
 
   /** Generate base docker-compose for single-instance projects */
-  composeTemplate(name: string, port: number): string;
+  composeTemplate(name: string, port: number, proxyMode?: ProxyMode): string;
 
   /** Generate per-instance docker-compose for multi-instance projects */
   instanceComposeTemplate(

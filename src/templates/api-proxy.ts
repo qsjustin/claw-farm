@@ -456,3 +456,14 @@ uvicorn[standard]==0.34.2
 httpx==0.28.1
 `;
 }
+
+/** Write all api-proxy files (api_proxy.py, Dockerfile, requirements.txt) into projectDir/api-proxy/. */
+export async function writeApiProxyFiles(projectDir: string): Promise<void> {
+  const { join } = await import("node:path");
+  const { mkdir } = await import("node:fs/promises");
+  const proxyDir = join(projectDir, "api-proxy");
+  await mkdir(proxyDir, { recursive: true });
+  await Bun.write(join(proxyDir, "api_proxy.py"), apiProxyServerTemplate());
+  await Bun.write(join(proxyDir, "Dockerfile"), apiProxyDockerfileTemplate());
+  await Bun.write(join(proxyDir, "requirements.txt"), apiProxyRequirementsTemplate());
+}

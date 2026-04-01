@@ -22,7 +22,7 @@ claw-farm init <name> [options]
 | `--runtime openclaw\|picoclaw` | openclaw | Agent runtime (~1.5GB vs ~20MB) |
 | `--processor builtin\|mem0` | builtin | Memory processor (text vs vector) |
 | `--llm gemini\|anthropic\|openai-compat` | gemini | LLM provider |
-| `--proxy-mode shared\|per-instance` | per-runtime | API proxy sharing strategy |
+| `--proxy-mode shared\|per-instance\|none` | per-runtime | API proxy sharing strategy |
 | `--multi` | false | Enable multi-instance (template/ + instances/) |
 | `--existing` | false | Register existing project without scaffolding |
 
@@ -101,6 +101,7 @@ Outputs unified docker-compose with nginx reverse proxy, shared api-proxy, resou
 
 - **per-instance**: Each instance has its own api-proxy. Secrets isolated per user.
 - **shared**: All instances share one api-proxy (hub-and-spoke network). Same API key for all.
+- **none**: No api-proxy deployed. Project handles proxying internally.
 
 ## Global Registry
 

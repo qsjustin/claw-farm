@@ -21,8 +21,8 @@ export const picoClawRuntime: AgentRuntime = {
   runtimeDirName: "picoclaw",
   defaultProxyMode: "shared",
 
-  composeTemplate(name: string, port: number): string {
-    return picoClawComposeTemplate(name, port);
+  composeTemplate(name: string, port: number, proxyMode?: ProxyMode): string {
+    return picoClawComposeTemplate(name, port, proxyMode ?? this.defaultProxyMode);
   },
 
   instanceComposeTemplate(
@@ -34,7 +34,7 @@ export const picoClawRuntime: AgentRuntime = {
     if (proxyMode === "shared") {
       return picoClawInstanceSharedProxyComposeTemplate(projectName, userId, port);
     }
-    return picoClawInstanceComposeTemplate(projectName, userId, port);
+    return picoClawInstanceComposeTemplate(projectName, userId, port, proxyMode);
   },
 
   proxyComposeTemplate(name: string): string {
