@@ -120,8 +120,7 @@ export async function spawn(options: {
     // Write compose (always regenerate)
     let composeContent: string;
     if (runtimeType === "openclaw") {
-      // OpenClaw uses its own instance compose template (always per-instance proxy)
-      composeContent = instanceComposeTemplate(projectName, userId, port);
+      composeContent = instanceComposeTemplate(projectName, userId, port, proxyMode);
     } else {
       composeContent = runtime.instanceComposeTemplate(projectName, userId, port, proxyMode);
     }

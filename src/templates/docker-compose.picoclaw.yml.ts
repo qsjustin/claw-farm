@@ -50,9 +50,9 @@ ${hasProxy ? `  api-proxy:
       - "127.0.0.1:${port}:18790"
     volumes:
       - ./picoclaw:/root/.picoclaw
-    environment:
-${hasProxy ? `      PICOCLAW_PROXY_URL: http://api-proxy:8080` : `      # PICOCLAW_PROXY_URL: not set (proxyMode: none)`}
-${hasProxy ? `    networks:
+${hasProxy ? `    environment:
+      PICOCLAW_PROXY_URL: http://api-proxy:8080
+    networks:
       - proxy-net` : ""}
     read_only: true
     tmpfs:
@@ -137,9 +137,9 @@ ${hasProxy ? `  api-proxy:
       - "127.0.0.1:${port}:18790"
     volumes:
       - ./picoclaw:/root/.picoclaw
-    environment:
-${hasProxy ? `      PICOCLAW_PROXY_URL: http://api-proxy:8080` : `      # PICOCLAW_PROXY_URL: not set (proxyMode: none)`}
-${hasProxy ? `    networks:
+${hasProxy ? `    environment:
+      PICOCLAW_PROXY_URL: http://api-proxy:8080
+    networks:
       - proxy-net` : ""}
     read_only: true
     tmpfs:

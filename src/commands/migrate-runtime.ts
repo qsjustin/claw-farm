@@ -48,6 +48,7 @@ async function migrateSingleInstance(
   targetRuntime: ReturnType<typeof getRuntime>,
   processor: "builtin" | "mem0",
   llm: "gemini" | "anthropic" | "openai-compat",
+  proxyMode: ProxyMode,
 ): Promise<string[]> {
   const srcDir = sourceRuntime.runtimeDirName;
   const destDir = targetRuntime.runtimeDirName;
@@ -129,7 +130,7 @@ async function migrateSingleInstance(
 
   // Regenerate docker-compose
   const composeContent = targetRuntime.composeTemplate(projectName,
-    (await readProjectConfig(projectDir))?.port ?? 18789);
+    (await readProjectConfig(projectDir))?.port ?? 18789, proxyMode);
   await Bun.write(join(projectDir, "docker-compose.openclaw.yml"), composeContent);
   migrated.push("docker-compose.openclaw.yml");
 
@@ -397,6 +398,7 @@ export async function migrateRuntimeCommand(args: string[]): Promise<void> {
       targetRuntime,
       processor,
       llm,
+      proxyMode,
     );
     // Migrate override file service names
     if (await migrateOverrideFile(projectDir, sourceRuntimeType, targetRuntimeType)) {

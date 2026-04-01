@@ -383,7 +383,7 @@ async function upgradeMultiInstance(
       // Regenerate compose
       let composeContent: string;
       if (runtimeType === "openclaw") {
-        composeContent = instanceComposeTemplate(projectName, userId, inst.port);
+        composeContent = instanceComposeTemplate(projectName, userId, inst.port, proxyMode);
       } else {
         composeContent = runtime.instanceComposeTemplate(projectName, userId, inst.port, proxyMode);
       }
