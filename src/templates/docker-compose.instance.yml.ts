@@ -23,7 +23,7 @@ ${hasProxy ? `  api-proxy:
     expose:
       - "8080"
     env_file:
-      - ../../.env
+      - ./.env.model
     environment:
       AUDIT_LOG_PATH: /logs/api-proxy-audit.jsonl
       MAX_PROMPT_SIZE_MB: 5

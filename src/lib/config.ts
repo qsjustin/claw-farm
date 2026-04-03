@@ -7,6 +7,12 @@ import type { ProjectEntry } from "./registry.ts";
 
 export type LlmProvider = "gemini" | "anthropic" | "openai-compat";
 
+export type InstanceModelEnvInput = {
+  provider: LlmProvider;
+  apiKey: string;
+  baseUrl?: string | null;
+};
+
 export interface ClawFarmConfig {
   name: string;
   processor: "builtin" | "mem0";
@@ -70,6 +76,28 @@ export function envExampleTemplate(
 
   lines.push(``);
   return lines.join("\n");
+}
+
+export function renderInstanceModelEnv(input: InstanceModelEnvInput): string {
+  const lines = [
+    "# Generated per-instance model control env",
+    `LLM_PROVIDER=${input.provider}`,
+    "GEMINI_API_KEY=",
+    "ANTHROPIC_API_KEY=",
+    "OPENAI_API_KEY=",
+    "OPENAI_COMPAT_BASE_URL="
+  ];
+
+  if (input.provider === "gemini") {
+    lines[2] = `GEMINI_API_KEY=${input.apiKey}`;
+  } else if (input.provider === "anthropic") {
+    lines[3] = `ANTHROPIC_API_KEY=${input.apiKey}`;
+  } else {
+    lines[4] = `OPENAI_API_KEY=${input.apiKey}`;
+    lines[5] = `OPENAI_COMPAT_BASE_URL=${input.baseUrl ?? ""}`;
+  }
+
+  return `${lines.join("\n")}\n`;
 }
 
 export async function writeProjectConfig(

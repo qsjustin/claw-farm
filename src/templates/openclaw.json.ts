@@ -6,6 +6,10 @@ export function openclawConfigTemplate(
   name: string,
   processor: "builtin" | "mem0",
   llm: "gemini" | "anthropic" | "openai-compat" = "gemini",
+  options?: {
+    modelSlug?: string;
+    baseUrl?: string | null;
+  },
 ): string {
   const providerConfigs: Record<string, { model: string; providerKey: string; baseUrl: string; envKey: string }> = {
     gemini: {
@@ -29,6 +33,8 @@ export function openclawConfigTemplate(
   };
 
   const config = providerConfigs[llm];
+  const modelSlug = options?.modelSlug?.trim() || config.model;
+  const baseUrl = options?.baseUrl?.trim() || config.baseUrl;
 
   // Output valid JSON (no comments) so JSON.parse works in config merge
   return JSON.stringify(
@@ -36,15 +42,15 @@ export function openclawConfigTemplate(
       agents: {
         defaults: {
           model: {
-            primary: config.model,
+            primary: modelSlug,
           },
         },
       },
       models: {
         providers: {
           [config.providerKey]: {
-            baseUrl: config.baseUrl,
-            models: [],
+            baseUrl,
+            models: [modelSlug],
           },
         },
       },
