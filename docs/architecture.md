@@ -396,16 +396,31 @@ claw-farm despawn dog-agent --user bob       # Remove instance
 ### Programmatic API (for signup flows)
 
 ```typescript
-import { spawn, despawn, listInstances } from "@permissionlabs/claw-farm";
+import {
+  spawn, despawn, listInstances,
+  stopInstance, startInstance,
+  getInstance, getProject,
+} from "@permissionlabs/claw-farm";
 
-// User signs up → spawn their agent instance
+// User signs up → spawn their agent instance (with optional per-instance env vars)
 const { port } = await spawn({
   project: "dog-agent",
   userId: "user-123",
   context: { name: "Poppy", breed: "Maltese", age: "3" },
+  env: { GATEWAY_TOKEN: "tok_abc123" },
 });
 
 // User's agent is now at http://localhost:${port}
+
+// Idle timeout → stop containers (preserves data + volumes)
+await stopInstance("dog-agent", "user-123");
+
+// Reconnect → fast restart (no rebuild)
+const { port: p } = await startInstance("dog-agent", "user-123");
+
+// Query instance/project info
+const instance = await getInstance("dog-agent", "user-123"); // { userId, port, createdAt }
+const project = await getProject("dog-agent"); // { path, port, runtime, ... }
 ```
 
 ### Migration (single → multi)

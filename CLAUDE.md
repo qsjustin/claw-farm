@@ -232,6 +232,21 @@ claw-farm up project-name
 claw-farm down project-name
 ```
 
+### Programmatic API
+```typescript
+import {
+  spawn, despawn, listInstances,
+  stopInstance, startInstance,
+  getInstance, getProject,
+} from "@permissionlabs/claw-farm";
+
+await spawn({ project: "name", userId: "user-1", env: { TOKEN: "..." } });
+await stopInstance("name", "user-1");   // stop containers (preserve data)
+await startInstance("name", "user-1");  // restart containers
+await getInstance("name", "user-1");   // query instance info
+await getProject("name");              // query project info
+```
+
 ### Claude Code Skills
 
 claw-farm provides two Claude Code skills in `.claude/skills/` for AI agent integration:

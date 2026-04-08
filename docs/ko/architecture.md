@@ -394,16 +394,31 @@ claw-farm despawn dog-agent --user bob       # 인스턴스 제거
 ### 프로그래밍 API (가입 플로우용)
 
 ```typescript
-import { spawn, despawn, listInstances } from "@permissionlabs/claw-farm";
+import {
+  spawn, despawn, listInstances,
+  stopInstance, startInstance,
+  getInstance, getProject,
+} from "@permissionlabs/claw-farm";
 
-// 유저 가입 → 에이전트 인스턴스 생성
+// 유저 가입 → 에이전트 인스턴스 생성 (인스턴스별 환경변수 지원)
 const { port } = await spawn({
   project: "dog-agent",
   userId: "user-123",
   context: { name: "Poppy", breed: "Maltese", age: "3" },
+  env: { GATEWAY_TOKEN: "tok_abc123" },
 });
 
 // 유저의 에이전트: http://localhost:${port}
+
+// 유휴 타임아웃 → 컨테이너 정지 (데이터 + 볼륨 보존)
+await stopInstance("dog-agent", "user-123");
+
+// 재접속 → 빠른 재시작 (리빌드 없음)
+const { port: p } = await startInstance("dog-agent", "user-123");
+
+// 인스턴스/프로젝트 정보 조회
+const instance = await getInstance("dog-agent", "user-123"); // { userId, port, createdAt }
+const project = await getProject("dog-agent"); // { path, port, runtime, ... }
 ```
 
 ### 마이그레이션 (싱글 → 멀티)
