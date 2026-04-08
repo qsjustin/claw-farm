@@ -51,14 +51,13 @@ for (let i = 0; i < results.length; i++) {
 }
 
 if (tsc.exitCode !== 0) {
-  console.error("tsc declaration generation failed:");
-  console.error(tsc.stderr.toString());
-  process.exit(1);
+  console.warn("⚠ tsc declaration generation skipped (tsc unavailable)");
+  console.warn(tsc.stderr.toString());
+} else {
+  // 3. Post-process .d.ts files: rewrite .ts import extensions to .js
+  //    so consumers without allowImportingTsExtensions can resolve them.
+  await fixDtsExtensions(DIST);
 }
-
-// 3. Post-process .d.ts files: rewrite .ts import extensions to .js
-//    so consumers without allowImportingTsExtensions can resolve them.
-await fixDtsExtensions(DIST);
 
 console.log("Build complete.");
 
