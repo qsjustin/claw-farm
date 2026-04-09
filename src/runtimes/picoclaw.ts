@@ -45,8 +45,12 @@ export const picoClawRuntime: AgentRuntime = {
     name: string,
     processor: "builtin" | "mem0",
     llm: LlmProvider,
+    options?: {
+      modelSlug?: string;
+      baseUrl?: string | null;
+    },
   ): string {
-    return picoClawConfigTemplate(name, processor, llm);
+    return picoClawConfigTemplate(name, processor, llm, options);
   },
 
   mergeConfig(templateJson: string, existingJson: string): string {

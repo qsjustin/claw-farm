@@ -53,6 +53,10 @@ export interface AgentRuntime {
     name: string,
     processor: "builtin" | "mem0",
     llm: LlmProvider,
+    options?: {
+      modelSlug?: string;
+      baseUrl?: string | null;
+    },
   ): string;
 
   /** Merge existing config with template (preserves user settings) */

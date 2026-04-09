@@ -12,6 +12,10 @@ export function picoClawConfigTemplate(
   _name: string,
   _processor: "builtin" | "mem0",
   llm: "gemini" | "anthropic" | "openai-compat" = "gemini",
+  options?: {
+    modelSlug?: string;
+    baseUrl?: string | null;
+  },
 ): string {
   const providerConfigs: Record<string, {
     modelName: string;
@@ -40,6 +44,11 @@ export function picoClawConfigTemplate(
   };
 
   const config = providerConfigs[llm];
+  const modelName = options?.modelSlug?.trim() || config.modelName;
+  const model = options?.modelSlug?.trim()
+    ? (llm === "gemini" ? `gemini/${modelName}` : llm === "anthropic" ? `anthropic/${modelName}` : `openai/${modelName}`)
+    : config.model;
+  const apiBase = options?.baseUrl?.trim() || config.apiBase;
 
   return JSON.stringify(
     {
@@ -52,7 +61,7 @@ export function picoClawConfigTemplate(
           workspace: "/root/.picoclaw/workspace",
           restrict_to_workspace: true,
           provider: config.provider,
-          model_name: config.modelName,
+          model_name: modelName,
           max_tokens: 4096,
           temperature: 0.7,
           max_tool_iterations: 50,
@@ -68,9 +77,9 @@ export function picoClawConfigTemplate(
       },
       model_list: [
         {
-          model_name: config.modelName,
-          model: config.model,
-          api_base: config.apiBase,
+          model_name: modelName,
+          model: model,
+          api_base: apiBase,
           api_key: "proxied",
         },
       ],

@@ -18,7 +18,7 @@ import {
   type InstanceEntry,
   type ProjectEntry,
 } from "./registry.ts";
-import { readProjectConfig, resolveRuntimeConfig } from "./config.ts";
+import { readProjectConfig, resolveRuntimeConfig, renderInstanceModelEnv, type LlmProvider } from "./config.ts";
 import { fileExists } from "./fs-utils.ts";
 import { ensureInstanceDirs, instanceDir, templateDir } from "./instance.ts";
 import { instanceComposeTemplate } from "../templates/docker-compose.instance.yml.ts";
@@ -65,8 +65,11 @@ export async function spawn(options: {
   context?: Record<string, string>;
   env?: Record<string, string>;
   autoStart?: boolean;
+  llm?: LlmProvider;
+  apiKey?: string;
+  baseUrl?: string | null;
 }): Promise<{ userId: string; port: number }> {
-  const { project, userId, context, env, autoStart = true } = options;
+  const { project, userId, context, env, autoStart = true, llm, apiKey, baseUrl } = options;
 
   // Validate userId (security: prevents path traversal via programmatic API)
   validateName(userId, "user ID");
@@ -149,6 +152,18 @@ export async function spawn(options: {
       ? Object.entries(env).map(([k, v]) => validateEnvEntry(k, v)).join("\n") + "\n"
       : "";
     await Bun.write(join(instDir, "instance.env"), envContent);
+
+    // Write .env.model for per-instance proxy config (api-proxy reads this)
+    // Only write if llm+apiKey provided, otherwise use default empty template
+    const modelEnvPath = join(instDir, ".env.model");
+    if (llm && apiKey) {
+      const modelEnvContent = renderInstanceModelEnv({ provider: llm, apiKey, baseUrl: baseUrl ?? null });
+      await Bun.write(modelEnvPath, modelEnvContent);
+    } else if (!await fileExists(modelEnvPath)) {
+      // Default template for project-level .env fallback
+      const defaultEnv = renderInstanceModelEnv({ provider: "gemini", apiKey: "", baseUrl: null });
+      await Bun.write(modelEnvPath, defaultEnv);
+    }
 
     // Write compose (always regenerate)
     let composeContent: string;
