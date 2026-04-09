@@ -10,6 +10,8 @@ export interface ComposeOptions {
   composePath?: string;
   /** Docker compose project name (-p flag) for container isolation */
   projectName?: string;
+  /** Suppress compose output and warnings. */
+  quiet?: boolean;
   /**
    * After compose up, connect this container to the compose's network.
    * Used for shared proxy mode: connects the api-proxy to each instance's
@@ -25,6 +27,7 @@ export async function runCompose(
 ): Promise<void> {
   const composePath = options?.composePath ?? join(projectDir, COMPOSE_FILENAME);
   const cwd = options?.composePath ? dirname(composePath) : projectDir;
+  const quiet = options?.quiet ?? false;
 
   const args = ["docker", "compose", "-f", composePath];
 
@@ -56,12 +59,27 @@ export async function runCompose(
 
   const proc = Bun.spawn(args, {
     cwd,
-    stdout: "inherit",
-    stderr: "inherit",
+    stdout: quiet ? "pipe" : "inherit",
+    stderr: quiet ? "pipe" : "inherit",
   });
-  const exitCode = await proc.exited;
-  if (exitCode !== 0) {
-    throw new Error(`docker compose ${action} failed with exit code ${exitCode}`);
+  if (quiet) {
+    const stdoutText = new Response(proc.stdout).text();
+    const stderrText = new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    const [stdout, stderr] = await Promise.all([stdoutText, stderrText]);
+    if (exitCode !== 0) {
+      const detail = stderr.trim() || stdout.trim();
+      throw new Error(
+        detail
+          ? `docker compose ${action} failed with exit code ${exitCode}: ${detail}`
+          : `docker compose ${action} failed with exit code ${exitCode}`,
+      );
+    }
+  } else {
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      throw new Error(`docker compose ${action} failed with exit code ${exitCode}`);
+    }
   }
 
   // After compose up, connect the shared proxy container to this instance's network
@@ -70,6 +88,7 @@ export async function runCompose(
     await dockerNetworkConnect(
       options.connectContainer.network,
       options.connectContainer.container,
+      quiet,
     );
   }
 }
@@ -78,7 +97,11 @@ export async function runCompose(
  * Connect a running container to a Docker network.
  * Used for shared proxy mode: each instance network gets the api-proxy attached.
  */
-async function dockerNetworkConnect(network: string, container: string): Promise<void> {
+async function dockerNetworkConnect(
+  network: string,
+  container: string,
+  quiet = false,
+): Promise<void> {
   const proc = Bun.spawn(["docker", "network", "connect", network, container], {
     stdout: "pipe",
     stderr: "pipe",
@@ -87,7 +110,7 @@ async function dockerNetworkConnect(network: string, container: string): Promise
   if (exitCode !== 0) {
     const stderr = await new Response(proc.stderr).text();
     // Ignore "already connected" errors
-    if (!stderr.includes("already exists")) {
+    if (!stderr.includes("already exists") && !quiet) {
       console.warn(`⚠ Could not connect ${container} to ${network}: ${stderr.trim()}`);
     }
   }

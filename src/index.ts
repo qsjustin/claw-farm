@@ -11,6 +11,7 @@ import { spawnCommand } from "./commands/spawn.ts";
 import { despawnCommand } from "./commands/despawn.ts";
 import { instancesCommand } from "./commands/instances.ts";
 import { migrateRuntimeCommand } from "./commands/migrate-runtime.ts";
+import { bridgeCommand } from "./commands/bridge.ts";
 
 const VERSION = "0.2.0";
 
@@ -37,6 +38,7 @@ Usage:
   claw-farm migrate-runtime <project> --to <runtime>  Switch runtime (e.g., openclaw → picoclaw)
   claw-farm memory:rebuild [name]          Rebuild processed memory from raw data
   claw-farm cloud:compose [outfile]        Generate unified cloud deploy compose
+  claw-farm bridge <op> <json>             Execute machine bridge command and print JSON
 
 Runtimes:
   openclaw       Full-featured agent runtime (Node.js, ~1.5GB/instance, default)
@@ -109,6 +111,9 @@ async function main() {
         break;
       case "cloud:compose":
         await cloudComposeCommand(commandArgs);
+        break;
+      case "bridge":
+        await bridgeCommand(commandArgs);
         break;
       default:
         console.error(`Unknown command: ${command}`);

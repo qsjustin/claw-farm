@@ -18,18 +18,51 @@ import {
   type InstanceEntry,
   type ProjectEntry,
 } from "./registry.ts";
-import { readProjectConfig, resolveRuntimeConfig, renderInstanceModelEnv, type LlmProvider } from "./config.ts";
+import {
+  readProjectConfig,
+  resolveRuntimeConfig,
+  renderInstanceModelEnv,
+  type InstanceModelEnvInput,
+  type LlmProvider,
+} from "./config.ts";
 import { fileExists } from "./fs-utils.ts";
 import { ensureInstanceDirs, instanceDir, templateDir } from "./instance.ts";
 import { instanceComposeTemplate } from "../templates/docker-compose.instance.yml.ts";
 import { fillUserTemplate } from "../templates/USER.template.md.ts";
-import { runCompose, COMPOSE_FILENAME } from "./compose.ts";
+import {
+  getComposeStatus,
+  runCompose,
+  sharedProxyConnect,
+  COMPOSE_FILENAME,
+} from "./compose.ts";
 import { migrateToMulti } from "./migrate.ts";
 import { getRuntime } from "../runtimes/index.ts";
 import type { RuntimeType, ProxyMode } from "../runtimes/interface.ts";
 
 export type { InstanceEntry, ProjectEntry };
+export type { LlmProvider };
 export { getInstance, getProject };
+
+export type InstanceRuntimeState = "running" | "stopped" | "unknown";
+
+export interface InstanceRuntimeStatus {
+  status: InstanceRuntimeState;
+  composePath: string;
+  composeProject: string;
+}
+
+export interface ApplyInstanceModelControlOptions {
+  project: string;
+  userId: string;
+  llm: LlmProvider;
+  apiKey: string;
+  modelSlug?: string;
+  baseUrl?: string | null;
+}
+
+export interface ManagedInstanceControlOptions {
+  quiet?: boolean;
+}
 
 const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -59,6 +92,61 @@ async function resolveInstance(project: string, userId: string) {
   };
 }
 
+async function writeInstanceModelEnv(
+  instDir: string,
+  input: InstanceModelEnvInput,
+): Promise<void> {
+  await Bun.write(join(instDir, ".env.model"), renderInstanceModelEnv(input));
+}
+
+async function ensureSharedProxy(
+  projectDir: string,
+  projectName: string,
+  runtimeType: RuntimeType,
+  proxyMode: ProxyMode,
+  quiet = false,
+): Promise<void> {
+  if (proxyMode !== "shared" || runtimeType === "openclaw") return;
+  const proxyComposePath = join(projectDir, "docker-compose.proxy.yml");
+  if (!await Bun.file(proxyComposePath).exists()) {
+    const runtime = getRuntime(runtimeType);
+    if (runtime.proxyComposeTemplate) {
+      await Bun.write(proxyComposePath, runtime.proxyComposeTemplate(projectName));
+    }
+  }
+  await runCompose(projectDir, "up", {
+    composePath: proxyComposePath,
+    projectName: `${projectName}-proxy`,
+    quiet,
+  });
+}
+
+async function syncInstanceRuntimeModelConfig(options: {
+  projectName: string;
+  projectDir: string;
+  entry: ProjectEntry;
+  instDir: string;
+  llm: LlmProvider;
+  modelSlug?: string;
+}): Promise<void> {
+  const { projectName, projectDir, entry, instDir, llm, modelSlug } = options;
+  const config = await readProjectConfig(projectDir);
+  const processor = config?.processor ?? entry.processor;
+  const { runtime } = resolveRuntimeConfig(config, entry);
+  const configPath = join(instDir, runtime.runtimeDirName, runtime.configFileName);
+  const templateConfig = runtime.configTemplate(
+    projectName,
+    processor,
+    llm,
+    modelSlug?.trim() ? { modelSlug } : undefined,
+  );
+  const existingConfig = await Bun.file(configPath).text().catch(() => null);
+  await Bun.write(
+    configPath,
+    existingConfig ? runtime.mergeConfig(templateConfig, existingConfig) : templateConfig,
+  );
+}
+
 export async function spawn(options: {
   project: string;
   userId: string;
@@ -68,8 +156,9 @@ export async function spawn(options: {
   llm?: LlmProvider;
   apiKey?: string;
   baseUrl?: string | null;
+  quiet?: boolean;
 }): Promise<{ userId: string; port: number }> {
-  const { project, userId, context, env, autoStart = true, llm, apiKey, baseUrl } = options;
+  const { project, userId, context, env, autoStart = true, llm, apiKey, baseUrl, quiet = false } = options;
 
   // Validate userId (security: prevents path traversal via programmatic API)
   validateName(userId, "user ID");
@@ -155,14 +244,11 @@ export async function spawn(options: {
 
     // Write .env.model for per-instance proxy config (api-proxy reads this)
     // Only write if llm+apiKey provided, otherwise use default empty template
-    const modelEnvPath = join(instDir, ".env.model");
     if (llm && apiKey) {
-      const modelEnvContent = renderInstanceModelEnv({ provider: llm, apiKey, baseUrl: baseUrl ?? null });
-      await Bun.write(modelEnvPath, modelEnvContent);
-    } else if (!await fileExists(modelEnvPath)) {
+      await writeInstanceModelEnv(instDir, { provider: llm, apiKey, baseUrl: baseUrl ?? null });
+    } else if (!await fileExists(join(instDir, ".env.model"))) {
       // Default template for project-level .env fallback
-      const defaultEnv = renderInstanceModelEnv({ provider: "gemini", apiKey: "", baseUrl: null });
-      await Bun.write(modelEnvPath, defaultEnv);
+      await writeInstanceModelEnv(instDir, { provider: "gemini", apiKey: "", baseUrl: null });
     }
 
     // Write compose (always regenerate)
@@ -189,6 +275,7 @@ export async function spawn(options: {
         await runCompose(projectDir, "up", {
           composePath: proxyComposePath,
           projectName: `${projectName}-proxy`,
+          quiet,
         });
       }
 
@@ -204,6 +291,7 @@ export async function spawn(options: {
         composePath,
         projectName: composeProject,
         connectContainer,
+        quiet,
       });
     }
 
@@ -222,7 +310,7 @@ export async function spawn(options: {
 export async function despawn(
   project: string,
   userId: string,
-  options?: { keepData?: boolean },
+  options?: { keepData?: boolean; quiet?: boolean },
 ): Promise<void> {
   const { projectName, projectDir, entry, instDir, composePath, composeProject } =
     await resolveInstance(project, userId);
@@ -238,9 +326,12 @@ export async function despawn(
       composePath,
       projectName: composeProject,
       connectContainer,
+      quiet: options?.quiet,
     });
   } catch (err) {
-    console.warn(`⚠ Could not stop containers: ${(err as Error).message}`);
+    if (!options?.quiet) {
+      console.warn(`⚠ Could not stop containers: ${(err as Error).message}`);
+    }
   }
 
   if (!options?.keepData) {
@@ -257,11 +348,16 @@ export async function despawn(
 export async function stopInstance(
   project: string,
   userId: string,
+  options?: ManagedInstanceControlOptions,
 ): Promise<void> {
   const { projectDir, composePath, composeProject } =
     await resolveInstance(project, userId);
 
-  await runCompose(projectDir, "stop", { composePath, projectName: composeProject });
+  await runCompose(projectDir, "stop", {
+    composePath,
+    projectName: composeProject,
+    quiet: options?.quiet,
+  });
 }
 
 /**
@@ -271,13 +367,67 @@ export async function stopInstance(
 export async function startInstance(
   project: string,
   userId: string,
+  options?: ManagedInstanceControlOptions,
 ): Promise<{ port: number }> {
   const { projectDir, instance, composePath, composeProject } =
     await resolveInstance(project, userId);
 
-  await runCompose(projectDir, "start", { composePath, projectName: composeProject });
+  await runCompose(projectDir, "start", {
+    composePath,
+    projectName: composeProject,
+    quiet: options?.quiet,
+  });
 
   return { port: instance.port };
+}
+
+/**
+ * Recreate a managed instance with the same semantics as `claw-farm up --user`.
+ * This ensures shared-proxy wiring and compose recreation happen consistently.
+ */
+export async function upInstance(
+  project: string,
+  userId: string,
+  options?: ManagedInstanceControlOptions,
+): Promise<{ port: number }> {
+  const { projectName, projectDir, entry, instance, composePath, composeProject } =
+    await resolveInstance(project, userId);
+
+  const config = await readProjectConfig(projectDir);
+  const { runtimeType, proxyMode } = resolveRuntimeConfig(config, entry);
+
+  await ensureSharedProxy(projectDir, projectName, runtimeType, proxyMode, options?.quiet ?? false);
+  await runCompose(projectDir, "up", {
+    composePath,
+    projectName: composeProject,
+    connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
+    quiet: options?.quiet,
+  });
+
+  return { port: instance.port };
+}
+
+/**
+ * Tear down a managed instance with the same semantics as `claw-farm down --user`.
+ * Containers are removed and shared-proxy network links are disconnected.
+ */
+export async function downInstance(
+  project: string,
+  userId: string,
+  options?: ManagedInstanceControlOptions,
+): Promise<void> {
+  const { projectName, projectDir, entry, composePath, composeProject } =
+    await resolveInstance(project, userId);
+
+  const config = await readProjectConfig(projectDir);
+  const { runtimeType, proxyMode } = resolveRuntimeConfig(config, entry);
+
+  await runCompose(projectDir, "down", {
+    composePath,
+    projectName: composeProject,
+    connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
+    quiet: options?.quiet,
+  });
 }
 
 export async function listInstances(
@@ -285,6 +435,47 @@ export async function listInstances(
 ): Promise<InstanceEntry[]> {
   const { name: projectName } = await resolveProjectName(project);
   return registryListInstances(projectName);
+}
+
+export async function getInstanceRuntimeStatus(
+  project: string,
+  userId: string,
+): Promise<InstanceRuntimeStatus> {
+  const { projectDir, composePath, composeProject } = await resolveInstance(project, userId);
+  const status = await getComposeStatus(projectDir, {
+    composePath,
+    projectName: composeProject,
+  });
+  return { status, composePath, composeProject };
+}
+
+/**
+ * Update per-instance model routing without forcing callers to reach into src/* internals.
+ * This writes the instance's sidecar env override and syncs runtime config model/provider fields.
+ */
+export async function applyInstanceModelControl(
+  options: ApplyInstanceModelControlOptions,
+): Promise<void> {
+  const { project, userId, llm, apiKey, modelSlug, baseUrl } = options;
+  if (!apiKey.trim()) {
+    throw new Error("apiKey is required");
+  }
+
+  const { projectName, projectDir, entry, instDir } = await resolveInstance(project, userId);
+
+  await writeInstanceModelEnv(instDir, {
+    provider: llm,
+    apiKey,
+    baseUrl: baseUrl ?? null,
+  });
+  await syncInstanceRuntimeModelConfig({
+    projectName,
+    projectDir,
+    entry,
+    instDir,
+    llm,
+    modelSlug,
+  });
 }
 
 /**
