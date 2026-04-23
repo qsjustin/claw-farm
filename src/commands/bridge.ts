@@ -323,10 +323,23 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
     autoStart,
     quiet: true,
   });
-  const createdContext = await resolveBridgeContext(resolved.name, userId);
-  const layoutValidation = await validateWorkspaceLayout(createdContext.layout);
-  if (!layoutValidation.ok) {
-    throw new Error(`Workspace layout incomplete after create: ${layoutValidation.missing.join(", ")}`);
+
+  let createdContext: Awaited<ReturnType<typeof resolveBridgeContext>>;
+  try {
+    createdContext = await resolveBridgeContext(resolved.name, userId);
+    const layoutValidation = await validateWorkspaceLayout(createdContext.layout);
+    if (!layoutValidation.ok) {
+      throw new Error(`Workspace layout incomplete after create: ${layoutValidation.missing.join(", ")}`);
+    }
+  } catch (error) {
+    try {
+      await despawn(resolved.name, userId, { quiet: true });
+    } catch (cleanupError) {
+      const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      const originalMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(`${originalMessage}; cleanup failed: ${cleanupMessage}`);
+    }
+    throw error;
   }
 
   return bridgeSuccess({

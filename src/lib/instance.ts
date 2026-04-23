@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { validateName } from "./registry.ts";
 import type { RuntimeType } from "../runtimes/interface.ts";
 import { ensureWorkspaceLayout, resolveWorkspaceLayout } from "./workspace-layout.ts";
+import { ensureDefaultSidecarAttachPoints } from "./sidecar-attach.ts";
 
 /**
  * Instance directory helpers for multi-instance projects.
@@ -63,7 +64,8 @@ export async function ensureInstanceDirs(
     ]);
   }
 
-  await ensureWorkspaceLayout(resolveWorkspaceLayout(projectDir, userId, rt));
+  const layout = await ensureWorkspaceLayout(resolveWorkspaceLayout(projectDir, userId, rt));
+  await ensureDefaultSidecarAttachPoints({ layout, runtimeType: rt });
   return instDir;
 }
 

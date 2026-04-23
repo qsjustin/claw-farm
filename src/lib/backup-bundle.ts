@@ -84,6 +84,15 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
+function ensureBundleTooling(): void {
+  const missing = ["tar", "zstd"].filter((tool) => !Bun.which(tool));
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required backup tools: ${missing.join(", ")}. Install them before using instance.export/import.`,
+    );
+  }
+}
+
 export function normalizeIncludedPaths(includedPaths?: string[]): string[] {
   return unique([...(includedPaths ?? DEFAULT_INCLUDED_PATHS), "runtime"]);
 }
@@ -226,19 +235,30 @@ async function copyIncludedPaths(
 }
 
 async function createArchive(stageRoot: string, bundlePath: string): Promise<void> {
+  ensureBundleTooling();
   await runCommand([
-    "bash",
-    "-lc",
-    `tar -C "${stageRoot}" -cf - . | zstd -q -o "${bundlePath}"`,
+    "tar",
+    "-C",
+    stageRoot,
+    "--use-compress-program",
+    "zstd -q",
+    "-cf",
+    bundlePath,
+    ".",
   ]);
 }
 
 async function extractArchive(bundlePath: string, extractRoot: string): Promise<void> {
   await mkdir(extractRoot, { recursive: true });
+  ensureBundleTooling();
   await runCommand([
-    "bash",
-    "-lc",
-    `zstd -d -q -c "${bundlePath}" | tar -xf - -C "${extractRoot}"`,
+    "tar",
+    "--use-compress-program",
+    "zstd -d -q",
+    "-xf",
+    bundlePath,
+    "-C",
+    extractRoot,
   ]);
 }
 
@@ -355,6 +375,7 @@ export async function importInstanceBundle(options: ImportBundleOptions): Promis
 
   const movedPaths: string[] = [];
   try {
+    // Current MVP semantics are replace-at-directory-boundary, not file-level merge.
     for (const relPath of includedPaths) {
       const target = join(layout.workspaceRoot, relPath);
       const backup = join(backupRoot, relPath);
