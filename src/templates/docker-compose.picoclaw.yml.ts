@@ -51,9 +51,12 @@ ${hasProxy ? `  api-proxy:
     ports:
       - "127.0.0.1:${port}:18790"
     volumes:
+      # Sidecar attach points live under workspace/runtime/sidecar-* and are
+      # available through this same bind mount without extra per-provider volumes.
       - ./picoclaw:/root/.picoclaw
 ${hasProxy ? `    environment:
       PICOCLAW_PROXY_URL: http://api-proxy:8080
+      PICOCLAW_SIDECAR_ATTACH_ROOT: /root/.picoclaw/workspace/runtime
     networks:
       - proxy-net` : ""}
     read_only: true
@@ -140,11 +143,14 @@ ${hasProxy ? `  api-proxy:
     ports:
       - "127.0.0.1:${port}:18790"
     volumes:
+      # Sidecar attach points live under workspace/runtime/sidecar-* and are
+      # available through this same bind mount without extra per-provider volumes.
       - ./picoclaw:/root/.picoclaw
     env_file:
       - ./instance.env
 ${hasProxy ? `    environment:
       PICOCLAW_PROXY_URL: http://api-proxy:8080
+      PICOCLAW_SIDECAR_ATTACH_ROOT: /root/.picoclaw/workspace/runtime
     networks:
       - proxy-net` : ""}
     read_only: true
@@ -199,11 +205,14 @@ services:
     ports:
       - "127.0.0.1:${port}:18790"
     volumes:
+      # Sidecar attach points live under workspace/runtime/sidecar-* and are
+      # available through this same bind mount without extra per-provider volumes.
       - ./picoclaw:/root/.picoclaw
     env_file:
       - ./instance.env
     environment:
       PICOCLAW_PROXY_URL: http://${projectName}-api-proxy:8080
+      PICOCLAW_SIDECAR_ATTACH_ROOT: /root/.picoclaw/workspace/runtime
     networks:
       - instance-net
     read_only: true

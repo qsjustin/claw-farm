@@ -2,6 +2,7 @@ import { join, resolve, sep } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { validateName } from "./registry.ts";
 import type { RuntimeType } from "../runtimes/interface.ts";
+import { ensureWorkspaceLayout, resolveWorkspaceLayout } from "./workspace-layout.ts";
 
 /**
  * Instance directory helpers for multi-instance projects.
@@ -61,6 +62,8 @@ export async function ensureInstanceDirs(
       ...commonDirs,
     ]);
   }
+
+  await ensureWorkspaceLayout(resolveWorkspaceLayout(projectDir, userId, rt));
   return instDir;
 }
 

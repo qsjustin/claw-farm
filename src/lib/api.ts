@@ -27,6 +27,7 @@ import {
 } from "./config.ts";
 import { fileExists } from "./fs-utils.ts";
 import { ensureInstanceDirs, instanceDir, templateDir } from "./instance.ts";
+import { resolveWorkspaceLayout } from "./workspace-layout.ts";
 import { instanceComposeTemplate } from "../templates/docker-compose.instance.yml.ts";
 import { fillUserTemplate } from "../templates/USER.template.md.ts";
 import {
@@ -182,6 +183,7 @@ export async function spawn(options: {
   try {
     // Create instance dirs (runtime-aware)
     const instDir = await ensureInstanceDirs(projectDir, userId, runtimeType);
+    const workspaceLayout = resolveWorkspaceLayout(projectDir, userId, runtimeType);
     const rtDir = runtime.runtimeDirName;
 
     // Copy config files from template to instance
@@ -203,7 +205,7 @@ export async function spawn(options: {
     }));
 
     // Copy shared template files (SOUL.md, AGENTS.md, skills/) into instance workspace
-    const workspaceDir = join(instDir, rtDir, "workspace");
+    const workspaceDir = workspaceLayout.workspaceRoot;
     await copyTemplateFiles(tmplDir, workspaceDir);
 
     // Fill USER.md — only write if file doesn't already exist (preserve on re-spawn with --keep-data)

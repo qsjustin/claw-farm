@@ -52,12 +52,15 @@ ${hasProxy ? `  api-proxy:
       - "127.0.0.1:${port}:18789"
     volumes:
       # Directory mount — OpenClaw needs atomic rename for config updates
+      # Sidecar attach points live under workspace/runtime/sidecar-* and are
+      # available through this same bind mount without extra per-provider volumes.
       - ./openclaw:/home/node/.openclaw
     environment:
       # No GEMINI_API_KEY here — agent cannot see it
 ${hasProxy ? `      OPENCLAW_API_PROXY: http://api-proxy:8080` : `      # OPENCLAW_API_PROXY: not set (proxyMode: none)`}
       OPENCLAW_SANDBOX: 1
       OPENCLAW_AUDIT_LOG: /home/node/.openclaw/logs/audit.jsonl
+      OPENCLAW_SIDECAR_ATTACH_ROOT: /home/node/.openclaw/workspace/runtime
 ${hasProxy ? `    networks:
       - proxy-net` : ""}
     read_only: true

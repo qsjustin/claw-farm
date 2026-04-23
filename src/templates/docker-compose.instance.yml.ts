@@ -60,6 +60,8 @@ ${hasProxy ? `  api-proxy:
       # Directory mount — OpenClaw needs atomic rename for config updates
       # Template files (SOUL.md, AGENTS.md, skills/) are copied into openclaw/workspace/
       # at spawn/upgrade time instead of overlay mounts (Docker Desktop compatibility)
+      # Sidecar attach points live under workspace/runtime/sidecar-* and are
+      # available through this same bind mount without extra per-provider volumes.
       - ./openclaw:/home/node/.openclaw
     env_file:
       - ./instance.env
@@ -67,6 +69,7 @@ ${hasProxy ? `  api-proxy:
 ${hasProxy ? `      OPENCLAW_API_PROXY: http://api-proxy:8080` : `      # OPENCLAW_API_PROXY: not set (proxyMode: none)`}
       OPENCLAW_SANDBOX: 1
       OPENCLAW_AUDIT_LOG: /home/node/.openclaw/logs/audit.jsonl
+      OPENCLAW_SIDECAR_ATTACH_ROOT: /home/node/.openclaw/workspace/runtime
 ${hasProxy ? `    networks:
       - proxy-net` : ""}
     read_only: true

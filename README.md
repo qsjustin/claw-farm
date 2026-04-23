@@ -110,6 +110,7 @@ Each module works standalone or as composable middleware. See [SDK Guide](docs/s
 | [SDK Guide](docs/sdk-guide.md) | Humans + Agents | SDK integration, API reference, migration guide |
 | [Agent Integration](docs/agent-integration.md) | AI Agents | File rules, paths, editability, security constraints |
 | [Architecture](docs/architecture.md) | Humans + Agents | Full diagrams, container topology, data flow |
+| [Workspace Layout](docs/workspace-layout.md) | Humans + Agents | Canonical per-instance workspace directories for bridge and backup flows |
 | [Security](docs/security.md) | Humans | Threat model, hardening checklist |
 | [Korean docs](docs/ko/) | Humans | Korean translations |
 
