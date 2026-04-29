@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "action": "agent.create",
+  "message": "Agent created.",
+  "observedAt": "2026-04-29T00:00:00.000Z",
+  "runtimeInstanceKey": "clawbay-prod:user-1",
+  "runtimeWorkspaceSlug": "user-1",
+  "agentSlug": "assistant",
+  "agentConfigPath": "runtime/agents/assistant/agent.md"
+}

@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "action": "instance.start",
+  "message": "Instance started.",
+  "observedAt": "2026-04-29T00:00:00.000Z",
+  "runtimeState": "running",
+  "runtimeInstanceKey": "clawbay-prod:user-1",
+  "runtimeWorkspaceSlug": "user-1"
+}

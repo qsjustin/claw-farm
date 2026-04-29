@@ -14,6 +14,19 @@ const requiredErrorCodes: BridgeErrorCode[] = [
   "runtime-command-failed",
   "unknown",
 ];
+const requiredSuccessActions = [
+  "agent.create",
+  "agent.updateConfig",
+  "instance.applyModelControl",
+  "instance.create",
+  "instance.delete",
+  "instance.export",
+  "instance.import",
+  "instance.restart",
+  "instance.start",
+  "instance.stop",
+  "instance.sync",
+];
 
 async function loadFixtures(group: "success" | "errors"): Promise<Array<{ name: string; value: BridgeResponse }>> {
   const dir = join(fixtureRoot, group);
@@ -29,7 +42,11 @@ async function loadFixtures(group: "success" | "errors"): Promise<Array<{ name: 
 describe("bridge fixtures", () => {
   test("success fixtures use the bridge response envelope", async () => {
     const fixtures = await loadFixtures("success");
-    expect(fixtures.length).toBeGreaterThanOrEqual(4);
+    const actions = new Set(fixtures.map(({ value }) => value.action));
+
+    for (const action of requiredSuccessActions) {
+      expect(actions.has(action), action).toBe(true);
+    }
 
     for (const { name, value } of fixtures) {
       expect(value.ok, name).toBe(true);

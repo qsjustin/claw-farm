@@ -111,8 +111,13 @@ Each module works standalone or as composable middleware. See [SDK Guide](docs/s
 | [Agent Integration](docs/agent-integration.md) | AI Agents | File rules, paths, editability, security constraints |
 | [Architecture](docs/architecture.md) | Humans + Agents | Full diagrams, container topology, data flow |
 | [Workspace Layout](docs/workspace-layout.md) | Humans + Agents | Canonical per-instance workspace directories for bridge and backup flows |
+| [Bridge Operations](docs/bridge-operations.md) | Humans + Agents | Machine bridge operations, response envelope, retry guidance, and reusable fixtures |
 | [Security](docs/security.md) | Humans | Threat model, hardening checklist |
 | [Korean docs](docs/ko/) | Humans | Korean translations |
+
+## ClawBay Bridge Fixtures
+
+`tests/fixtures/` contains reusable JSON examples for the ClawBay bridge contract. Success fixtures cover each supported operation (`instance.*`, `agent.*`) and error fixtures cover every shared bridge error code. Keep these fixtures path-safe and free of host-specific absolute paths so `claw-bay` adapter tests can consume them directly.
 
 ## License
 

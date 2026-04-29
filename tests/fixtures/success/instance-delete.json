@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "action": "instance.delete",
+  "message": "Instance deleted.",
+  "observedAt": "2026-04-29T00:00:00.000Z",
+  "runtimeState": "stopped",
+  "runtimeInstanceKey": "clawbay-prod:user-1",
+  "runtimeWorkspaceSlug": "user-1"
+}

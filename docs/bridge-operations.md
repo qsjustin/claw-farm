@@ -42,6 +42,21 @@ Exports include `config`, `skills`, `sessions`, and runtime metadata. `cache` an
 |---|---|---|
 | `instance.applyModelControl` | `project`, `userId`, `llm`, `apiKey`, optional `baseUrl`, `model`, `label` | Writes per-instance model configuration into the runtime workspace. |
 
+## Agent Runtime Config
+
+| Operation | Required input | Purpose |
+|---|---|---|
+| `agent.create` | `project`, `userId`, `agentSlug`, optional `displayName`, `templateCode`, `context` | Creates an agent runtime config under the canonical instance workspace. |
+| `agent.updateConfig` | `project`, `userId`, `agentSlug`, `patch` | Updates an existing agent runtime config without changing platform business state. |
+
+## Reusable Fixtures
+
+Bridge fixtures live under `tests/fixtures/{success,errors}`. They are contract examples for both `claw-farm` tests and `claw-bay` adapter tests:
+
+- `tests/fixtures/success/*.json` covers every supported bridge operation listed above.
+- `tests/fixtures/errors/*.json` covers every shared bridge `errorCode`.
+- Fixtures must not contain host absolute paths. Use workspace-relative paths such as `runtime/agents/assistant/agent.md`.
+
 ## Error Codes
 
 | Code | Retry? | Meaning |

@@ -1,7 +1,7 @@
 FROM oven/bun:1.3.13 AS deps
 WORKDIR /app
 COPY package.json ./
-RUN bun install
+RUN bun install --ignore-scripts
 
 FROM deps AS build
 COPY tsconfig.json tsconfig.build.json ./
