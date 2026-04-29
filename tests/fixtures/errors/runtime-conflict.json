@@ -1,0 +1,11 @@
+{
+  "ok": false,
+  "action": "instance.create",
+  "message": "Runtime instance already exists.",
+  "error": "Runtime instance already exists.",
+  "observedAt": "2026-04-29T00:00:00.000Z",
+  "runtimeInstanceKey": "clawbay-prod:user-1",
+  "runtimeWorkspaceSlug": "user-1",
+  "errorCode": "runtime-conflict",
+  "retryable": false
+}

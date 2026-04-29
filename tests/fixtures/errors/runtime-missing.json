@@ -1,0 +1,11 @@
+{
+  "ok": false,
+  "action": "instance.start",
+  "message": "Instance for user \"user-1\" not found in \"clawbay-prod\".",
+  "error": "Instance for user \"user-1\" not found in \"clawbay-prod\".",
+  "observedAt": "2026-04-29T00:00:00.000Z",
+  "runtimeInstanceKey": "clawbay-prod:user-1",
+  "runtimeWorkspaceSlug": "user-1",
+  "errorCode": "runtime-missing",
+  "retryable": false
+}

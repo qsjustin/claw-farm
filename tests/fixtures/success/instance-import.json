@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "action": "instance.import",
+  "message": "Instance imported.",
+  "observedAt": "2026-04-29T00:00:00.000Z",
+  "runtimeInstanceKey": "clawbay-prod:user-1",
+  "runtimeWorkspaceSlug": "user-1",
+  "restoredFileCount": 12,
+  "bundleChecksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "rebuildRequired": false
+}

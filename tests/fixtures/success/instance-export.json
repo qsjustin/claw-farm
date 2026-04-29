@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "action": "instance.export",
+  "message": "Instance exported.",
+  "observedAt": "2026-04-29T00:00:00.000Z",
+  "runtimeInstanceKey": "clawbay-prod:user-1",
+  "runtimeWorkspaceSlug": "user-1",
+  "bundlePath": "exports/user-1/instance.tar.zst",
+  "manifestPath": "exports/user-1/manifest.json",
+  "checksumPath": "exports/user-1/sha256.txt",
+  "fileCount": 12,
+  "sizeBytes": 4096,
+  "bundleChecksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

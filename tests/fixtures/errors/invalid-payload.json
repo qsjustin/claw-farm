@@ -1,0 +1,9 @@
+{
+  "ok": false,
+  "action": "instance.create",
+  "message": "userId is required.",
+  "error": "userId is required.",
+  "observedAt": "2026-04-29T00:00:00.000Z",
+  "errorCode": "invalid-payload",
+  "retryable": false
+}
