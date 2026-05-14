@@ -49,7 +49,7 @@ source ~/.zshrc
 ## Quick Start
 
 ```bash
-# Single agent
+# Single agent (OpenClaw default)
 claw-farm init my-agent
 cp .env.example .env && vi .env   # Add GEMINI_API_KEY
 claw-farm up my-agent
@@ -60,6 +60,12 @@ claw-farm init my-agent --multi
 claw-farm spawn my-agent --user alice --context name=Poppy breed=Maltese
 claw-farm spawn my-agent --user bob --context name=Max breed=Golden
 claw-farm instances my-agent
+
+# Service runtime: Hermes API server
+claw-farm init hermes-agent --runtime hermes --proxy-mode none
+cp .env.example .env && vi .env   # Set API_SERVER_KEY and provider keys
+claw-farm up hermes-agent
+curl -H "Authorization: Bearer $API_SERVER_KEY" http://127.0.0.1:18789/health
 ```
 
 See [Getting Started Guide](docs/getting-started.md) for the full walkthrough.
@@ -68,7 +74,7 @@ See [Getting Started Guide](docs/getting-started.md) for the full walkthrough.
 
 | Command | Description |
 |---------|-------------|
-| `init <name>` | Scaffold agent project (`--multi`, `--runtime picoclaw`, `--proxy-mode none`, `--processor mem0`, `--llm anthropic`) |
+| `init <name>` | Scaffold agent project (`--multi`, `--runtime picoclaw|hermes`, `--proxy-mode none`, `--processor mem0`, `--llm anthropic`) |
 | `up [name\|--all]` | Start containers (`--user <id>` for specific instance) |
 | `down [name\|--all]` | Stop containers |
 | `spawn <project> --user <id>` | Create and start per-user instance |
@@ -77,8 +83,22 @@ See [Getting Started Guide](docs/getting-started.md) for the full walkthrough.
 | `list` | Show all projects + status |
 | `upgrade [name]` | Re-generate templates (`--force-policy` to overwrite policy.yaml) |
 | `memory:rebuild [name]` | Rebuild Layer 1 from raw data |
-| `migrate-runtime <project> --to <rt>` | Switch runtime (openclaw/picoclaw) |
+| `migrate-runtime <project> --to <rt>` | Switch runtime (openclaw/picoclaw; service-runtime migration is managed through registry/lifecycle contracts) |
 | `cloud:compose [outfile]` | Generate cloud deployment compose |
+
+## Runtime Support
+
+`claw-farm` now manages three runtime families:
+
+| Runtime | Purpose | Lifecycle support | Data policy |
+|---------|---------|-------------------|-------------|
+| `openclaw` | Full OpenClaw service runtime | `init`, `up`, `down`, `spawn`, `despawn`, registry sync | Existing behavior: data is removed on delete unless `--keep-data` is used |
+| `picoclaw` | Lightweight Go runtime | Existing lightweight runtime lifecycle | Existing behavior |
+| `hermes` | Hermes Agent API server (`nousresearch/hermes-agent`) | `init`, `up`, `down`, `spawn`, `despawn`, `status`, registry sync, multi-instance smoke tested | Data under `hermes/` is retained by default; physical deletion requires explicit `--delete-data` |
+
+Hermes exposes API port `8642` inside the container. Generated compose files bind the host port to `127.0.0.1` and require `API_SERVER_KEY`; there is no default production key. Put provider API keys and `API_SERVER_KEY` in the generated `.env` or per-instance `instance.env`, not in runtime config JSON.
+
+`~/.claw-farm/runtime-instances.json` tracks service runtime instances for ClawBay integration. The registry stores logical refs such as `endpointRef`, `apiKeyRef`, `dataVolumeRef`, and `workspaceRef`; it must not store host absolute paths or raw secrets.
 
 ## SDK (Security Modules)
 
