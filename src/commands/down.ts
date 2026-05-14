@@ -4,6 +4,7 @@ import { readProjectConfig, resolveRuntimeConfig } from "../lib/config.ts";
 import { runCompose, sharedProxyConnect, COMPOSE_FILENAME } from "../lib/compose.ts";
 import { snapshotWorkspace } from "../lib/raw-collector.ts";
 import { instanceDir } from "../lib/instance.ts";
+import { updateRuntimeInstanceStatus } from "../lib/runtime-instance-registry.ts";
 import type { RuntimeType, ProxyMode } from "../runtimes/index.ts";
 
 /** Stop shared proxy compose if no instances remain running. */
@@ -58,6 +59,7 @@ export async function downCommand(args: string[]): Promise<void> {
               projectName: `${name}-${uid}`,
               connectContainer: sharedProxyConnect(name, uid, runtimeType, proxyMode),
             });
+            await updateRuntimeInstanceStatus(name, uid, "stopped", { ready: false });
           } catch {}
         }));
         // Stop shared proxy after all instances
@@ -92,6 +94,7 @@ export async function downCommand(args: string[]): Promise<void> {
       projectName: `${projectName}-${userId}`,
       connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
     });
+    await updateRuntimeInstanceStatus(projectName, userId, "stopped", { ready: false });
     console.log(`\n✅ ${projectName}/${userId} stopped.`);
     return;
   }
@@ -112,6 +115,7 @@ export async function downCommand(args: string[]): Promise<void> {
           projectName: `${projectName}-${uid}`,
           connectContainer: sharedProxyConnect(projectName, uid, runtimeType, proxyMode),
         });
+        await updateRuntimeInstanceStatus(projectName, uid, "stopped", { ready: false });
       } catch {}
     }));
     // Stop shared proxy after all instances are down

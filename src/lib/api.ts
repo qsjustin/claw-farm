@@ -39,6 +39,10 @@ import {
 import { migrateToMulti } from "./migrate.ts";
 import { getRuntime } from "../runtimes/index.ts";
 import type { RuntimeType, ProxyMode } from "../runtimes/interface.ts";
+import {
+  upsertRuntimeInstance,
+  updateRuntimeInstanceStatus,
+} from "./runtime-instance-registry.ts";
 
 export type { InstanceEntry, ProjectEntry };
 export type { LlmProvider };
@@ -50,6 +54,19 @@ export interface InstanceRuntimeStatus {
   status: InstanceRuntimeState;
   composePath: string;
   composeProject: string;
+}
+
+export interface DespawnOptions {
+  keepData?: boolean;
+  deleteData?: boolean;
+  quiet?: boolean;
+}
+
+export function shouldPreserveInstanceData(
+  runtimeType: RuntimeType,
+  options?: DespawnOptions,
+): boolean {
+  return options?.keepData === true || (runtimeType === "hermes" && options?.deleteData !== true);
 }
 
 export interface ApplyInstanceModelControlOptions {
@@ -179,6 +196,8 @@ export async function spawn(options: {
   // Register instance (validates userId again, acquires lock)
   const { port } = await addInstance(projectName, userId);
 
+  let runtimeRegistryCreated = false;
+
   // From here, if anything fails, we must roll back the registry entry
   try {
     // Create instance dirs (runtime-aware)
@@ -263,6 +282,16 @@ export async function spawn(options: {
     const composePath = join(instDir, COMPOSE_FILENAME);
     await Bun.write(composePath, composeContent);
 
+    await upsertRuntimeInstance({
+      project: projectName,
+      userId,
+      runtimeType,
+      status: autoStart ? "starting" : "stopped",
+      hostPort: port,
+      displayName: context?.displayName,
+    });
+    runtimeRegistryCreated = true;
+
     // Start if requested
     if (autoStart) {
       // Ensure shared proxy is running (generates compose if needed, starts it)
@@ -295,6 +324,7 @@ export async function spawn(options: {
         connectContainer,
         quiet,
       });
+      await updateRuntimeInstanceStatus(projectName, userId, "running");
     }
 
     return { userId, port };
@@ -305,6 +335,16 @@ export async function spawn(options: {
     } catch {
       // Best effort rollback
     }
+    if (runtimeRegistryCreated) {
+      try {
+        await updateRuntimeInstanceStatus(projectName, userId, "deleted", {
+          ready: false,
+          lastError: err instanceof Error ? err.message : String(err),
+        });
+      } catch {
+        // Best effort rollback.
+      }
+    }
     throw err;
   }
 }
@@ -312,13 +352,15 @@ export async function spawn(options: {
 export async function despawn(
   project: string,
   userId: string,
-  options?: { keepData?: boolean; quiet?: boolean },
+  options?: DespawnOptions,
 ): Promise<void> {
   const { projectName, projectDir, entry, instDir, composePath, composeProject } =
     await resolveInstance(project, userId);
 
   const config = await readProjectConfig(projectDir);
   const { runtimeType, proxyMode } = resolveRuntimeConfig(config, entry);
+  const preserveData = shouldPreserveInstanceData(runtimeType, options);
+  await updateRuntimeInstanceStatus(projectName, userId, "deleting", { ready: false });
   const connectContainer = (proxyMode === "shared" && runtimeType !== "openclaw")
     ? { container: `${projectName}-api-proxy`, network: `${composeProject}_instance-net` }
     : undefined;
@@ -336,11 +378,15 @@ export async function despawn(
     }
   }
 
-  if (!options?.keepData) {
+  if (!preserveData) {
     await rm(instDir, { recursive: true, force: true });
   }
 
   await removeInstance(projectName, userId);
+  await updateRuntimeInstanceStatus(projectName, userId, "deleted", {
+    ready: false,
+    lastError: preserveData ? "Instance stopped; data retained." : undefined,
+  });
 }
 
 /**
@@ -352,7 +398,7 @@ export async function stopInstance(
   userId: string,
   options?: ManagedInstanceControlOptions,
 ): Promise<void> {
-  const { projectDir, composePath, composeProject } =
+  const { projectName, projectDir, composePath, composeProject } =
     await resolveInstance(project, userId);
 
   await runCompose(projectDir, "stop", {
@@ -360,6 +406,7 @@ export async function stopInstance(
     projectName: composeProject,
     quiet: options?.quiet,
   });
+  await updateRuntimeInstanceStatus(projectName, userId, "stopped", { ready: false });
 }
 
 /**
@@ -371,7 +418,7 @@ export async function startInstance(
   userId: string,
   options?: ManagedInstanceControlOptions,
 ): Promise<{ port: number }> {
-  const { projectDir, instance, composePath, composeProject } =
+  const { projectName, projectDir, instance, composePath, composeProject } =
     await resolveInstance(project, userId);
 
   await runCompose(projectDir, "start", {
@@ -379,6 +426,7 @@ export async function startInstance(
     projectName: composeProject,
     quiet: options?.quiet,
   });
+  await updateRuntimeInstanceStatus(projectName, userId, "running", { ready: true });
 
   return { port: instance.port };
 }
@@ -405,6 +453,7 @@ export async function upInstance(
     connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
     quiet: options?.quiet,
   });
+  await updateRuntimeInstanceStatus(projectName, userId, "running", { ready: true });
 
   return { port: instance.port };
 }
@@ -430,6 +479,7 @@ export async function downInstance(
     connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
     quiet: options?.quiet,
   });
+  await updateRuntimeInstanceStatus(projectName, userId, "stopped", { ready: false });
 }
 
 export async function listInstances(
@@ -443,11 +493,12 @@ export async function getInstanceRuntimeStatus(
   project: string,
   userId: string,
 ): Promise<InstanceRuntimeStatus> {
-  const { projectDir, composePath, composeProject } = await resolveInstance(project, userId);
+  const { projectName, projectDir, composePath, composeProject } = await resolveInstance(project, userId);
   const status = await getComposeStatus(projectDir, {
     composePath,
     projectName: composeProject,
   });
+  await updateRuntimeInstanceStatus(projectName, userId, status === "unknown" ? "unhealthy" : status);
   return { status, composePath, composeProject };
 }
 

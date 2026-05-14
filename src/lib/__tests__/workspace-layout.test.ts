@@ -41,4 +41,14 @@ describe("workspace-layout", () => {
       WORKSPACE_LAYOUT_DIRS.filter((dir) => dir !== "skills"),
     );
   });
+
+  it("resolves hermes runtime layout under hermes/", async () => {
+    const layout = resolveWorkspaceLayout(tmp, "alice", "hermes");
+    await ensureWorkspaceLayout(layout);
+
+    expect(layout.runtimeRoot.endsWith("/hermes")).toBe(true);
+    expect(layout.workspaceRoot.endsWith("/hermes/workspace")).toBe(true);
+    const validation = await validateWorkspaceLayout(layout);
+    expect(validation.ok).toBe(true);
+  });
 });

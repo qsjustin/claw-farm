@@ -41,6 +41,20 @@ describe("resolveRuntimeConfig", () => {
     expect(result.proxyMode).toBe("per-instance");
   });
 
+  it("uses hermes from config.runtime", () => {
+    const config: ClawFarmConfig = {
+      name: "test",
+      processor: "builtin",
+      port: 18789,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      runtime: "hermes",
+    };
+    const result = resolveRuntimeConfig(config, baseEntry);
+    expect(result.runtimeType).toBe("hermes");
+    expect(result.runtime.runtimeDirName).toBe("hermes");
+    expect(result.proxyMode).toBe("none");
+  });
+
   it("uses entry.runtime when config is null", () => {
     const result = resolveRuntimeConfig(null, { runtime: "picoclaw" });
     expect(result.runtimeType).toBe("picoclaw");

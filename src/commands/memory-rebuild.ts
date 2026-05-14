@@ -6,6 +6,7 @@ import { instanceDir } from "../lib/instance.ts";
 import { builtinProcessor } from "../processors/builtin.ts";
 import { mem0Processor } from "../processors/mem0.ts";
 import type { RuntimeType } from "../runtimes/interface.ts";
+import { getRuntime } from "../runtimes/index.ts";
 
 export async function memoryRebuildCommand(args: string[]): Promise<void> {
   const userIdx = args.indexOf("--user");
@@ -57,7 +58,8 @@ async function rebuildInstanceMemory(
   runtimeType: RuntimeType = "openclaw",
 ): Promise<void> {
   const instDir = instanceDir(projectDir, userId);
-  const rtDir = runtimeType === "picoclaw" ? "picoclaw" : "openclaw";
+  const runtime = getRuntime(runtimeType);
+  const rtDir = runtime.runtimeDirName;
 
   // Determine session and memory paths based on runtime
   const sessionsDir = runtimeType === "picoclaw"

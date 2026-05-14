@@ -29,6 +29,7 @@ export function templateDir(projectDir: string): string {
  * Directory layout differs by runtime:
  * - openclaw: openclaw/workspace/, openclaw/sessions/, openclaw/logs/
  * - picoclaw: picoclaw/workspace/, picoclaw/workspace/memory/, picoclaw/workspace/sessions/
+ * - hermes: hermes/ mounted as /opt/data with workspace/, logs/, sessions/, skills/
  */
 export async function ensureInstanceDirs(
   projectDir: string,
@@ -52,6 +53,17 @@ export async function ensureInstanceDirs(
       mkdir(join(instDir, "picoclaw", "workspace", "sessions"), { recursive: true, mode: 0o755 }),
       mkdir(join(instDir, "picoclaw", "workspace", "state"), { recursive: true, mode: 0o755 }),
       mkdir(join(instDir, "picoclaw", "workspace", "skills"), { recursive: true, mode: 0o755 }),
+      ...commonDirs,
+    ]);
+  } else if (rt === "hermes") {
+    // Hermes owns /opt/data. Keep its data root self-contained and preserved.
+    await Promise.all([
+      mkdir(join(instDir, "hermes", "workspace", "memory"), { recursive: true, mode: 0o755 }),
+      mkdir(join(instDir, "hermes", "workspace", "sessions"), { recursive: true, mode: 0o755 }),
+      mkdir(join(instDir, "hermes", "workspace", "skills"), { recursive: true, mode: 0o755 }),
+      mkdir(join(instDir, "hermes", "logs"), { recursive: true, mode: 0o755 }),
+      mkdir(join(instDir, "hermes", "sessions"), { recursive: true, mode: 0o700 }),
+      mkdir(join(instDir, "hermes", "skills"), { recursive: true, mode: 0o755 }),
       ...commonDirs,
     ]);
   } else {

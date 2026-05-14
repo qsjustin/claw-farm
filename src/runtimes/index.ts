@@ -6,10 +6,12 @@
 import type { AgentRuntime, RuntimeType } from "./interface.ts";
 import { openclawRuntime } from "./openclaw.ts";
 import { picoClawRuntime } from "./picoclaw.ts";
+import { hermesRuntime } from "./hermes.ts";
 
 const runtimes: Record<RuntimeType, AgentRuntime> = {
   openclaw: openclawRuntime,
   picoclaw: picoClawRuntime,
+  hermes: hermesRuntime,
 };
 
 /**

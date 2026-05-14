@@ -17,6 +17,14 @@ import {
 import { resolveWorkspaceLayout, validateWorkspaceLayout } from "../lib/workspace-layout.ts";
 import { fillUserTemplate } from "../templates/USER.template.md.ts";
 import { getInstance, resolveProjectName, validateName } from "../lib/registry.ts";
+import {
+  getRuntimeInstance,
+  listRuntimeInstances,
+  redactedRuntimeInstance,
+  resolveRuntimeInternalEndpoint,
+  type RuntimeInstanceStatus,
+} from "../lib/runtime-instance-registry.ts";
+import type { RuntimeType } from "../runtimes/interface.ts";
 
 const INSTANCE_OPERATIONS = new Set([
   "instance.create",
@@ -30,6 +38,10 @@ const INSTANCE_OPERATIONS = new Set([
   "instance.applyModelControl",
   "agent.create",
   "agent.updateConfig",
+  "runtime.registry.list",
+  "runtime.registry.get",
+  "runtime.registry.sync",
+  "runtime.registry.resolve",
 ]);
 
 function emit(value: BridgeResponse): void {
@@ -149,6 +161,16 @@ function bridgeFailure(input: {
   });
 }
 
+export function buildRuntimeRegistrySyncExtra(input: {
+  composeProject: string;
+  runtimeInstance: ReturnType<typeof redactedRuntimeInstance> | null;
+}): Record<string, unknown> {
+  return {
+    composeProject: input.composeProject,
+    runtimeInstance: input.runtimeInstance,
+  };
+}
+
 function parseRuntimeInstanceKey(payload: Record<string, unknown>): { project: string; userId: string } {
   const explicitProject = asString(payload.project);
   const explicitUserId = asString(payload.userId);
@@ -158,13 +180,21 @@ function parseRuntimeInstanceKey(payload: Record<string, unknown>): { project: s
 
   const runtimeInstanceKey = asString(payload.runtimeInstanceKey);
   if (runtimeInstanceKey) {
-    const separator = runtimeInstanceKey.indexOf(":");
-    if (separator <= 0 || separator >= runtimeInstanceKey.length - 1) {
-      throw new BridgeCommandError("invalid-payload", 'runtimeInstanceKey must use the form "project:userId"');
+    const parts = runtimeInstanceKey.split(":").map((part) => part.trim());
+    if (parts.length !== 2 && parts.length !== 3) {
+      throw new BridgeCommandError("invalid-payload", 'runtimeInstanceKey must use the form "project:userId" or "project:userId:runtimeType"');
+    }
+    const [project, userId, keyRuntimeType] = parts;
+    if (!project || !userId || (parts.length === 3 && !keyRuntimeType)) {
+      throw new BridgeCommandError("invalid-payload", 'runtimeInstanceKey must use the form "project:userId" or "project:userId:runtimeType"');
+    }
+    const payloadRuntimeType = asString(payload.runtimeType);
+    if (keyRuntimeType && payloadRuntimeType && keyRuntimeType !== payloadRuntimeType) {
+      throw new BridgeCommandError("invalid-payload", `runtimeInstanceKey runtime type "${keyRuntimeType}" does not match payload runtimeType "${payloadRuntimeType}".`);
     }
     return {
-      project: runtimeInstanceKey.slice(0, separator),
-      userId: runtimeInstanceKey.slice(separator + 1),
+      project,
+      userId,
     };
   }
 
@@ -177,6 +207,29 @@ function parseLlmProvider(payload: Record<string, unknown>): LlmProvider {
     return provider;
   }
   throw new BridgeCommandError("invalid-payload", 'llm/provider must be one of: gemini, anthropic, openai-compat');
+}
+
+function parseRuntimeType(value: unknown): RuntimeType | undefined {
+  if (value === undefined) return undefined;
+  if (value === "openclaw" || value === "picoclaw" || value === "hermes") return value;
+  throw new BridgeCommandError("invalid-payload", 'runtimeType must be one of: openclaw, picoclaw, hermes');
+}
+
+function parseRuntimeStatus(value: unknown): RuntimeInstanceStatus | undefined {
+  if (value === undefined) return undefined;
+  const statuses = new Set([
+    "provisioning",
+    "starting",
+    "running",
+    "unhealthy",
+    "stopped",
+    "deleting",
+    "deleted",
+    "migrating",
+    "error",
+  ]);
+  if (typeof value === "string" && statuses.has(value)) return value as RuntimeInstanceStatus;
+  throw new BridgeCommandError("invalid-payload", "status is not a valid runtime instance status");
 }
 
 function parseApiKey(payload: Record<string, unknown>): string {
@@ -352,6 +405,7 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
       workspacePath: createdContext.layout.workspaceRoot,
       workspaceLayoutVersion: "mvp-v1",
       workspaceLayoutValid: true,
+      runtimeInstanceKey: `${resolved.name}:${userId}`,
     },
     extra: {
       port: created.port,
@@ -421,15 +475,22 @@ async function bridgeInstanceDelete(payload: Record<string, unknown>): Promise<B
   validateBridgeName(userId, "user ID");
   const context = await requireManagedInstance("instance.delete", project, userId);
   if ("ok" in context) return context;
-  await despawn(project, userId, { quiet: true });
+  const keepData = payload.keepData === true;
+  const deleteData = payload.deleteData === true;
+  if (keepData && deleteData) {
+    throw new BridgeCommandError("invalid-payload", "Use only one of keepData or deleteData.");
+  }
+  await despawn(project, userId, { quiet: true, keepData, deleteData });
   return bridgeSuccess({
     action: "instance.delete",
-    message: `Deleted instance "${userId}"`,
+    message: deleteData ? `Deleted instance "${userId}" and its data` : `Deleted instance "${userId}" with data retained when required by runtime policy`,
     project: context.resolved.name,
     userId,
     runtimeState: "deleted",
     metadata: {
-      removedWorkspacePath: context.layout.instanceRoot,
+      workspacePath: context.layout.instanceRoot,
+      dataDeleted: deleteData,
+      dataRetained: !deleteData,
     },
   });
 }
@@ -453,10 +514,110 @@ async function bridgeInstanceSync(payload: Record<string, unknown>): Promise<Bri
       workspacePath: context.layout.workspaceRoot,
       workspaceLayoutValid: layoutValidation.ok,
       missingWorkspaceDirs: layoutValidation.missing,
+      runtimeInstance: await getRuntimeInstance(context.resolved.name, userId).then((entry) =>
+        entry ? redactedRuntimeInstance(entry) : null
+      ),
     },
     extra: {
       composePath: status.composePath,
       composeProject: status.composeProject,
+    },
+  });
+}
+
+async function bridgeRuntimeRegistryList(payload: Record<string, unknown>): Promise<BridgeSuccess> {
+  const runtimeType = parseRuntimeType(payload.runtimeType);
+  const status = parseRuntimeStatus(payload.status);
+  const project = asString(payload.project);
+  const entries = await listRuntimeInstances({ project, runtimeType, status });
+  return bridgeSuccess({
+    action: "runtime.registry.list",
+    message: `Loaded ${entries.length} runtime instance registry entr${entries.length === 1 ? "y" : "ies"}.`,
+    project,
+    metadata: {
+      count: entries.length,
+    },
+    extra: {
+      instances: entries.map((entry) => redactedRuntimeInstance(entry)),
+    },
+  });
+}
+
+async function bridgeRuntimeRegistryGet(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
+  const { project, userId } = parseRuntimeInstanceKey(payload);
+  const entry = await getRuntimeInstance(project, userId);
+  if (!entry) {
+    return bridgeFailure({
+      action: "runtime.registry.get",
+      message: `Runtime instance "${project}:${userId}" not found.`,
+      errorCode: "runtime-missing",
+      project,
+      userId,
+    });
+  }
+  return bridgeSuccess({
+    action: "runtime.registry.get",
+    message: `Loaded runtime instance "${entry.runtimeInstanceKey}".`,
+    project,
+    userId,
+    runtimeState: entry.status === "running" ? "running" : entry.status === "stopped" ? "stopped" : "unknown",
+    metadata: {
+      runtimeInstance: redactedRuntimeInstance(entry),
+    },
+  });
+}
+
+async function bridgeRuntimeRegistrySync(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
+  const { project, userId } = parseRuntimeInstanceKey(payload);
+  const context = await requireManagedInstance("runtime.registry.sync", project, userId);
+  if ("ok" in context) return context;
+  const status = await getInstanceRuntimeStatus(project, userId);
+  const entry = await getRuntimeInstance(context.resolved.name, userId);
+  return bridgeSuccess({
+    action: "runtime.registry.sync",
+    message: `Synchronized runtime registry for "${context.resolved.name}:${userId}".`,
+    project: context.resolved.name,
+    userId,
+    runtimeState: status.status,
+    metadata: {
+      runtimeInstance: entry ? redactedRuntimeInstance(entry) : null,
+    },
+    extra: buildRuntimeRegistrySyncExtra({
+      composeProject: status.composeProject,
+      runtimeInstance: entry ? redactedRuntimeInstance(entry) : null,
+    }),
+  });
+}
+
+async function bridgeRuntimeRegistryResolve(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
+  const { project, userId } = parseRuntimeInstanceKey(payload);
+  const entry = await getRuntimeInstance(project, userId);
+  if (!entry) {
+    return bridgeFailure({
+      action: "runtime.registry.resolve",
+      message: `Runtime instance "${project}:${userId}" not found.`,
+      errorCode: "runtime-missing",
+      project,
+      userId,
+    });
+  }
+  return bridgeSuccess({
+    action: "runtime.registry.resolve",
+    message: `Resolved runtime instance refs for "${entry.runtimeInstanceKey}".`,
+    project,
+    userId,
+    runtimeState: entry.status === "running" ? "running" : entry.status === "stopped" ? "stopped" : "unknown",
+    metadata: {
+      runtimeInstanceKey: entry.runtimeInstanceKey,
+      runtimeType: entry.runtimeType,
+      status: entry.status,
+      health: entry.health,
+      endpointRef: entry.endpointRef,
+      endpoint: resolveRuntimeInternalEndpoint(entry),
+      apiKeyRef: entry.apiKeyRef ? "ref:***" : undefined,
+      profileRef: entry.profileRef ? "ref:***" : undefined,
+      dataVolumeRef: entry.dataVolumeRef,
+      workspaceRef: entry.workspaceRef,
     },
   });
 }
@@ -744,6 +905,14 @@ async function dispatch(operation: string, payload: Record<string, unknown>): Pr
         return await bridgeAgentCreate(payload);
       case "agent.updateConfig":
         return await bridgeAgentUpdateConfig(payload);
+      case "runtime.registry.list":
+        return await bridgeRuntimeRegistryList(payload);
+      case "runtime.registry.get":
+        return await bridgeRuntimeRegistryGet(payload);
+      case "runtime.registry.sync":
+        return await bridgeRuntimeRegistrySync(payload);
+      case "runtime.registry.resolve":
+        return await bridgeRuntimeRegistryResolve(payload);
       default:
         return bridgeFailure({
           action: operation,

@@ -4,6 +4,7 @@ import { readProjectConfig, resolveRuntimeConfig } from "../lib/config.ts";
 import { runCompose, sharedProxyConnect, COMPOSE_FILENAME } from "../lib/compose.ts";
 import { snapshotWorkspace } from "../lib/raw-collector.ts";
 import { instanceDir } from "../lib/instance.ts";
+import { updateRuntimeInstanceStatus } from "../lib/runtime-instance-registry.ts";
 import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
 
 /** Start shared proxy compose if needed. */
@@ -58,6 +59,7 @@ export async function upCommand(args: string[]): Promise<void> {
             projectName: `${name}-${uid}`,
             connectContainer: sharedProxyConnect(name, uid, runtimeType, proxyMode),
           });
+          await updateRuntimeInstanceStatus(name, uid, "running", { ready: true });
         }));
       } else {
         console.log(`\n▶ Starting ${name}...`);
@@ -89,6 +91,7 @@ export async function upCommand(args: string[]): Promise<void> {
       projectName: `${projectName}-${userId}`,
       connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
     });
+    await updateRuntimeInstanceStatus(projectName, userId, "running", { ready: true });
     console.log(`\n✅ ${projectName}/${userId} is running at http://localhost:${instance.port}`);
     return;
   }
@@ -112,6 +115,7 @@ export async function upCommand(args: string[]): Promise<void> {
         projectName: `${projectName}-${uid}`,
         connectContainer: sharedProxyConnect(projectName, uid, runtimeType, proxyMode),
       });
+      await updateRuntimeInstanceStatus(projectName, uid, "running", { ready: true });
     }));
     console.log(`\n✅ All ${userIds.length} instance(s) of ${projectName} started.`);
     return;

@@ -21,7 +21,7 @@ claw-farm v${VERSION} — Multi Agent Instance Manager
 Usage:
   claw-farm init <name>                    Scaffold agent project in current directory
   claw-farm init <name> --multi            Scaffold multi-instance project (template/ structure)
-  claw-farm init <name> --runtime <rt>     Set agent runtime (openclaw|picoclaw)
+  claw-farm init <name> --runtime <rt>     Set agent runtime (openclaw|picoclaw|hermes)
   claw-farm init <name> --processor mem0   Scaffold with Mem0+Qdrant memory
   claw-farm init <name> --llm <provider>   Set LLM provider (gemini|anthropic|openai-compat)
   claw-farm init <name> --existing         Register existing setup without scaffolding
@@ -43,6 +43,7 @@ Usage:
 Runtimes:
   openclaw       Full-featured agent runtime (Node.js, ~1.5GB/instance, default)
   picoclaw       Lightweight Go runtime (~20MB/instance, 75x lighter)
+  hermes         Hermes Agent API server runtime (/opt/data, API port 8642)
 
 Proxy modes (--proxy-mode):
   per-instance   Each instance gets its own api-proxy (default for openclaw)
@@ -55,6 +56,7 @@ Spawn options:
 
 Despawn options:
   --keep-data            Keep instance data after stopping
+  --delete-data          Explicitly delete data (required to remove Hermes /opt/data)
 
 Options:
   -h, --help     Show this help

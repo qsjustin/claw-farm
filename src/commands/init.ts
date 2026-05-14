@@ -17,7 +17,7 @@ import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.
 export async function initCommand(args: string[]): Promise<void> {
   const name = findPositionalArg(args);
   if (!name) {
-    console.error("Usage: claw-farm init <name> [--runtime openclaw|picoclaw] [--processor mem0] [--existing] [--multi]");
+    console.error("Usage: claw-farm init <name> [--runtime openclaw|picoclaw|hermes] [--processor mem0] [--existing] [--multi]");
     process.exit(1);
   }
 
@@ -54,7 +54,7 @@ export async function initCommand(args: string[]): Promise<void> {
   }
 
   // Parse --runtime flag
-  const VALID_RUNTIMES = ["openclaw", "picoclaw"] as const;
+  const VALID_RUNTIMES = ["openclaw", "picoclaw", "hermes"] as const;
   const runtimeIdx = args.indexOf("--runtime");
   const runtimeArg = runtimeIdx !== -1 ? args[runtimeIdx + 1] : undefined;
   if (runtimeIdx !== -1 && (!runtimeArg || runtimeArg.startsWith("-"))) {
@@ -84,9 +84,9 @@ export async function initCommand(args: string[]): Promise<void> {
   }
 
   // Block unsupported combinations
-  if (processor === "mem0" && runtimeType === "picoclaw") {
-    console.error("Error: mem0 processor is not yet supported with picoclaw runtime.");
-    console.error("Use --processor builtin (default) with --runtime picoclaw.");
+  if (processor === "mem0" && runtimeType !== "openclaw") {
+    console.error(`Error: mem0 processor is not yet supported with ${runtimeType} runtime.`);
+    console.error(`Use --processor builtin (default) with --runtime ${runtimeType}.`);
     process.exit(1);
   }
 
@@ -119,6 +119,12 @@ export async function initCommand(args: string[]): Promise<void> {
     // picoclaw stores sessions and state under workspace/
     await mkdir(join(projectDir, rtDir, "workspace", "sessions"), { recursive: true });
     await mkdir(join(projectDir, rtDir, "workspace", "state"), { recursive: true });
+  } else if (runtimeType === "hermes") {
+    // Hermes owns /opt/data and keeps sessions/skills/cache under its runtime root.
+    await mkdir(join(projectDir, rtDir, "sessions"), { recursive: true });
+    await mkdir(join(projectDir, rtDir, "logs"), { recursive: true });
+    await mkdir(join(projectDir, rtDir, "skills"), { recursive: true });
+    await mkdir(join(projectDir, rtDir, "cache"), { recursive: true });
   }
   await mkdir(join(projectDir, "processed"), { recursive: true });
   await mkdir(join(projectDir, "logs"), { recursive: true });

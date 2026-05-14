@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { RuntimeType } from "../runtimes/interface.ts";
+import { getRuntime } from "../runtimes/index.ts";
 
 /**
  * Layer 0: Raw data collection — immutable, append-only.
@@ -15,6 +16,9 @@ export async function ensureRawDirs(
   if (rt === "picoclaw") {
     // picoclaw stores sessions under workspace/
     await mkdir(join(projectDir, "picoclaw", "workspace", "sessions"), { recursive: true });
+  } else if (rt === "hermes") {
+    await mkdir(join(projectDir, "hermes", "sessions"), { recursive: true });
+    await mkdir(join(projectDir, "hermes", "logs"), { recursive: true });
   } else {
     await mkdir(join(projectDir, "openclaw", "sessions"), { recursive: true });
     await mkdir(join(projectDir, "openclaw", "logs"), { recursive: true });
@@ -27,9 +31,8 @@ export async function snapshotWorkspace(
   runtimeType?: RuntimeType,
 ): Promise<string> {
   const rt = runtimeType ?? "openclaw";
-  const wsDir = rt === "picoclaw"
-    ? join(projectDir, "picoclaw", "workspace")
-    : join(projectDir, "openclaw", "workspace");
+  const runtime = getRuntime(rt);
+  const wsDir = join(projectDir, runtime.runtimeDirName, "workspace");
   const snapDir = join(projectDir, "raw", "workspace-snapshots");
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const snapPath = join(snapDir, timestamp);

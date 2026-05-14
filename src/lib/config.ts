@@ -75,6 +75,11 @@ export function envExampleTemplate(
   }
 
   lines.push(``);
+  lines.push(`# Hermes runtime API key. Required when using --runtime hermes.`);
+  lines.push(`# Set through local env for development or a secret ref in managed deployments.`);
+  lines.push(`API_SERVER_KEY=`);
+
+  lines.push(``);
   return lines.join("\n");
 }
 
