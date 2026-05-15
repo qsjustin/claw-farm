@@ -67,6 +67,7 @@ ${hasProxy ? `  api-proxy:
       - ${openclawMountSource}:/home/node/.openclaw
     env_file:
       - ./instance.env
+      - ./.env.model
     environment:
 ${hasProxy ? `      OPENCLAW_API_PROXY: http://api-proxy:8080` : `      # OPENCLAW_API_PROXY: not set (proxyMode: none)`}
       OPENCLAW_SANDBOX: 1

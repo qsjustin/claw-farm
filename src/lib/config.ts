@@ -11,7 +11,40 @@ export type InstanceModelEnvInput = {
   provider: LlmProvider;
   apiKey: string;
   baseUrl?: string | null;
+  modelSlug?: string | null;
 };
+
+const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function renderEnvEntry(key: string, value: string): string {
+  if (!ENV_KEY_REGEX.test(key)) {
+    throw new Error(`Invalid env var key: "${key}"`);
+  }
+  if (value.includes("\n") || value.includes("\r")) {
+    throw new Error(`Env var "${key}" contains newline characters`);
+  }
+  return `${key}=${value}`;
+}
+
+function normalizeModelBaseUrl(value: string | null | undefined): string {
+  if (!value) return "";
+  if (value.includes("\n") || value.includes("\r")) {
+    throw new Error('Env var "MODEL_BASE_URL" contains newline characters');
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Model baseUrl must be a valid http(s) URL");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Model baseUrl must use http or https");
+  }
+  if (url.username || url.password) {
+    throw new Error("Model baseUrl must not contain credentials");
+  }
+  return url.toString().replace(/\/$/, value.endsWith("/") ? "/" : "");
+}
 
 export interface ClawFarmConfig {
   name: string;
@@ -84,25 +117,34 @@ export function envExampleTemplate(
 }
 
 export function renderInstanceModelEnv(input: InstanceModelEnvInput): string {
-  const lines = [
-    "# Generated per-instance model control env",
-    `LLM_PROVIDER=${input.provider}`,
-    "GEMINI_API_KEY=",
-    "ANTHROPIC_API_KEY=",
-    "OPENAI_API_KEY=",
-    "OPENAI_COMPAT_BASE_URL="
+  const hermesProvider = input.provider === "openai-compat" ? "custom" : input.provider;
+  const baseUrl = normalizeModelBaseUrl(input.baseUrl);
+  const entries: Array<[string, string]> = [
+    ["LLM_PROVIDER", input.provider],
+    ["HERMES_INFERENCE_PROVIDER", hermesProvider],
+    ["HERMES_INFERENCE_MODEL", input.modelSlug?.trim() ?? ""],
+    ["GEMINI_API_KEY", ""],
+    ["GEMINI_BASE_URL", ""],
+    ["ANTHROPIC_API_KEY", ""],
+    ["ANTHROPIC_BASE_URL", ""],
+    ["OPENAI_API_KEY", ""],
+    ["OPENAI_COMPAT_BASE_URL", ""],
+    ["CUSTOM_BASE_URL", ""]
   ];
 
   if (input.provider === "gemini") {
-    lines[2] = `GEMINI_API_KEY=${input.apiKey}`;
+    entries[3] = ["GEMINI_API_KEY", input.apiKey];
+    entries[4] = ["GEMINI_BASE_URL", baseUrl];
   } else if (input.provider === "anthropic") {
-    lines[3] = `ANTHROPIC_API_KEY=${input.apiKey}`;
+    entries[5] = ["ANTHROPIC_API_KEY", input.apiKey];
+    entries[6] = ["ANTHROPIC_BASE_URL", baseUrl];
   } else {
-    lines[4] = `OPENAI_API_KEY=${input.apiKey}`;
-    lines[5] = `OPENAI_COMPAT_BASE_URL=${input.baseUrl ?? ""}`;
+    entries[7] = ["OPENAI_API_KEY", input.apiKey];
+    entries[8] = ["OPENAI_COMPAT_BASE_URL", baseUrl];
+    entries[9] = ["CUSTOM_BASE_URL", baseUrl];
   }
 
-  return `${lines.join("\n")}\n`;
+  return `# Generated per-instance model control env\n${entries.map(([key, value]) => renderEnvEntry(key, value)).join("\n")}\n`;
 }
 
 export async function writeProjectConfig(

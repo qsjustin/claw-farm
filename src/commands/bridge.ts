@@ -705,6 +705,7 @@ async function bridgeInstanceExport(payload: Record<string, unknown>): Promise<B
       bundleFileCount: result.fileCount,
     },
     extra: {
+      archiveRef: result.manifest.backupId,
       bundlePath: result.bundlePath,
       manifestPath: result.manifestPath,
       checksumPath: result.checksumPath,
@@ -721,14 +722,25 @@ async function bridgeInstanceImport(payload: Record<string, unknown>): Promise<B
   const context = await requireManagedInstance("instance.import", project, userId);
   if ("ok" in context) return context;
   const currentStatus = await getInstanceRuntimeStatus(project, userId);
+  const archiveRef = asString(payload.archiveRef);
+  const exportRoot = asString(payload.exportRoot);
+  if (archiveRef) {
+    validateBridgeName(archiveRef, "archive ref");
+  }
+  const bundlePath = archiveRef && exportRoot
+    ? join(exportRoot, archiveRef, "instance.tar.zst")
+    : requireStringField(payload, "bundlePath");
+  const manifestPath = archiveRef && exportRoot
+    ? join(exportRoot, archiveRef, "manifest.json")
+    : requireStringField(payload, "manifestPath");
 
   const result = await importCommand({
     projectDir: context.resolved.entry.path,
     userId,
     runtimeType: context.runtimeType,
     runtimeWorkspaceSlug: requireStringField(payload, "runtimeWorkspaceSlug"),
-    bundlePath: requireStringField(payload, "bundlePath"),
-    manifestPath: requireStringField(payload, "manifestPath"),
+    bundlePath,
+    manifestPath,
   });
 
   return bridgeSuccess({
@@ -742,6 +754,7 @@ async function bridgeInstanceImport(payload: Record<string, unknown>): Promise<B
       bundleFileCount: result.restoredFileCount,
     },
     extra: {
+      archiveRef: result.manifest.backupId,
       restoredFileCount: result.restoredFileCount,
       bundleChecksum: result.bundleChecksum,
       rebuildRequired: result.rebuildRequired,

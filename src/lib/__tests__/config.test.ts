@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { resolveRuntimeConfig, type ClawFarmConfig } from "../config.ts";
+import { renderInstanceModelEnv, resolveRuntimeConfig, type ClawFarmConfig } from "../config.ts";
 
 const baseEntry = { runtime: undefined } as { runtime: undefined };
 
@@ -101,5 +101,64 @@ describe("resolveRuntimeConfig", () => {
     const result = resolveRuntimeConfig(null, baseEntry);
     expect(result.runtime).toBeDefined();
     expect(typeof result.runtime.defaultProxyMode).toBe("string");
+  });
+});
+
+describe("renderInstanceModelEnv", () => {
+  it("emits Hermes provider and model env for Anthropic", () => {
+    const env = renderInstanceModelEnv({
+      provider: "anthropic",
+      apiKey: "sk-ant-test",
+      modelSlug: "anthropic/claude-sonnet-4-6",
+    });
+
+    expect(env).toContain("LLM_PROVIDER=anthropic");
+    expect(env).toContain("HERMES_INFERENCE_PROVIDER=anthropic");
+    expect(env).toContain("HERMES_INFERENCE_MODEL=anthropic/claude-sonnet-4-6");
+    expect(env).toContain("ANTHROPIC_API_KEY=sk-ant-test");
+  });
+
+  it("maps openai-compat to Hermes custom provider with base URL", () => {
+    const env = renderInstanceModelEnv({
+      provider: "openai-compat",
+      apiKey: "sk-openai-test",
+      baseUrl: "https://models.example/v1",
+      modelSlug: "openai/custom",
+    });
+
+    expect(env).toContain("LLM_PROVIDER=openai-compat");
+    expect(env).toContain("HERMES_INFERENCE_PROVIDER=custom");
+    expect(env).toContain("HERMES_INFERENCE_MODEL=openai/custom");
+    expect(env).toContain("OPENAI_API_KEY=sk-openai-test");
+    expect(env).toContain("OPENAI_COMPAT_BASE_URL=https://models.example/v1");
+    expect(env).toContain("CUSTOM_BASE_URL=https://models.example/v1");
+  });
+
+  it("rejects newline injection in model env values", () => {
+    expect(() => renderInstanceModelEnv({
+      provider: "anthropic",
+      apiKey: "sk-test\nINJECTED=1",
+      modelSlug: "anthropic/claude-sonnet-4-6",
+    })).toThrow("newline");
+
+    expect(() => renderInstanceModelEnv({
+      provider: "anthropic",
+      apiKey: "sk-test",
+      modelSlug: "anthropic/claude-sonnet-4-6\rINJECTED=1",
+    })).toThrow("newline");
+  });
+
+  it("rejects unsafe openai-compatible base URLs", () => {
+    expect(() => renderInstanceModelEnv({
+      provider: "openai-compat",
+      apiKey: "sk-test",
+      baseUrl: "https://user:pass@models.example/v1",
+    })).toThrow("must not contain credentials");
+
+    expect(() => renderInstanceModelEnv({
+      provider: "openai-compat",
+      apiKey: "sk-test",
+      baseUrl: "file:///tmp/model",
+    })).toThrow("http or https");
   });
 });

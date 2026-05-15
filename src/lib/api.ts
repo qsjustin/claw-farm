@@ -6,7 +6,7 @@
  */
 
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { chown, mkdir, readdir, cp, rm, stat } from "node:fs/promises";
+import { chmod, chown, mkdir, readdir, cp, rm, stat } from "node:fs/promises";
 import {
   resolveProjectName,
   addInstance,
@@ -229,11 +229,13 @@ async function resolveInstance(project: string, userId: string) {
   };
 }
 
-async function writeInstanceModelEnv(
+export async function writeInstanceModelEnv(
   instDir: string,
   input: InstanceModelEnvInput,
 ): Promise<void> {
-  await Bun.write(join(instDir, ".env.model"), renderInstanceModelEnv(input));
+  const modelEnvPath = join(instDir, ".env.model");
+  await Bun.write(modelEnvPath, renderInstanceModelEnv(input));
+  await chmod(modelEnvPath, 0o600);
 }
 
 async function ensureSharedProxy(
@@ -265,17 +267,23 @@ async function syncInstanceRuntimeModelConfig(options: {
   instDir: string;
   llm: LlmProvider;
   modelSlug?: string;
+  baseUrl?: string | null;
 }): Promise<void> {
-  const { projectName, projectDir, entry, instDir, llm, modelSlug } = options;
+  const { projectName, projectDir, entry, instDir, llm, modelSlug, baseUrl } = options;
   const config = await readProjectConfig(projectDir);
   const processor = config?.processor ?? entry.processor;
-  const { runtime } = resolveRuntimeConfig(config, entry);
+  const { runtime, proxyMode } = resolveRuntimeConfig(config, entry);
   const configPath = join(instDir, runtime.runtimeDirName, runtime.configFileName);
+  const templateOptions = {
+    ...(modelSlug?.trim() ? { modelSlug } : {}),
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
+    useProxy: proxyMode !== "none"
+  };
   const templateConfig = runtime.configTemplate(
     projectName,
     processor,
     llm,
-    modelSlug?.trim() ? { modelSlug } : undefined,
+    templateOptions,
   );
   const existingConfig = await Bun.file(configPath).text().catch(() => null);
   await Bun.write(
@@ -728,6 +736,7 @@ export async function applyInstanceModelControl(
     provider: llm,
     apiKey,
     baseUrl: baseUrl ?? null,
+    modelSlug,
   });
   await syncInstanceRuntimeModelConfig({
     projectName,
@@ -736,6 +745,7 @@ export async function applyInstanceModelControl(
     instDir,
     llm,
     modelSlug,
+    baseUrl: baseUrl ?? null,
   });
 }
 

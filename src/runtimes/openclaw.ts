@@ -29,8 +29,9 @@ export const openclawRuntime: AgentRuntime = {
     userId: string,
     port: number,
     proxyMode: ProxyMode,
+    instanceHostDir?: string,
   ): string {
-    return instanceComposeTemplate(projectName, userId, port, proxyMode);
+    return instanceComposeTemplate(projectName, userId, port, proxyMode, instanceHostDir);
   },
 
   configTemplate(

@@ -26,6 +26,7 @@ describe("OpenClaw runtime templates", () => {
 
     expect(compose).toContain("OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?");
     expect(compose).toContain("/runtime/instance/openclaw:/home/node/.openclaw");
+    expect(compose).toContain("- ./.env.model");
   });
 
   it("uses direct provider config when OpenClaw is not using an api-proxy service", () => {

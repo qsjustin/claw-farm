@@ -45,6 +45,7 @@ services:
       - ./hermes:/opt/data
     env_file:
       - ./.env
+      - ./.env.model
     environment:
 ${hermesEnvironment()}
     command: ["gateway", "run"]
@@ -79,6 +80,7 @@ services:
       - ${hermesMountSource}:/opt/data
     env_file:
       - ./instance.env
+      - ./.env.model
     environment:
 ${hermesEnvironment()}
     command: ["gateway", "run"]

@@ -30,8 +30,9 @@ export const hermesRuntime: AgentRuntime = {
     userId: string,
     port: number,
     proxyMode: ProxyMode,
+    instanceHostDir?: string,
   ): string {
-    return hermesInstanceComposeTemplate(projectName, userId, port, proxyMode);
+    return hermesInstanceComposeTemplate(projectName, userId, port, proxyMode, instanceHostDir);
   },
 
   configTemplate(
