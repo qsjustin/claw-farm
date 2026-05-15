@@ -234,13 +234,28 @@ export function mergeOpenclawConfig(
         mergedEnv[key] = templateEnv[key]; // force "proxied" sentinel
       }
     }
-    merged.env = mergedEnv;
+    if (Object.keys(templateEnv).length === 0) {
+      for (const key of Object.keys(mergedEnv)) {
+        if (key.endsWith("_API_KEY")) {
+          delete mergedEnv[key];
+        }
+      }
+    }
+    if (Object.keys(mergedEnv).length > 0) {
+      merged.env = mergedEnv;
+    } else {
+      delete merged.env;
+    }
     // Ensure every provider has a models array (OpenClaw requires it)
     const providers = (merged.models as Record<string, unknown>)?.providers as Record<string, Record<string, unknown>> | undefined;
+    const templateProviders = ((template.models as Record<string, unknown> | undefined)?.providers ?? {}) as Record<string, Record<string, unknown>>;
     if (providers) {
       for (const key of Object.keys(providers)) {
         if (providers[key] && !Array.isArray(providers[key].models)) {
           providers[key].models = [];
+        }
+        if (providers[key] && templateProviders[key] && !("baseUrl" in templateProviders[key])) {
+          delete providers[key].baseUrl;
         }
       }
     }

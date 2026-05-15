@@ -40,6 +40,7 @@ export const openclawRuntime: AgentRuntime = {
     options?: {
       modelSlug?: string;
       baseUrl?: string | null;
+      useProxy?: boolean;
     },
   ): string {
     return openclawConfigTemplate(name, processor, llm, options);

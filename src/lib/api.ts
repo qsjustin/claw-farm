@@ -5,8 +5,8 @@
  * Both CLI commands and external callers use these functions.
  */
 
-import { join } from "node:path";
-import { mkdir, readdir, cp, rm } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { chown, mkdir, readdir, cp, rm, stat } from "node:fs/promises";
 import {
   resolveProjectName,
   addInstance,
@@ -31,6 +31,7 @@ import { resolveWorkspaceLayout } from "./workspace-layout.ts";
 import { instanceComposeTemplate } from "../templates/docker-compose.instance.yml.ts";
 import { fillUserTemplate } from "../templates/USER.template.md.ts";
 import {
+  dockerNetworkConnect,
   getComposeStatus,
   runCompose,
   sharedProxyConnect,
@@ -69,6 +70,79 @@ export function shouldPreserveInstanceData(
   return options?.keepData === true || (runtimeType === "hermes" && options?.deleteData !== true);
 }
 
+async function refreshRuntimeTemplateConfig(options: {
+  projectName: string;
+  tmplDir: string;
+  runtime: ReturnType<typeof getRuntime>;
+  processor: "builtin" | "mem0";
+  llm: LlmProvider;
+  proxyMode: ProxyMode;
+  baseUrl?: string | null;
+}): Promise<void> {
+  const configDir = join(options.tmplDir, "config");
+  await mkdir(configDir, { recursive: true });
+
+  const configPath = join(configDir, options.runtime.configFileName);
+  const templateOptions =
+    options.baseUrl !== undefined
+      ? { baseUrl: options.baseUrl, useProxy: options.proxyMode !== "none" }
+      : options.proxyMode === "none"
+        ? { useProxy: false }
+        : undefined;
+  const templateConfig = options.runtime.configTemplate(
+    options.projectName,
+    options.processor,
+    options.llm,
+    templateOptions,
+  );
+  const existing = Bun.file(configPath);
+  if (await existing.exists()) {
+    await Bun.write(configPath, options.runtime.mergeConfig(templateConfig, await existing.text()));
+    return;
+  }
+  await Bun.write(configPath, templateConfig);
+}
+
+function parsePositiveIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
+async function chownTreeIfNeeded(path: string, uid: number, gid: number): Promise<void> {
+  const info = await stat(path);
+  if (info.uid !== uid || info.gid !== gid) {
+    await chown(path, uid, gid);
+  }
+  if (!info.isDirectory()) return;
+
+  for (const entry of await readdir(path, { withFileTypes: true })) {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) {
+      await chownTreeIfNeeded(child, uid, gid);
+    } else if (entry.isFile()) {
+      const childInfo = await stat(child);
+      if (childInfo.uid !== uid || childInfo.gid !== gid) {
+        await chown(child, uid, gid);
+      }
+    }
+  }
+}
+
+async function ensureRuntimeContainerWritable(options: {
+  instDir: string;
+  runtimeType: RuntimeType;
+}): Promise<void> {
+  if (options.runtimeType !== "openclaw") return;
+  const uid = parsePositiveIntegerEnv("OPENCLAW_CONTAINER_UID", 1000);
+  const gid = parsePositiveIntegerEnv("OPENCLAW_CONTAINER_GID", 1000);
+  await chownTreeIfNeeded(join(options.instDir, "openclaw"), uid, gid);
+}
+
 export interface ApplyInstanceModelControlOptions {
   project: string;
   userId: string;
@@ -80,6 +154,51 @@ export interface ApplyInstanceModelControlOptions {
 
 export interface ManagedInstanceControlOptions {
   quiet?: boolean;
+}
+
+function runtimeAttachNetworks(): string[] {
+  return (process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS ?? "")
+    .split(",")
+    .map((network) => network.trim())
+    .filter(Boolean);
+}
+
+function resolveDockerHostInstanceDir(instDir: string): string | undefined {
+  const hostRoot = process.env.RUNTIME_INSTANCES_HOST_ROOT?.trim();
+  if (!hostRoot) return undefined;
+
+  const runtimeRoot = process.env.RUNTIME_INSTANCES_ROOT?.trim() || process.env.HOME;
+  if (!runtimeRoot) {
+    throw new Error("RUNTIME_INSTANCES_HOST_ROOT requires RUNTIME_INSTANCES_ROOT or HOME");
+  }
+
+  const resolvedRuntimeRoot = resolve(runtimeRoot);
+  const resolvedInstDir = resolve(instDir);
+  const rel = relative(resolvedRuntimeRoot, resolvedInstDir);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error("Instance directory is outside runtime instances root");
+  }
+
+  return join(hostRoot, rel);
+}
+
+async function connectRuntimeAttachNetworks(input: {
+  projectName: string;
+  userId: string;
+  runtimeType: RuntimeType;
+  quiet?: boolean;
+}): Promise<void> {
+  const networks = runtimeAttachNetworks();
+  if (networks.length === 0) return;
+
+  const runtime = getRuntime(input.runtimeType);
+  const container = `${input.projectName}-${input.userId}-${runtime.runtimeDirName}`;
+  for (const network of networks) {
+    await dockerNetworkConnect(network, container, {
+      quiet: input.quiet,
+      required: true,
+    });
+  }
 }
 
 const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -165,6 +284,36 @@ async function syncInstanceRuntimeModelConfig(options: {
   );
 }
 
+async function writeInstanceCompose(options: {
+  projectName: string;
+  userId: string;
+  port: number;
+  instDir: string;
+  runtimeType: RuntimeType;
+  runtime: ReturnType<typeof getRuntime>;
+  proxyMode: ProxyMode;
+}): Promise<string> {
+  const instanceHostDir = resolveDockerHostInstanceDir(options.instDir);
+  const composeContent = options.runtimeType === "openclaw"
+    ? instanceComposeTemplate(
+      options.projectName,
+      options.userId,
+      options.port,
+      options.proxyMode,
+      instanceHostDir,
+    )
+    : options.runtime.instanceComposeTemplate(
+      options.projectName,
+      options.userId,
+      options.port,
+      options.proxyMode,
+      instanceHostDir,
+    );
+  const composePath = join(options.instDir, COMPOSE_FILENAME);
+  await Bun.write(composePath, composeContent);
+  return composePath;
+}
+
 export async function spawn(options: {
   project: string;
   userId: string;
@@ -173,10 +322,24 @@ export async function spawn(options: {
   autoStart?: boolean;
   llm?: LlmProvider;
   apiKey?: string;
+  apiKeyRef?: string;
+  profileRef?: string;
   baseUrl?: string | null;
   quiet?: boolean;
 }): Promise<{ userId: string; port: number }> {
-  const { project, userId, context, env, autoStart = true, llm, apiKey, baseUrl, quiet = false } = options;
+  const {
+    project,
+    userId,
+    context,
+    env,
+    autoStart = true,
+    llm,
+    apiKey,
+    apiKeyRef,
+    profileRef,
+    baseUrl,
+    quiet = false,
+  } = options;
 
   // Validate userId (security: prevents path traversal via programmatic API)
   validateName(userId, "user ID");
@@ -207,6 +370,15 @@ export async function spawn(options: {
 
     // Copy config files from template to instance
     const tmplDir = templateDir(projectDir);
+    await refreshRuntimeTemplateConfig({
+      projectName,
+      tmplDir,
+      runtime,
+      processor: config?.processor ?? entry.processor,
+      llm: llm ?? config?.llm ?? "gemini",
+      proxyMode,
+      baseUrl,
+    });
 
     // Copy main config file + additional config files in parallel
     const configFilesToCopy = [
@@ -273,14 +445,16 @@ export async function spawn(options: {
     }
 
     // Write compose (always regenerate)
-    let composeContent: string;
-    if (runtimeType === "openclaw") {
-      composeContent = instanceComposeTemplate(projectName, userId, port, proxyMode);
-    } else {
-      composeContent = runtime.instanceComposeTemplate(projectName, userId, port, proxyMode);
-    }
-    const composePath = join(instDir, COMPOSE_FILENAME);
-    await Bun.write(composePath, composeContent);
+    const composePath = await writeInstanceCompose({
+      projectName,
+      userId,
+      port,
+      instDir,
+      runtimeType,
+      runtime,
+      proxyMode,
+    });
+    await ensureRuntimeContainerWritable({ instDir, runtimeType });
 
     await upsertRuntimeInstance({
       project: projectName,
@@ -289,6 +463,8 @@ export async function spawn(options: {
       status: autoStart ? "starting" : "stopped",
       hostPort: port,
       displayName: context?.displayName,
+      apiKeyRef,
+      profileRef,
     });
     runtimeRegistryCreated = true;
 
@@ -322,6 +498,12 @@ export async function spawn(options: {
         composePath,
         projectName: composeProject,
         connectContainer,
+        quiet,
+      });
+      await connectRuntimeAttachNetworks({
+        projectName,
+        userId,
+        runtimeType,
         quiet,
       });
       await updateRuntimeInstanceStatus(projectName, userId, "running");
@@ -418,12 +600,21 @@ export async function startInstance(
   userId: string,
   options?: ManagedInstanceControlOptions,
 ): Promise<{ port: number }> {
-  const { projectName, projectDir, instance, composePath, composeProject } =
+  const { projectName, projectDir, entry, instance, composePath, composeProject } =
     await resolveInstance(project, userId);
+  const config = await readProjectConfig(projectDir);
+  const { runtimeType } = resolveRuntimeConfig(config, entry);
+  await ensureRuntimeContainerWritable({ instDir: instanceDir(projectDir, userId), runtimeType });
 
   await runCompose(projectDir, "start", {
     composePath,
     projectName: composeProject,
+    quiet: options?.quiet,
+  });
+  await connectRuntimeAttachNetworks({
+    projectName,
+    userId,
+    runtimeType,
     quiet: options?.quiet,
   });
   await updateRuntimeInstanceStatus(projectName, userId, "running", { ready: true });
@@ -444,13 +635,30 @@ export async function upInstance(
     await resolveInstance(project, userId);
 
   const config = await readProjectConfig(projectDir);
-  const { runtimeType, proxyMode } = resolveRuntimeConfig(config, entry);
+  const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
+  const instDir = instanceDir(projectDir, userId);
 
   await ensureSharedProxy(projectDir, projectName, runtimeType, proxyMode, options?.quiet ?? false);
+  await writeInstanceCompose({
+    projectName,
+    userId,
+    port: instance.port,
+    instDir,
+    runtimeType,
+    runtime,
+    proxyMode,
+  });
+  await ensureRuntimeContainerWritable({ instDir, runtimeType });
   await runCompose(projectDir, "up", {
     composePath,
     projectName: composeProject,
     connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
+    quiet: options?.quiet,
+  });
+  await connectRuntimeAttachNetworks({
+    projectName,
+    userId,
+    runtimeType,
     quiet: options?.quiet,
   });
   await updateRuntimeInstanceStatus(projectName, userId, "running", { ready: true });

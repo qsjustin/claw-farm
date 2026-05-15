@@ -122,6 +122,7 @@ services:
       OPENCLAW_API_PROXY: http://api-proxy:8080
       OPENCLAW_SANDBOX: 1
       OPENCLAW_AUDIT_LOG: /home/node/.openclaw/logs/audit.jsonl
+      OPENCLAW_GATEWAY_TOKEN: \${OPENCLAW_GATEWAY_TOKEN:?Set OPENCLAW_GATEWAY_TOKEN for OpenClaw HTTP access}
     networks:
       - proxy-net
       - frontend

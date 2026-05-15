@@ -43,6 +43,7 @@ export interface AgentRuntime {
     userId: string,
     port: number,
     proxyMode: ProxyMode,
+    instanceHostDir?: string,
   ): string;
 
   /** Generate shared proxy compose (only used when proxyMode=shared) */
@@ -56,6 +57,7 @@ export interface AgentRuntime {
     options?: {
       modelSlug?: string;
       baseUrl?: string | null;
+      useProxy?: boolean;
     },
   ): string;
 

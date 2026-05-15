@@ -167,6 +167,7 @@ ${agentDeps.length > 0 ? `    depends_on:\n${agentDeps.join("\n")}` : ""}
 ${hasProxy ? `      OPENCLAW_API_PROXY: http://${name}-api-proxy:8080` : `      # OPENCLAW_API_PROXY: not set (proxyMode: none)`}
       OPENCLAW_SANDBOX: 1
       OPENCLAW_AUDIT_LOG: /home/node/.openclaw/logs/audit.jsonl
+      OPENCLAW_GATEWAY_TOKEN: \${OPENCLAW_GATEWAY_TOKEN:?Set OPENCLAW_GATEWAY_TOKEN for OpenClaw HTTP access}
 ${agentNetworks.length > 0 ? `    networks:\n${agentNetworks.map((n) => `      - ${n}`).join("\n")}` : ""}
     read_only: true
     tmpfs:

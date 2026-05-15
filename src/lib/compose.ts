@@ -20,6 +20,31 @@ export interface ComposeOptions {
   connectContainer?: { container: string; network: string };
 }
 
+export interface DockerNetworkConnectOptions {
+  quiet?: boolean;
+  required?: boolean;
+}
+
+function sanitizeDockerMessage(message: string): string {
+  return message
+    .replace(/[A-Za-z]:\\[^\s"'`]+/g, "[runtime-path]")
+    .replace(/\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+/g, "[runtime-path]");
+}
+
+async function dockerComposeCommand(): Promise<string[]> {
+  const proc = Bun.spawn(["docker", "compose", "version"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const exitCode = await proc.exited;
+
+  if (exitCode === 0) {
+    return ["docker", "compose"];
+  }
+
+  return ["docker-compose"];
+}
+
 export async function runCompose(
   projectDir: string,
   action: "up" | "down" | "stop" | "start",
@@ -29,7 +54,7 @@ export async function runCompose(
   const cwd = options?.composePath ? dirname(composePath) : projectDir;
   const quiet = options?.quiet ?? false;
 
-  const args = ["docker", "compose", "-f", composePath];
+  const args = [...await dockerComposeCommand(), "-f", composePath];
 
   // Auto-load override file if it exists (user customizations survive upgrade)
   const overridePath = composePath.replace(".yml", ".override.yml");
@@ -88,7 +113,7 @@ export async function runCompose(
     await dockerNetworkConnect(
       options.connectContainer.network,
       options.connectContainer.container,
-      quiet,
+      { quiet },
     );
   }
 }
@@ -97,10 +122,10 @@ export async function runCompose(
  * Connect a running container to a Docker network.
  * Used for shared proxy mode: each instance network gets the api-proxy attached.
  */
-async function dockerNetworkConnect(
+export async function dockerNetworkConnect(
   network: string,
   container: string,
-  quiet = false,
+  options: DockerNetworkConnectOptions = {},
 ): Promise<void> {
   const proc = Bun.spawn(["docker", "network", "connect", network, container], {
     stdout: "pipe",
@@ -108,9 +133,17 @@ async function dockerNetworkConnect(
   });
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
+    const stderr = sanitizeDockerMessage(await new Response(proc.stderr).text());
     // Ignore "already connected" errors
-    if (!stderr.includes("already exists") && !quiet) {
+    if (stderr.includes("already exists")) {
+      return;
+    }
+    if (options.required) {
+      throw new Error(
+        `Docker network connect failed for required runtime network "${network}" and container "${container}": ${stderr.trim() || "unknown error"}`,
+      );
+    }
+    if (!options.quiet) {
       console.warn(`⚠ Could not connect ${container} to ${network}: ${stderr.trim()}`);
     }
   }
@@ -149,11 +182,11 @@ export async function getComposeStatus(
   const composePath = options?.composePath ?? join(projectDir, COMPOSE_FILENAME);
   const cwd = options?.composePath ? dirname(composePath) : projectDir;
 
-  const args = ["docker", "compose", "-f", composePath];
+  const args = [...await dockerComposeCommand(), "-f", composePath];
   if (options?.projectName) {
     args.push("-p", options.projectName);
   }
-  args.push("ps", "--format", "json");
+  args.push("ps", "-q");
 
   try {
     const proc = Bun.spawn(args, { cwd, stdout: "pipe", stderr: "pipe" });

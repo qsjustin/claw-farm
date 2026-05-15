@@ -44,6 +44,31 @@ describe("runtime instance registry entries", () => {
     expect(redacted.profileRef).toBe("ref:***");
   });
 
+  it("clears deletedAt when a retained instance is recreated", () => {
+    const deleted = buildRuntimeInstanceEntry({
+      project: "clawbay",
+      userId: "daily",
+      runtimeType: "hermes",
+      status: "deleted",
+      hostPort: 18642,
+    });
+
+    const recreated = buildRuntimeInstanceEntry({
+      project: "clawbay",
+      userId: "daily",
+      runtimeType: "hermes",
+      status: "running",
+      hostPort: 18642,
+      apiKeyRef: "secret:hermes/daily/api-key",
+    }, deleted);
+
+    expect(deleted.deletedAt).toBeTruthy();
+    expect(recreated.deletedAt).toBeNull();
+    expect(recreated.apiKeyRef).toBe("secret:hermes/daily/api-key");
+    expect(recreated.health.ready).toBe(true);
+    expect(recreated.health.lastError).toBeUndefined();
+  });
+
   it("resolves an internal Docker endpoint without host ports or host paths", () => {
     const entry = buildRuntimeInstanceEntry({
       project: "clawbay",

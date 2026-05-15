@@ -21,13 +21,14 @@ export const DEFAULT_INCLUDED_PATHS = ["config", "skills", "sessions"] as const;
 export const DEFAULT_EXCLUDED_PATHS = ["cache", "tmp"] as const;
 export const BUNDLE_FORMAT = "tar.zst";
 const MANIFEST_VERSION = "1";
+type BackupRuntimeType = Extract<RuntimeType, "openclaw" | "hermes">;
 
 export interface BackupBundleManifest {
   manifestVersion: "1";
   backupId: string;
   instanceId: string;
   userId: string;
-  runtimeType: "openclaw";
+  runtimeType: BackupRuntimeType;
   workspaceSlug: string;
   createdAt: string;
   fileCount: number;
@@ -78,6 +79,12 @@ export interface ImportBundleResult {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function assertBackupRuntimeType(runtimeType: RuntimeType): asserts runtimeType is BackupRuntimeType {
+  if (runtimeType !== "openclaw" && runtimeType !== "hermes") {
+    throw new Error(`Unsupported runtimeType for export/import: "${runtimeType}"`);
+  }
 }
 
 function unique(values: string[]): string[] {
@@ -266,9 +273,7 @@ export async function exportInstanceBundle(options: ExportBundleOptions): Promis
   if ((options.bundleFormat ?? BUNDLE_FORMAT) !== BUNDLE_FORMAT) {
     throw new Error(`Unsupported bundleFormat: "${options.bundleFormat}"`);
   }
-  if (options.runtimeType !== "openclaw") {
-    throw new Error(`Unsupported runtimeType for export: "${options.runtimeType}"`);
-  }
+  assertBackupRuntimeType(options.runtimeType);
 
   const layout = resolveRuntimeLayout(
     options.projectDir,
@@ -306,7 +311,7 @@ export async function exportInstanceBundle(options: ExportBundleOptions): Promis
     backupId,
     instanceId: options.instanceId ?? `${options.projectName}:${options.userId}`,
     userId: options.userId,
-    runtimeType: "openclaw",
+    runtimeType: options.runtimeType,
     workspaceSlug: layout.runtimeWorkspaceSlug,
     createdAt: nowIso(),
     fileCount,
@@ -336,7 +341,7 @@ export async function readBackupManifest(path: string): Promise<BackupBundleMani
   if (raw.manifestVersion !== MANIFEST_VERSION) {
     throw new Error(`Unsupported manifestVersion: "${raw.manifestVersion ?? "missing"}"`);
   }
-  if (raw.runtimeType !== "openclaw") {
+  if (raw.runtimeType !== "openclaw" && raw.runtimeType !== "hermes") {
     throw new Error(`Unsupported runtimeType: "${raw.runtimeType ?? "missing"}"`);
   }
   if (!raw.workspaceSlug || !raw.checksum) {
@@ -350,9 +355,7 @@ async function removePathIfExists(path: string): Promise<void> {
 }
 
 export async function importInstanceBundle(options: ImportBundleOptions): Promise<ImportBundleResult> {
-  if (options.runtimeType !== "openclaw") {
-    throw new Error(`Unsupported runtimeType for import: "${options.runtimeType}"`);
-  }
+  assertBackupRuntimeType(options.runtimeType);
 
   const layout = resolveRuntimeLayout(
     options.projectDir,
@@ -361,6 +364,11 @@ export async function importInstanceBundle(options: ImportBundleOptions): Promis
     options.runtimeWorkspaceSlug,
   );
   const manifest = await readBackupManifest(options.manifestPath);
+  if (manifest.runtimeType !== options.runtimeType) {
+    throw new Error(
+      `Bundle runtimeType mismatch: expected "${options.runtimeType}", got "${manifest.runtimeType}"`,
+    );
+  }
   const checksum = `sha256:${await hashFile(options.bundlePath)}`;
   if (checksum !== manifest.checksum) {
     throw new Error(`Bundle checksum mismatch: expected "${manifest.checksum}", got "${checksum}"`);

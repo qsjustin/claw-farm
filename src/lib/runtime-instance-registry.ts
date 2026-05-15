@@ -201,10 +201,10 @@ export function buildRuntimeInstanceEntry(
     profileRef: input.profileRef ?? existing?.profileRef,
     dataVolumeRef: `claw-farm:${key}:data:${runtime.runtimeDirName}`,
     workspaceRef: `claw-farm:${key}:workspace`,
-    health: defaultHealth(input.status, input.health ?? existing?.health),
+    health: defaultHealth(input.status, input.health),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
-    deletedAt: input.status === "deleted" ? now : existing?.deletedAt ?? null,
+    deletedAt: input.status === "deleted" ? now : null,
   };
 }
 
@@ -241,7 +241,7 @@ export async function updateRuntimeInstanceStatus(
       displayName: existing.displayName,
       apiKeyRef: existing.apiKeyRef,
       profileRef: existing.profileRef,
-      health: health ?? existing.health,
+      health,
     }, existing);
     registry.instances[key] = entry;
     await saveRuntimeInstanceRegistry(registry);

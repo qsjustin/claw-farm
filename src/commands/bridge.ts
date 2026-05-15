@@ -363,6 +363,8 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
   validateBridgeName(userId, "user ID");
   let context = asStringRecord(payload.context);
   const displayName = asString(payload.displayName);
+  const apiKeyRef = asString(payload.apiKeyRef);
+  const profileRef = asString(payload.profileRef);
   const autoStart = payload.autoStart === false || payload.noStart === true ? false : true;
   if (displayName && !context?.displayName) {
     context = { ...(context ?? {}), displayName };
@@ -374,6 +376,8 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
     userId,
     context: context && Object.keys(context).length > 0 ? context : undefined,
     autoStart,
+    apiKeyRef,
+    profileRef,
     quiet: true,
   });
 

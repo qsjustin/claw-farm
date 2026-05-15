@@ -61,6 +61,7 @@ ${hasProxy ? `      OPENCLAW_API_PROXY: http://api-proxy:8080` : `      # OPENCL
       OPENCLAW_SANDBOX: 1
       OPENCLAW_AUDIT_LOG: /home/node/.openclaw/logs/audit.jsonl
       OPENCLAW_SIDECAR_ATTACH_ROOT: /home/node/.openclaw/workspace/runtime
+      OPENCLAW_GATEWAY_TOKEN: \${OPENCLAW_GATEWAY_TOKEN:?Set OPENCLAW_GATEWAY_TOKEN for OpenClaw HTTP access}
 ${hasProxy ? `    networks:
       - proxy-net` : ""}
     read_only: true
