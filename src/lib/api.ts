@@ -43,6 +43,7 @@ import type { RuntimeType, ProxyMode } from "../runtimes/interface.ts";
 import {
   upsertRuntimeInstance,
   updateRuntimeInstanceStatus,
+  removeRuntimeInstance,
 } from "./runtime-instance-registry.ts";
 
 export type { InstanceEntry, ProjectEntry };
@@ -573,10 +574,14 @@ export async function despawn(
   }
 
   await removeInstance(projectName, userId);
-  await updateRuntimeInstanceStatus(projectName, userId, "deleted", {
-    ready: false,
-    lastError: preserveData ? "Instance stopped; data retained." : undefined,
-  });
+  if (preserveData) {
+    await updateRuntimeInstanceStatus(projectName, userId, "deleted", {
+      ready: false,
+      lastError: "Instance stopped; data retained.",
+    });
+  } else {
+    await removeRuntimeInstance(projectName, userId);
+  }
 }
 
 /**

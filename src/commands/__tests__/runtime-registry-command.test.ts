@@ -49,4 +49,10 @@ describe("runtime registry command integration", () => {
     expect(bridgeSource).toContain('"project:userId" or "project:userId:runtimeType"');
     expect(bridgeSource).toContain("resolveRuntimeInternalEndpoint(entry)");
   });
+
+  it("runtime.registry.list defaults to hiding deleted entries unless explicitly filtered", async () => {
+    const bridgeSource = await source("src/commands/bridge.ts");
+
+    expect(bridgeSource).toContain('status ? true : entry.status !== "deleted"');
+  });
 });

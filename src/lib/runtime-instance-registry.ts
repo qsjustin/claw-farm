@@ -249,6 +249,21 @@ export async function updateRuntimeInstanceStatus(
   });
 }
 
+export async function removeRuntimeInstance(
+  project: string,
+  userId: string,
+): Promise<RuntimeInstanceRegistryEntry | null> {
+  return withRuntimeInstanceRegistryLock(async () => {
+    const registry = await loadRuntimeInstanceRegistry();
+    const key = runtimeInstanceKey(project, userId);
+    const existing = registry.instances[key] ?? null;
+    if (!existing) return null;
+    delete registry.instances[key];
+    await saveRuntimeInstanceRegistry(registry);
+    return existing;
+  });
+}
+
 export async function getRuntimeInstance(
   project: string,
   userId: string,

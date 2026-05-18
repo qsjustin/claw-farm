@@ -224,7 +224,6 @@ describe("bridge instance.delete fallback", () => {
     const registry = JSON.parse(await readFile(join(registryDir, "runtime-instances.json"), "utf8")) as {
       instances: Record<string, { status: string; health: { ready: boolean } }>;
     };
-    expect(registry.instances[`clawbay-hermes:${userId}`]?.status).toBe("deleted");
-    expect(registry.instances[`clawbay-hermes:${userId}`]?.health.ready).toBe(false);
+    expect(registry.instances[`clawbay-hermes:${userId}`]).toBeUndefined();
   });
 });

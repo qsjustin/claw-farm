@@ -20,6 +20,7 @@ import { getInstance, getProject, removeInstance, resolveProjectName, validateNa
 import {
   getRuntimeInstance,
   listRuntimeInstances,
+  removeRuntimeInstance,
   redactedRuntimeInstance,
   resolveRuntimeInternalEndpoint,
   updateRuntimeInstanceStatus,
@@ -622,10 +623,7 @@ async function bridgeInstanceDeleteDataFallback(
     } catch {
       // Registry instance may already be absent; runtime registry cleanup below is authoritative for service runtimes.
     }
-    await updateRuntimeInstanceStatus(entry.project, entry.userId, "deleted", {
-      ready: false,
-      lastError: undefined,
-    });
+    await removeRuntimeInstance(entry.project, entry.userId);
   }
 
   const updated = await getRuntimeInstance(entry.project, entry.userId);
@@ -686,7 +684,9 @@ async function bridgeRuntimeRegistryList(payload: Record<string, unknown>): Prom
   const runtimeType = parseRuntimeType(payload.runtimeType);
   const status = parseRuntimeStatus(payload.status);
   const project = asString(payload.project);
-  const entries = await listRuntimeInstances({ project, runtimeType, status });
+  const entries = (await listRuntimeInstances({ project, runtimeType, status })).filter((entry) =>
+    status ? true : entry.status !== "deleted"
+  );
   return bridgeSuccess({
     action: "runtime.registry.list",
     message: `Loaded ${entries.length} runtime instance registry entr${entries.length === 1 ? "y" : "ies"}.`,
