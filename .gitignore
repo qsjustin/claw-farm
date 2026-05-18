@@ -6,3 +6,9 @@ bun.lock
 !.env.example
 .DS_Store
 .omx/
+
+# Local claw-farm project/runtime output
+.claw-farm.json
+api-proxy/
+instances/
+template/
