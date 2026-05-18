@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, applyInstanceModelControl } from "../lib/api.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { exportCommand } from "./export.ts";
@@ -16,12 +16,14 @@ import {
 } from "../lib/bridge-response.ts";
 import { resolveWorkspaceLayout, validateWorkspaceLayout } from "../lib/workspace-layout.ts";
 import { fillUserTemplate } from "../templates/USER.template.md.ts";
-import { getInstance, resolveProjectName, validateName } from "../lib/registry.ts";
+import { getInstance, getProject, removeInstance, resolveProjectName, validateName } from "../lib/registry.ts";
 import {
   getRuntimeInstance,
   listRuntimeInstances,
   redactedRuntimeInstance,
   resolveRuntimeInternalEndpoint,
+  updateRuntimeInstanceStatus,
+  type RuntimeInstanceRegistryEntry,
   type RuntimeInstanceStatus,
 } from "../lib/runtime-instance-registry.ts";
 import type { RuntimeType } from "../runtimes/interface.ts";
@@ -477,13 +479,39 @@ async function bridgeInstanceRestart(payload: Record<string, unknown>): Promise<
 async function bridgeInstanceDelete(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
   const { project, userId } = parseRuntimeInstanceKey(payload);
   validateBridgeName(userId, "user ID");
-  const context = await requireManagedInstance("instance.delete", project, userId);
-  if ("ok" in context) return context;
+  const runtimeType = parseRuntimeType(payload.runtimeType);
   const keepData = payload.keepData === true;
   const deleteData = payload.deleteData === true;
   if (keepData && deleteData) {
     throw new BridgeCommandError("invalid-payload", "Use only one of keepData or deleteData.");
   }
+
+  let context: Awaited<ReturnType<typeof requireManagedInstance>>;
+  try {
+    context = await requireManagedInstance("instance.delete", project, userId);
+  } catch (error) {
+    const fallback = await bridgeInstanceDeleteRegistryFallback({
+      project,
+      userId,
+      runtimeType,
+      deleteData,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    if (fallback) return fallback;
+    throw error;
+  }
+
+  if ("ok" in context) {
+    const fallback = await bridgeInstanceDeleteRegistryFallback({
+      project,
+      userId,
+      runtimeType,
+      deleteData,
+      reason: context.message,
+    });
+    return fallback ?? context;
+  }
+
   await despawn(project, userId, { quiet: true, keepData, deleteData });
   return bridgeSuccess({
     action: "instance.delete",
@@ -497,6 +525,131 @@ async function bridgeInstanceDelete(payload: Record<string, unknown>): Promise<B
       dataRetained: !deleteData,
     },
   });
+}
+
+async function bridgeInstanceDeleteRegistryFallback(input: {
+  project: string;
+  userId: string;
+  runtimeType?: RuntimeType;
+  deleteData: boolean;
+  reason: string;
+}): Promise<BridgeSuccess | null> {
+  const entry = await findRuntimeInstanceDeleteFallbackEntry(input);
+  if (!entry) {
+    return null;
+  }
+
+  if (input.deleteData) {
+    return bridgeInstanceDeleteDataFallback(input, entry);
+  }
+
+  const updated = await updateRuntimeInstanceStatus(entry.project, entry.userId, "deleted", {
+    ready: false,
+    lastError: "Control-plane cleanup fallback applied; runtime data retained.",
+  });
+
+  return bridgeSuccess({
+    action: "instance.delete",
+    message: `Deleted runtime registry entry "${entry.runtimeInstanceKey}" with data retained because the claw-farm project or instance workspace was incomplete.`,
+    project: entry.project,
+    userId: entry.userId,
+    runtimeState: "deleted",
+    metadata: {
+      runtimeInstance: updated ? redactedRuntimeInstance(updated) : redactedRuntimeInstance(entry),
+      dataDeleted: false,
+      dataRetained: true,
+      cleanupFallback: true,
+      cleanupReason: sanitizeBridgeMetadataMessage(input.reason),
+      requestedProject: input.project === entry.project ? undefined : input.project,
+    },
+  });
+}
+
+async function findRuntimeInstanceDeleteFallbackEntry(input: {
+  project: string;
+  userId: string;
+  runtimeType?: RuntimeType;
+}): Promise<RuntimeInstanceRegistryEntry | null> {
+  const exact = await getRuntimeInstance(input.project, input.userId);
+  if (exact) {
+    if (input.runtimeType && exact.runtimeType !== input.runtimeType) {
+      throw new BridgeCommandError(
+        "invalid-payload",
+        `Runtime instance "${input.project}:${input.userId}" is ${exact.runtimeType}, not ${input.runtimeType}.`,
+      );
+    }
+    return exact;
+  }
+
+  const candidates = (await listRuntimeInstances({ runtimeType: input.runtimeType })).filter((entry) =>
+    entry.userId === input.userId
+  );
+  if (candidates.length === 0) {
+    return null;
+  }
+  if (candidates.length > 1) {
+    throw new BridgeCommandError(
+      "runtime-conflict",
+      `Multiple runtime registry entries found for user "${input.userId}". Pass runtimeInstanceKey for the exact instance.`,
+    );
+  }
+  return candidates[0];
+}
+
+async function bridgeInstanceDeleteDataFallback(
+  input: {
+    project: string;
+    userId: string;
+    deleteData: boolean;
+    reason: string;
+  },
+  entry: RuntimeInstanceRegistryEntry,
+): Promise<BridgeSuccess | null> {
+  try {
+    await despawn(entry.project, entry.userId, { quiet: true, deleteData: true });
+  } catch {
+    const project = await getProject(entry.project);
+    if (!project) {
+      throw new BridgeCommandError(
+        "runtime-missing",
+        `Cannot physically delete runtime data for "${entry.runtimeInstanceKey}" because project "${entry.project}" is not registered.`,
+      );
+    }
+    const instDir = instanceDir(project.path, entry.userId);
+    await rm(instDir, { recursive: true, force: true });
+    try {
+      await removeInstance(entry.project, entry.userId);
+    } catch {
+      // Registry instance may already be absent; runtime registry cleanup below is authoritative for service runtimes.
+    }
+    await updateRuntimeInstanceStatus(entry.project, entry.userId, "deleted", {
+      ready: false,
+      lastError: undefined,
+    });
+  }
+
+  const updated = await getRuntimeInstance(entry.project, entry.userId);
+  return bridgeSuccess({
+    action: "instance.delete",
+    message: `Deleted runtime registry entry "${entry.runtimeInstanceKey}" and its data via cleanup fallback.`,
+    project: entry.project,
+    userId: entry.userId,
+    runtimeState: "deleted",
+    metadata: {
+      runtimeInstance: updated ? redactedRuntimeInstance(updated) : redactedRuntimeInstance(entry),
+      dataDeleted: true,
+      dataRetained: false,
+      cleanupFallback: true,
+      cleanupReason: sanitizeBridgeMetadataMessage(input.reason),
+      requestedProject: input.project === entry.project ? undefined : input.project,
+    },
+  });
+}
+
+function sanitizeBridgeMetadataMessage(value: string): string {
+  return value
+    .replace(/[A-Za-z]:\\[^\s"'`]+/g, "[runtime-path]")
+    .replace(/\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+/g, "[runtime-path]");
 }
 
 async function bridgeInstanceSync(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
