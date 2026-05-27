@@ -563,6 +563,35 @@ export async function spawn(options: {
         quiet,
       });
       await updateRuntimeInstanceStatus(projectName, userId, "running");
+
+      // Hermes generates config.yaml on first start with default model settings.
+      // Override the model section with the correct provider/model/baseUrl
+      // so new instances don't fall back to default anthropic/claude-opus-4.6.
+      if (runtimeType === "hermes" && llm) {
+        const configYamlPath = join(instDir, "hermes", "config.yaml");
+        const maxWaitMs = 15_000;
+        const pollIntervalMs = 1_000;
+        let waited = 0;
+        while (waited < maxWaitMs && !await Bun.file(configYamlPath).exists()) {
+          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+          waited += pollIntervalMs;
+        }
+        if (await Bun.file(configYamlPath).exists()) {
+          await syncHermesConfigYaml(instDir, llm, undefined, baseUrl ?? null);
+          if (!quiet) {
+            await runCompose(projectDir, "down", {
+              composePath,
+              projectName: composeProject,
+              quiet: true,
+            });
+            await runCompose(projectDir, "up", {
+              composePath,
+              projectName: composeProject,
+              quiet: true,
+            });
+          }
+        }
+      }
     }
 
     return { userId, port };
