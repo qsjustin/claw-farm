@@ -39,15 +39,29 @@ export const hermesRuntime: AgentRuntime = {
     name: string,
     processor: "builtin" | "mem0",
     llm: LlmProvider,
+    options?: {
+      modelSlug?: string;
+      baseUrl?: string | null;
+      useProxy?: boolean;
+    },
   ): string {
-    return hermesRuntimeConfigTemplate(name, processor, llm);
+    return hermesRuntimeConfigTemplate(name, processor, llm, options);
   },
 
   mergeConfig(templateJson: string, existingJson: string): string {
     try {
       const template = JSON.parse(templateJson) as Record<string, unknown>;
       const existing = JSON.parse(existingJson) as Record<string, unknown>;
-      return `${JSON.stringify({ ...template, ...existing }, null, 2)}\n`;
+      const managedKeys = new Set(["llm", "modelSlug", "baseUrl"]);
+      const merged: Record<string, unknown> = { ...template, ...existing };
+      for (const key of managedKeys) {
+        if (Object.prototype.hasOwnProperty.call(template, key)) {
+          merged[key] = template[key];
+        } else if (Object.prototype.hasOwnProperty.call(merged, key)) {
+          delete merged[key];
+        }
+      }
+      return `${JSON.stringify(merged, null, 2)}\n`;
     } catch {
       return existingJson || templateJson;
     }
