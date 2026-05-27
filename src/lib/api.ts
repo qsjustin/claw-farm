@@ -291,6 +291,53 @@ async function syncInstanceRuntimeModelConfig(options: {
     configPath,
     existingConfig ? runtime.mergeConfig(templateConfig, existingConfig) : templateConfig,
   );
+
+  if (runtime.name === "hermes") {
+    await syncHermesConfigYaml(instDir, llm, modelSlug, baseUrl);
+  }
+}
+
+async function syncHermesConfigYaml(
+  instDir: string,
+  llm: LlmProvider,
+  modelSlug?: string,
+  baseUrl?: string | null,
+): Promise<void> {
+  const configYamlPath = join(instDir, "hermes", "config.yaml");
+  const file = Bun.file(configYamlPath);
+  if (!await file.exists()) {
+    return;
+  }
+  let content = await file.text();
+
+  const hermesProvider = llm === "openai-compat" ? "custom" : llm;
+  const resolvedModel = modelSlug?.trim() ?? undefined;
+  const resolvedBaseUrl = baseUrl?.trim() ?? undefined;
+
+  if (resolvedModel) {
+    content = content.replace(
+      /^(\s*)default:\s*"[^"]*"/m,
+      `$1default: "${resolvedModel}"`,
+    );
+    content = content.replace(
+      /^(\s*)(?:model|default):\s*"[^"]*"/m,
+      `$1default: "${resolvedModel}"`,
+    );
+  }
+
+  content = content.replace(
+    /^(\s*)provider:\s*"[^"]*"/m,
+    `$1provider: "${hermesProvider}"`,
+  );
+
+  if (resolvedBaseUrl) {
+    content = content.replace(
+      /^(\s*)base_url:\s*"[^"]*"/m,
+      `$1base_url: "${resolvedBaseUrl}"`,
+    );
+  }
+
+  await Bun.write(configYamlPath, content);
 }
 
 async function writeInstanceCompose(options: {
