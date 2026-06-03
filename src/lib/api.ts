@@ -398,7 +398,6 @@ export async function spawn(options: {
     profileRef,
     baseUrl,
     quiet = false,
-    gatewayAllowAllUsers = false,
   } = options;
 
   // Validate userId (security: prevents path traversal via programmatic API)
@@ -407,6 +406,9 @@ export async function spawn(options: {
   const { name: projectName, entry } = await resolveProjectName(project);
   const projectDir = entry.path;
   const config = await readProjectConfig(projectDir);
+
+  // Resolve gatewayAllowAllUsers: explicit option > project config > default false
+  const gatewayAllowAllUsers = options.gatewayAllowAllUsers ?? config?.gatewayAllowAllUsers ?? false;
 
   // Determine runtime
   const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
