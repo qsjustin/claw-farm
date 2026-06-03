@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -87,6 +87,12 @@ describe("bridge instance.delete fallback", () => {
       cleanupFallback: true,
     });
     expect(response.metadata.cleanupReason).not.toContain("/home/");
+    const fallbackMetaStr = JSON.stringify(response.metadata);
+    expect(fallbackMetaStr).not.toContain("/home/");
+    expect(fallbackMetaStr).not.toContain("/tmp/");
+    expect(fallbackMetaStr).not.toContain("workspacePath");
+    expect(fallbackMetaStr).not.toContain("instanceRoot");
+    expect(fallbackMetaStr).not.toContain("workspaceRoot");
 
     const registry = JSON.parse(await readFile(join(registryDir, "runtime-instances.json"), "utf8")) as {
       instances: Record<string, { status: string; health: { ready: boolean; lastError?: string } }>;
@@ -219,6 +225,12 @@ describe("bridge instance.delete fallback", () => {
       cleanupFallback: true,
       requestedProject: "clawbay-prod",
     });
+    const fallbackDataMetaStr = JSON.stringify(response.metadata);
+    expect(fallbackDataMetaStr).not.toContain("/home/");
+    expect(fallbackDataMetaStr).not.toContain("/tmp/");
+    expect(fallbackDataMetaStr).not.toContain("workspacePath");
+    expect(fallbackDataMetaStr).not.toContain("instanceRoot");
+    expect(fallbackDataMetaStr).not.toContain("workspaceRoot");
     expect(await Bun.file(join(instanceRoot, "user-file.txt")).exists()).toBe(false);
 
     const registry = JSON.parse(await readFile(join(registryDir, "runtime-instances.json"), "utf8")) as {
