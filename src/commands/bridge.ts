@@ -374,8 +374,9 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
   }
 
   const resolved = await resolveProjectName(project);
-  const config = await readProjectConfig(resolved.entry.path);
-  const gatewayAllowAllUsers = payload.gatewayAllowAllUsers === true || config?.gatewayAllowAllUsers === true;
+  const payloadGatewayAllowAllUsers = typeof payload.gatewayAllowAllUsers === "boolean"
+    ? payload.gatewayAllowAllUsers
+    : undefined;
   const created = await spawn({
     project: resolved.name,
     userId,
@@ -384,7 +385,7 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
     apiKeyRef,
     profileRef,
     quiet: true,
-    gatewayAllowAllUsers,
+    gatewayAllowAllUsers: payloadGatewayAllowAllUsers,
   });
 
   let createdContext: Awaited<ReturnType<typeof resolveBridgeContext>>;
