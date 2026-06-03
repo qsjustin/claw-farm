@@ -520,11 +520,12 @@ async function bridgeInstanceDelete(payload: Record<string, unknown>): Promise<B
     project: context.resolved.name,
     userId,
     runtimeState: "deleted",
-    metadata: {
-      workspacePath: context.layout.instanceRoot,
-      dataDeleted: deleteData,
-      dataRetained: !deleteData,
-    },
+    metadata: buildSafeDeleteMetadata({
+      project: context.resolved.name,
+      userId,
+      runtimeType: context.runtimeType,
+      deleteData,
+    }),
   });
 }
 
@@ -648,6 +649,31 @@ function sanitizeBridgeMetadataMessage(value: string): string {
   return value
     .replace(/[A-Za-z]:\\[^\s"'`]+/g, "[runtime-path]")
     .replace(/\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+/g, "[runtime-path]");
+}
+
+function buildSafeDeleteMetadata(input: {
+  project: string;
+  userId: string;
+  runtimeType?: string;
+  deleteData: boolean;
+  cleanupFallback?: boolean;
+  cleanupReason?: string;
+  runtimeInstanceKey?: string;
+}): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    dataDeleted: input.deleteData,
+    dataRetained: !input.deleteData,
+  };
+  if (input.runtimeType) {
+    metadata.runtimeType = input.runtimeType;
+  }
+  if (input.cleanupFallback) {
+    metadata.cleanupFallback = true;
+    metadata.cleanupReason = input.cleanupReason
+      ? sanitizeBridgeMetadataMessage(input.cleanupReason)
+      : undefined;
+  }
+  return metadata;
 }
 
 async function bridgeInstanceSync(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
