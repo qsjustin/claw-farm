@@ -348,6 +348,7 @@ async function writeInstanceCompose(options: {
   runtimeType: RuntimeType;
   runtime: ReturnType<typeof getRuntime>;
   proxyMode: ProxyMode;
+  gatewayAllowAllUsers?: boolean;
 }): Promise<string> {
   const instanceHostDir = resolveDockerHostInstanceDir(options.instDir);
   const composeContent = options.runtimeType === "openclaw"
@@ -364,6 +365,7 @@ async function writeInstanceCompose(options: {
       options.port,
       options.proxyMode,
       instanceHostDir,
+      options.gatewayAllowAllUsers,
     );
   const composePath = join(options.instDir, COMPOSE_FILENAME);
   await Bun.write(composePath, composeContent);
@@ -382,6 +384,7 @@ export async function spawn(options: {
   profileRef?: string;
   baseUrl?: string | null;
   quiet?: boolean;
+  gatewayAllowAllUsers?: boolean;
 }): Promise<{ userId: string; port: number }> {
   const {
     project,
@@ -395,6 +398,7 @@ export async function spawn(options: {
     profileRef,
     baseUrl,
     quiet = false,
+    gatewayAllowAllUsers = false,
   } = options;
 
   // Validate userId (security: prevents path traversal via programmatic API)
@@ -509,6 +513,7 @@ export async function spawn(options: {
       runtimeType,
       runtime,
       proxyMode,
+      gatewayAllowAllUsers,
     });
     await ensureRuntimeContainerWritable({ instDir, runtimeType });
 

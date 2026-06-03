@@ -55,6 +55,7 @@ export interface ClawFarmConfig {
   llm?: LlmProvider;
   runtime?: RuntimeType;
   proxyMode?: ProxyMode;
+  gatewayAllowAllUsers?: boolean;
 }
 
 /**

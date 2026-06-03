@@ -199,10 +199,11 @@ export async function upgradeCommand(args: string[]): Promise<void> {
   await mkdir(join(projectDir, "logs"), { recursive: true });
   await ensureRawDirs(projectDir, runtimeType);
 
+  const gatewayAllowAllUsers = config?.gatewayAllowAllUsers ?? false;
   const composeContent =
     processor === "mem0"
       ? mem0ComposeTemplate(projectName, entry.port)
-      : runtime.composeTemplate(projectName, entry.port, proxyMode);
+      : runtime.composeTemplate(projectName, entry.port, proxyMode, gatewayAllowAllUsers);
   await Bun.write(join(projectDir, COMPOSE_FILENAME), composeContent);
   console.log("✓ Updated docker-compose.openclaw.yml");
 
