@@ -20,7 +20,7 @@ export const openclawRuntime: AgentRuntime = {
   runtimeDirName: "openclaw",
   defaultProxyMode: "per-instance",
 
-  composeTemplate(name: string, port: number, proxyMode?: ProxyMode): string {
+  composeTemplate(name: string, port: number, proxyMode?: ProxyMode, _gatewayAllowAllUsers?: boolean): string {
     return baseComposeTemplate(name, port, proxyMode ?? this.defaultProxyMode);
   },
 
@@ -30,6 +30,7 @@ export const openclawRuntime: AgentRuntime = {
     port: number,
     proxyMode: ProxyMode,
     instanceHostDir?: string,
+    _gatewayAllowAllUsers?: boolean,
   ): string {
     return instanceComposeTemplate(projectName, userId, port, proxyMode, instanceHostDir);
   },

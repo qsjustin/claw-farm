@@ -21,8 +21,8 @@ export const hermesRuntime: AgentRuntime = {
   runtimeDirName: "hermes",
   defaultProxyMode: "none",
 
-  composeTemplate(name: string, port: number, proxyMode?: ProxyMode): string {
-    return hermesComposeTemplate(name, port, proxyMode ?? this.defaultProxyMode);
+  composeTemplate(name: string, port: number, proxyMode?: ProxyMode, gatewayAllowAllUsers?: boolean): string {
+    return hermesComposeTemplate(name, port, proxyMode ?? this.defaultProxyMode, gatewayAllowAllUsers ?? false);
   },
 
   instanceComposeTemplate(
@@ -31,8 +31,9 @@ export const hermesRuntime: AgentRuntime = {
     port: number,
     proxyMode: ProxyMode,
     instanceHostDir?: string,
+    gatewayAllowAllUsers?: boolean,
   ): string {
-    return hermesInstanceComposeTemplate(projectName, userId, port, proxyMode, instanceHostDir);
+    return hermesInstanceComposeTemplate(projectName, userId, port, proxyMode, instanceHostDir, gatewayAllowAllUsers ?? false);
   },
 
   configTemplate(

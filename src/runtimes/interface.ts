@@ -35,7 +35,7 @@ export interface AgentRuntime {
   defaultProxyMode: ProxyMode;
 
   /** Generate base docker-compose for single-instance projects */
-  composeTemplate(name: string, port: number, proxyMode?: ProxyMode): string;
+  composeTemplate(name: string, port: number, proxyMode?: ProxyMode, gatewayAllowAllUsers?: boolean): string;
 
   /** Generate per-instance docker-compose for multi-instance projects */
   instanceComposeTemplate(
@@ -44,6 +44,7 @@ export interface AgentRuntime {
     port: number,
     proxyMode: ProxyMode,
     instanceHostDir?: string,
+    gatewayAllowAllUsers?: boolean,
   ): string;
 
   /** Generate shared proxy compose (only used when proxyMode=shared) */
