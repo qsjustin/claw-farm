@@ -28,7 +28,7 @@ import {
 import { fileExists } from "./fs-utils.ts";
 import { ensureInstanceDirs, instanceDir, templateDir } from "./instance.ts";
 import { resolveWorkspaceLayout } from "./workspace-layout.ts";
-import { mintBindingToken } from "./claw-bay-binding-token.ts";
+
 import { instanceComposeTemplate } from "../templates/docker-compose.instance.yml.ts";
 import { fillUserTemplate } from "../templates/USER.template.md.ts";
 import {
@@ -505,35 +505,6 @@ export async function spawn(options: {
     } else if (!await fileExists(join(instDir, ".env.model"))) {
       // Default template for project-level .env fallback
       await writeInstanceModelEnv(instDir, { provider: "gemini", apiKey: "", baseUrl: null });
-    }
-
-    // Mint weixin sidecar binding token if ClawBay API is configured
-    const clawBayApiUrl = process.env.CLAW_BAY_API_URL;
-    const clawBayAdminToken = process.env.CLAW_BAY_ADMIN_TOKEN;
-    if (clawBayApiUrl && clawBayAdminToken) {
-      const tokenResult = await mintBindingToken({
-        clawBayApiUrl,
-        adminToken: clawBayAdminToken,
-        instanceId: `${projectName}:${userId}`,
-        userId,
-        sidecarCode: "weixin-auth-sidecar",
-        purpose: "sidecar-binding",
-        ttlSeconds: 3600,
-      });
-      if (tokenResult.ok && tokenResult.token) {
-        const sidecarEnvPath = join(instDir, "sidecar-weixin.env");
-        await Bun.write(
-          sidecarEnvPath,
-          `WEIXIN_BINDING_TOKEN=${tokenResult.token}\n`,
-        );
-      } else if (!tokenResult.ok) {
-        // Fail-closed: log error but don't silently continue with empty token
-        if (!quiet) {
-          console.error(
-            `⚠ Failed to mint weixin binding token for ${userId}: ${tokenResult.error}`,
-          );
-        }
-      }
     }
 
     // Write compose (always regenerate)
