@@ -373,6 +373,16 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
     context = { ...(context ?? {}), displayName };
   }
 
+  // #159B: Parse per-instance weixin sidecar options from bridge payload
+  const enableWeixinSidecar = payload.enableWeixinSidecar === true;
+  const weixinSidecarPort = typeof payload.weixinSidecarPort === "number"
+    ? payload.weixinSidecarPort
+    : undefined;
+  const weixinEnvFile = asString(payload.weixinEnvFile);
+  const managedInstanceId = asString(payload.managedInstanceId);
+  const clawBayApiUrl = asString(payload.clawBayApiUrl);
+  const clawBayAdminToken = asString(payload.clawBayAdminToken);
+
   const resolved = await resolveProjectName(project);
   const payloadGatewayAllowAllUsers = typeof payload.gatewayAllowAllUsers === "boolean"
     ? payload.gatewayAllowAllUsers
@@ -386,6 +396,12 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
     profileRef,
     quiet: true,
     gatewayAllowAllUsers: payloadGatewayAllowAllUsers,
+    enableWeixinSidecar,
+    weixinSidecarPort,
+    weixinEnvFile,
+    managedInstanceId,
+    clawBayApiUrl,
+    clawBayAdminToken,
   });
 
   let createdContext: Awaited<ReturnType<typeof resolveBridgeContext>>;
@@ -517,7 +533,15 @@ async function bridgeInstanceDelete(payload: Record<string, unknown>): Promise<B
     return fallback ?? context;
   }
 
-  await despawn(project, userId, { quiet: true, keepData, deleteData });
+  await despawn(project, userId, {
+    quiet: true,
+    keepData,
+    deleteData,
+    // #159B: Pass weixin sidecar revocation config
+    managedInstanceId: asString(payload.managedInstanceId),
+    clawBayApiUrl: asString(payload.clawBayApiUrl),
+    clawBayAdminToken: asString(payload.clawBayAdminToken),
+  });
   return bridgeSuccess({
     action: "instance.delete",
     message: deleteData ? `Deleted instance "${userId}" and its data` : `Deleted instance "${userId}" with data retained when required by runtime policy`,
