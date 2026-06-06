@@ -14,6 +14,9 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { writeFileSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildInstanceCompose, instanceComposeTemplate } from "../docker-compose.instance.yml.ts";
 
 describe("Per-instance weixin sidecar compose (Phase 2)", () => {
@@ -130,9 +133,24 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(compose).not.toMatch(/cbt_[a-zA-Z0-9_-]{20,}/);
     });
 
-    it("includes sidecar-net network definition", () => {
+    it("includes sidecar-net under networks: key (valid compose)", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
-      expect(compose).toContain("sidecar-net:");
+      // Must have networks: as a top-level key, not under services:
+      expect(compose).toMatch(/^networks:\s*\n\s*sidecar-net:/m);
+      // sidecar-net must NOT be under services:
+      const servicesEnd = compose.indexOf("networks:");
+      const afterServices = compose.slice(servicesEnd);
+      expect(afterServices).toContain("sidecar-net:");
+    });
+
+    it("includes both proxy-net and sidecar-net under networks: key", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        proxyMode: "per-instance",
+        enableWeixinSidecar: true,
+      });
+      expect(compose).toMatch(/^networks:\s*\n\s*proxy-net:/m);
+      expect(compose).toMatch(/networks:[\s\S]*sidecar-net:/);
     });
   });
 
@@ -161,14 +179,91 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(weixinSection).not.toContain("depends_on:");
     });
 
-    it("includes both proxy-net and sidecar-net", () => {
+    it("includes both proxy-net and sidecar-net under networks: key", () => {
       const compose = buildInstanceCompose({
         ...baseOpts,
         proxyMode: "per-instance",
         enableWeixinSidecar: true,
       });
-      expect(compose).toContain("proxy-net:");
-      expect(compose).toContain("sidecar-net:");
+      expect(compose).toMatch(/^networks:\s*\n\s*proxy-net:/m);
+      expect(compose).toMatch(/networks:[\s\S]*sidecar-net:/);
+    });
+
+    it("does not set WEIXIN_SIDECAR_PORT (container port stays 8787)", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        enableWeixinSidecar: true,
+        weixinSidecarPort: 18887,
+      });
+      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
+      expect(weixinSection).not.toContain("WEIXIN_SIDECAR_PORT");
+      expect(weixinSection).toContain("http://127.0.0.1:8787/healthz");
+      expect(weixinSection).toContain("127.0.0.1:18887:8787");
+    });
+
+    it("generates valid compose that passes docker compose config (no-proxy)", async () => {
+      const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
+      const tmpDir2 = mkdtempSync(join(tmpdir(), "159b-config-test-"));
+      const tmpFile = join(tmpDir2, "docker-compose.yml");
+      writeFileSync(tmpFile, compose);
+      // Create required env files referenced by the compose
+      writeFileSync(join(tmpDir2, ".env"), "");
+      writeFileSync(join(tmpDir2, ".env.model"), "");
+      writeFileSync(join(tmpDir2, "instance.env"), "");
+      writeFileSync(join(tmpDir2, ".env.weixin"), "WEIXIN_BINDING_TOKEN=test\n");
+      writeFileSync(join(tmpDir2, "instance.env"), "CLAW_BAY_ADMIN_TOKEN=test\n");
+
+      const proc = Bun.spawn(["docker", "compose", "-f", tmpFile, "config"], {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, OPENCLAW_GATEWAY_TOKEN: "test", GATEWAY_INTERNAL_TOKEN: "test", HOME: process.env.HOME ?? "/" },
+        cwd: tmpDir2,
+      });
+      const exitCode = await proc.exited;
+      const stderr = await new Response(proc.stderr).text();
+
+      try { rmSync(tmpDir2, { recursive: true }); } catch { /* ignore */ }
+
+      if (exitCode !== 0 && stderr.includes("Cannot connect to the Docker daemon")) {
+        return; // skip — docker not available
+      }
+
+      expect(exitCode).toBe(0);
+      expect(stderr).not.toContain("must be a mapping");
+      expect(stderr).not.toContain("services.sidecar-net");
+    });
+
+    it("generates valid compose that passes docker compose config (with-proxy)", async () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        proxyMode: "per-instance",
+        enableWeixinSidecar: true,
+      });
+      const tmpDir2 = mkdtempSync(join(tmpdir(), "159b-config-test-"));
+      const tmpFile = join(tmpDir2, "docker-compose.yml");
+      writeFileSync(tmpFile, compose);
+      writeFileSync(join(tmpDir2, ".env"), "");
+      writeFileSync(join(tmpDir2, ".env.model"), "");
+      writeFileSync(join(tmpDir2, "instance.env"), "");
+      writeFileSync(join(tmpDir2, ".env.weixin"), "WEIXIN_BINDING_TOKEN=test\n");
+
+      const proc = Bun.spawn(["docker", "compose", "-f", tmpFile, "config"], {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, OPENCLAW_GATEWAY_TOKEN: "test", GATEWAY_INTERNAL_TOKEN: "test", HOME: process.env.HOME ?? "/" },
+        cwd: tmpDir2,
+      });
+      const exitCode = await proc.exited;
+      const stderr = await new Response(proc.stderr).text();
+
+      try { rmSync(tmpDir2, { recursive: true }); } catch { /* ignore */ }
+
+      if (exitCode !== 0 && stderr.includes("Cannot connect to the Docker daemon")) {
+        return; // skip
+      }
+
+      expect(exitCode).toBe(0);
+      expect(stderr).not.toContain("must be a mapping");
     });
   });
 });

@@ -571,11 +571,60 @@ export async function spawn(options: {
     await ensureRuntimeContainerWritable({ instDir, runtimeType });
 
     // #159B Phase 3: Provision weixin sidecar token after compose is ready
-    // TODO(Phase 4): Wire auto-provision on create, auto-rotate on rebuild/restore,
-    // and auto-revoke on delete. The provision API is available at
-    // POST /api/internal/weixin-binding-provision for external orchestration.
-    // See apps/api/src/routes/internal-weixin-sidecar-provision.ts
-    // and apps/api/src/lib/weixin-sidecar-provision.ts
+    if (enableWeixinSidecar && managedInstanceId && clawBayApiUrl && clawBayAdminToken) {
+      try {
+        const envFile = join(instDir, weixinEnvFile ?? ".env.weixin");
+        const sidecarPort = weixinSidecarPort ?? 8787;
+
+        const provisionResponse = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-claw-bay-admin-token": clawBayAdminToken,
+          },
+          body: JSON.stringify({
+            spec: {
+              managedInstanceId,
+              userId,
+              sidecarCode: "weixin-auth-sidecar",
+              ttlSeconds: 3600,
+              consumer: {
+                type: "compose-service",
+                composeFile: composePath,
+                serviceName: "weixin-sidecar",
+                envFile,
+              },
+              healthUrl: `http://127.0.0.1:${sidecarPort}/healthz`,
+              readinessTimeoutMs: 60_000,
+              readinessIntervalMs: 2_000,
+            },
+          }),
+        });
+
+        if (!provisionResponse.ok) {
+          const errorBody = await provisionResponse.json().catch(() => ({}));
+          throw new Error(
+            `Weixin sidecar token provisioning failed: ${provisionResponse.status} ${JSON.stringify(errorBody).slice(0, 200)}`
+          );
+        }
+
+        const provisionResult = (await provisionResponse.json()) as { ok: boolean; tokenLast4?: string; error?: { message?: string } };
+        if (!provisionResult.ok) {
+          throw new Error(
+            `Weixin sidecar token provisioning failed: ${provisionResult.error?.message ?? "unknown"}`
+          );
+        }
+
+        if (!quiet) {
+          console.log(`   🔑 Weixin sidecar token provisioned (last4: ${provisionResult.tokenLast4 ?? "?"})`);
+        }
+      } catch (provisionError) {
+        if (!quiet) {
+          console.error(`   ❌ Weixin sidecar token provisioning failed: ${provisionError instanceof Error ? provisionError.message : String(provisionError)}`);
+        }
+        throw provisionError;
+      }
+    }
 
     await upsertRuntimeInstance({
       project: projectName,
