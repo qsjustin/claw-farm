@@ -446,7 +446,16 @@ async function bridgeInstanceStart(payload: Record<string, unknown>): Promise<Br
   validateBridgeName(userId, "user ID");
   const context = await requireManagedInstance("instance.start", project, userId);
   if ("ok" in context) return context;
-  const started = await upInstance(project, userId, { quiet: true });
+  // #159B: Forward weixin sidecar options for start/rebuild
+  const started = await upInstance(project, userId, {
+    quiet: true,
+    enableWeixinSidecar: payload.enableWeixinSidecar === true,
+    weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
+    weixinEnvFile: asString(payload.weixinEnvFile),
+    managedInstanceId: asString(payload.managedInstanceId),
+    clawBayApiUrl: asString(payload.clawBayApiUrl),
+    clawBayAdminToken: asString(payload.clawBayAdminToken),
+  });
   return bridgeSuccess({
     action: "instance.start",
     message: `Started instance "${userId}"`,
@@ -484,7 +493,16 @@ async function bridgeInstanceRestart(payload: Record<string, unknown>): Promise<
   const context = await requireManagedInstance("instance.restart", project, userId);
   if ("ok" in context) return context;
   await downInstance(project, userId, { quiet: true });
-  await upInstance(project, userId, { quiet: true });
+  // #159B: Forward weixin sidecar options for restart/rebuild
+  await upInstance(project, userId, {
+    quiet: true,
+    enableWeixinSidecar: payload.enableWeixinSidecar === true,
+    weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
+    weixinEnvFile: asString(payload.weixinEnvFile),
+    managedInstanceId: asString(payload.managedInstanceId),
+    clawBayApiUrl: asString(payload.clawBayApiUrl),
+    clawBayAdminToken: asString(payload.clawBayAdminToken),
+  });
   return bridgeSuccess({
     action: "instance.restart",
     message: `Restarted instance "${userId}"`,

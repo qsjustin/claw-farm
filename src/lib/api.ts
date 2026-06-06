@@ -773,27 +773,24 @@ export async function despawn(
     ? { container: `${projectName}-api-proxy`, network: `${composeProject}_instance-net` }
     : undefined;
 
-  // #159B: Revoke weixin sidecar tokens before tearing down
+  // #159B: Revoke weixin sidecar tokens before tearing down (fail-closed)
   if (options?.managedInstanceId && options?.clawBayApiUrl && options?.clawBayAdminToken) {
-    try {
-      const revokeResponse = await fetch(`${options.clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-claw-bay-admin-token": options.clawBayAdminToken,
-        },
-        body: JSON.stringify({
-          managedInstanceId: options.managedInstanceId,
-          sidecarCode: "weixin-auth-sidecar",
-        }),
-      });
-      if (!revokeResponse.ok && !options?.quiet) {
-        console.warn(`⚠ Weixin sidecar token revocation returned ${revokeResponse.status}`);
-      }
-    } catch (revokeError) {
-      if (!options?.quiet) {
-        console.warn(`⚠ Weixin sidecar token revocation failed: ${revokeError instanceof Error ? revokeError.message : String(revokeError)}`);
-      }
+    const revokeResponse = await fetch(`${options.clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-claw-bay-admin-token": options.clawBayAdminToken,
+      },
+      body: JSON.stringify({
+        managedInstanceId: options.managedInstanceId,
+        sidecarCode: "weixin-auth-sidecar",
+      }),
+    });
+    if (!revokeResponse.ok) {
+      const errorBody = await revokeResponse.json().catch(() => ({}));
+      throw new Error(
+        `Weixin sidecar token revocation failed: ${revokeResponse.status} ${JSON.stringify(errorBody).slice(0, 200)}`
+      );
     }
   }
 
@@ -906,42 +903,39 @@ export async function upInstance(
     weixinEnvFile: options?.weixinEnvFile,
   });
 
-  // #159B: Rotate weixin sidecar token on rebuild/restore
+  // #159B: Rotate weixin sidecar token on rebuild/restore (fail-closed)
   if (options?.enableWeixinSidecar && options?.managedInstanceId && options?.clawBayApiUrl && options?.clawBayAdminToken) {
-    try {
-      const envFile = join(instDir, options.weixinEnvFile ?? ".env.weixin");
-      const sidecarPort = options.weixinSidecarPort ?? 8787;
-      const rotateResponse = await fetch(`${options.clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/rotate`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-claw-bay-admin-token": options.clawBayAdminToken,
-        },
-        body: JSON.stringify({
-          spec: {
-            managedInstanceId: options.managedInstanceId,
-            userId,
-            sidecarCode: "weixin-auth-sidecar",
-            ttlSeconds: 3600,
-            consumer: {
-              type: "compose-service",
-              composeFile: composePath,
-              serviceName: "weixin-sidecar",
-              envFile,
-            },
-            healthUrl: `http://127.0.0.1:${sidecarPort}/healthz`,
-            readinessTimeoutMs: 60_000,
-            readinessIntervalMs: 2_000,
+    const envFile = join(instDir, options.weixinEnvFile ?? ".env.weixin");
+    const sidecarPort = options.weixinSidecarPort ?? 8787;
+    const rotateResponse = await fetch(`${options.clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/rotate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-claw-bay-admin-token": options.clawBayAdminToken,
+      },
+      body: JSON.stringify({
+        spec: {
+          managedInstanceId: options.managedInstanceId,
+          userId,
+          sidecarCode: "weixin-auth-sidecar",
+          ttlSeconds: 3600,
+          consumer: {
+            type: "compose-service",
+            composeFile: composePath,
+            serviceName: "weixin-sidecar",
+            envFile,
           },
-        }),
-      });
-      if (!rotateResponse.ok && !options?.quiet) {
-        console.warn(`⚠ Weixin sidecar token rotation returned ${rotateResponse.status}`);
-      }
-    } catch (rotateError) {
-      if (!options?.quiet) {
-        console.warn(`⚠ Weixin sidecar token rotation failed: ${rotateError instanceof Error ? rotateError.message : String(rotateError)}`);
-      }
+          healthUrl: `http://127.0.0.1:${sidecarPort}/healthz`,
+          readinessTimeoutMs: 60_000,
+          readinessIntervalMs: 2_000,
+        },
+      }),
+    });
+    if (!rotateResponse.ok) {
+      const errorBody = await rotateResponse.json().catch(() => ({}));
+      throw new Error(
+        `Weixin sidecar token rotation failed: ${rotateResponse.status} ${JSON.stringify(errorBody).slice(0, 200)}`
+      );
     }
   }
 
