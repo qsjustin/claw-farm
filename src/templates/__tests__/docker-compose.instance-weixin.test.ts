@@ -6,9 +6,9 @@
  *
  * Key assertions:
  * - Sidecar service exists and is a REAL consumer (not a dead descriptor)
- * - Token is consumed via env_file, not hardcoded
- * - Sidecar connects to shared services (sidecar-gateway, claw-bay-api)
- * - Healthcheck is present for readiness verification
+ * - Token is consumed via env_file ONLY (no environment override)
+ * - Per-instance port mapping (not host network_mode)
+ * - Bridge network for isolation
  * - Without enableWeixinSidecar, compose is unchanged (backward compatible)
  * - Plaintext token is NEVER written to the compose template itself
  */
@@ -52,28 +52,45 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(compose).toContain("build: ../../claw-sidecar-weixin");
     });
 
-    it("consumes token via env_file (real consumer, not dead descriptor)", () => {
+    it("consumes token via env_file ONLY (no environment override)", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
-      // Must reference the env_file, not hardcode the token
+      // Must reference the env_file
       expect(compose).toContain("env_file:");
       expect(compose).toContain("- ./.env.weixin");
+      // Must NOT have WEIXIN_BINDING_TOKEN in environment (would override env_file)
+      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
+      expect(weixinSection).not.toMatch(/WEIXIN_BINDING_TOKEN:/);
       // Must NOT contain a hardcoded token value
       expect(compose).not.toMatch(/WEIXIN_BINDING_TOKEN=cbt_/);
     });
 
-    it("uses variable substitution for WEIXIN_BINDING_TOKEN (fail-closed if unset)", () => {
+    it("uses bridge network (not host network_mode)", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
-      // Token is injected via ${WEIXIN_BINDING_TOKEN:-} — empty default, not a hardcoded value
-      expect(compose).toContain("WEIXIN_BINDING_TOKEN: ${WEIXIN_BINDING_TOKEN:-}");
+      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
+      expect(weixinSection).not.toContain("network_mode: host");
+      expect(weixinSection).toContain("sidecar-net");
     });
 
-    it("connects to shared sidecar-gateway via host network", () => {
+    it("maps per-instance port to avoid conflicts", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        enableWeixinSidecar: true,
+        weixinSidecarPort: 18887,
+      });
+      expect(compose).toContain("127.0.0.1:18887:8787");
+    });
+
+    it("uses default port 8787 when not specified", () => {
+      const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
+      expect(compose).toContain("127.0.0.1:8787:8787");
+    });
+
+    it("connects to shared sidecar-gateway via host.docker.internal", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
       expect(compose).toContain("SIDECAR_GATEWAY_URL: http://host.docker.internal:3002");
-      expect(compose).toContain("network_mode: host");
     });
 
-    it("connects to shared claw-bay-api via host network", () => {
+    it("connects to shared claw-bay-api via host.docker.internal", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
       expect(compose).toContain("SIDECAR_CLAW_BAY_API_URL: http://host.docker.internal:3001");
     });
@@ -91,7 +108,6 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
 
     it("applies security hardening (read_only, no-new-privileges, cap_drop)", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
-      // Find the weixin-sidecar section
       const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
       expect(weixinSection).toContain("read_only: true");
       expect(weixinSection).toContain("no-new-privileges:true");
@@ -111,8 +127,12 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
 
     it("does not contain plaintext token in any form", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
-      // No cbt_ prefix tokens (real tokens always start with cbt_)
       expect(compose).not.toMatch(/cbt_[a-zA-Z0-9_-]{20,}/);
+    });
+
+    it("includes sidecar-net network definition", () => {
+      const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
+      expect(compose).toContain("sidecar-net:");
     });
   });
 
@@ -134,12 +154,21 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
         proxyMode: "per-instance",
         enableWeixinSidecar: true,
       });
-      // The weixin-sidecar section should NOT have a depends_on for api-proxy
       const weixinSection = compose.slice(
         compose.indexOf("weixin-sidecar:"),
         compose.indexOf("openclaw-gateway:"),
       );
       expect(weixinSection).not.toContain("depends_on:");
+    });
+
+    it("includes both proxy-net and sidecar-net", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        proxyMode: "per-instance",
+        enableWeixinSidecar: true,
+      });
+      expect(compose).toContain("proxy-net:");
+      expect(compose).toContain("sidecar-net:");
     });
   });
 });

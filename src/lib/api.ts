@@ -29,7 +29,7 @@ import { fileExists } from "./fs-utils.ts";
 import { ensureInstanceDirs, instanceDir, templateDir } from "./instance.ts";
 import { resolveWorkspaceLayout } from "./workspace-layout.ts";
 
-import { instanceComposeTemplate } from "../templates/docker-compose.instance.yml.ts";
+import { instanceComposeTemplate, buildInstanceCompose } from "../templates/docker-compose.instance.yml.ts";
 import { fillUserTemplate } from "../templates/USER.template.md.ts";
 import {
   dockerNetworkConnect,
@@ -156,6 +156,12 @@ export interface ApplyInstanceModelControlOptions {
 
 export interface ManagedInstanceControlOptions {
   quiet?: boolean;
+  /** #159B: Enable per-instance weixin sidecar */
+  enableWeixinSidecar?: boolean;
+  /** #159B: Per-instance weixin sidecar port */
+  weixinSidecarPort?: number;
+  /** #159B: Per-instance weixin env file name */
+  weixinEnvFile?: string;
 }
 
 function runtimeAttachNetworks(): string[] {
@@ -350,17 +356,39 @@ async function writeInstanceCompose(options: {
   runtime: ReturnType<typeof getRuntime>;
   proxyMode: ProxyMode;
   gatewayAllowAllUsers?: boolean;
+  /** #159B: Enable per-instance weixin sidecar */
+  enableWeixinSidecar?: boolean;
+  /** #159B: Per-instance weixin sidecar port (default: 8787) */
+  weixinSidecarPort?: number;
+  /** #159B: Per-instance weixin env file name (default: .env.weixin) */
+  weixinEnvFile?: string;
 }): Promise<string> {
   const instanceHostDir = resolveDockerHostInstanceDir(options.instDir);
-  const composeContent = options.runtimeType === "openclaw"
-    ? instanceComposeTemplate(
+  const enableWeixin = options.enableWeixinSidecar ?? false;
+
+  let composeContent: string;
+  if (enableWeixin && options.runtimeType === "openclaw") {
+    // #159B: Use buildInstanceCompose for weixin sidecar support
+    composeContent = buildInstanceCompose({
+      projectName: options.projectName,
+      userId: options.userId,
+      port: options.port,
+      proxyMode: options.proxyMode,
+      instanceHostDir,
+      enableWeixinSidecar: true,
+      weixinSidecarPort: options.weixinSidecarPort,
+      weixinEnvFile: options.weixinEnvFile,
+    });
+  } else if (options.runtimeType === "openclaw") {
+    composeContent = instanceComposeTemplate(
       options.projectName,
       options.userId,
       options.port,
       options.proxyMode,
       instanceHostDir,
-    )
-    : options.runtime.instanceComposeTemplate(
+    );
+  } else {
+    composeContent = options.runtime.instanceComposeTemplate(
       options.projectName,
       options.userId,
       options.port,
@@ -368,6 +396,7 @@ async function writeInstanceCompose(options: {
       instanceHostDir,
       options.gatewayAllowAllUsers,
     );
+  }
   const composePath = join(options.instDir, COMPOSE_FILENAME);
   await Bun.write(composePath, composeContent);
   return composePath;
@@ -386,6 +415,18 @@ export async function spawn(options: {
   baseUrl?: string | null;
   quiet?: boolean;
   gatewayAllowAllUsers?: boolean;
+  /** #159B: Enable per-instance weixin sidecar */
+  enableWeixinSidecar?: boolean;
+  /** #159B: Per-instance weixin sidecar port */
+  weixinSidecarPort?: number;
+  /** #159B: Per-instance weixin env file name */
+  weixinEnvFile?: string;
+  /** #159B: ClawBay ManagedInstance.id for token provisioning */
+  managedInstanceId?: string;
+  /** #159B: ClawBay API URL for token provisioning */
+  clawBayApiUrl?: string;
+  /** #159B: ClawBay admin token for token provisioning */
+  clawBayAdminToken?: string;
 }): Promise<{ userId: string; port: number }> {
   const {
     project,
@@ -399,6 +440,12 @@ export async function spawn(options: {
     profileRef,
     baseUrl,
     quiet = false,
+    enableWeixinSidecar = false,
+    weixinSidecarPort,
+    weixinEnvFile,
+    managedInstanceId,
+    clawBayApiUrl,
+    clawBayAdminToken,
   } = options;
 
   // Validate userId (security: prevents path traversal via programmatic API)
@@ -517,8 +564,18 @@ export async function spawn(options: {
       runtime,
       proxyMode,
       gatewayAllowAllUsers,
+      enableWeixinSidecar,
+      weixinSidecarPort,
+      weixinEnvFile,
     });
     await ensureRuntimeContainerWritable({ instDir, runtimeType });
+
+    // #159B Phase 3: Provision weixin sidecar token after compose is ready
+    // TODO(Phase 4): Wire auto-provision on create, auto-rotate on rebuild/restore,
+    // and auto-revoke on delete. The provision API is available at
+    // POST /api/internal/weixin-binding-provision for external orchestration.
+    // See apps/api/src/routes/internal-weixin-sidecar-provision.ts
+    // and apps/api/src/lib/weixin-sidecar-provision.ts
 
     await upsertRuntimeInstance({
       project: projectName,
@@ -744,6 +801,9 @@ export async function upInstance(
     runtimeType,
     runtime,
     proxyMode,
+    enableWeixinSidecar: options?.enableWeixinSidecar,
+    weixinSidecarPort: options?.weixinSidecarPort,
+    weixinEnvFile: options?.weixinEnvFile,
   });
   await ensureRuntimeContainerWritable({ instDir, runtimeType });
   await runCompose(projectDir, "up", {
