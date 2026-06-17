@@ -633,6 +633,9 @@ export async function spawn(options: {
               readinessTimeoutMs: 60_000,
               readinessIntervalMs: 2_000,
             },
+            // #159B: On initial create, the sidecar container doesn't exist yet.
+            // We skip the restart and let docker compose up bring it up instead.
+            skipRestart: true,
           }),
         });
 
