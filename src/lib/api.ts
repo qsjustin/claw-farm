@@ -393,6 +393,21 @@ async function writeInstanceCompose(options: {
       options.proxyMode,
       instanceHostDir,
     );
+  } else if (enableWeixin) {
+    // #159B: Non-openclaw runtime with weixin sidecar — pass sidecar options to runtime template
+    composeContent = options.runtime.instanceComposeTemplate(
+      options.projectName,
+      options.userId,
+      options.port,
+      options.proxyMode,
+      instanceHostDir,
+      options.gatewayAllowAllUsers,
+      {
+        enableWeixinSidecar: true,
+        weixinEnvFile: options.weixinEnvFile ?? ".env.weixin",
+        weixinSidecarPort: options.weixinSidecarPort ?? 8787,
+      },
+    );
   } else {
     composeContent = options.runtime.instanceComposeTemplate(
       options.projectName,

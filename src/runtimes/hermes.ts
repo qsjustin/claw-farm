@@ -32,8 +32,14 @@ export const hermesRuntime: AgentRuntime = {
     proxyMode: ProxyMode,
     instanceHostDir?: string,
     gatewayAllowAllUsers?: boolean,
+    weixinSidecarOptions?: { enableWeixinSidecar?: boolean; weixinEnvFile?: string; weixinSidecarPort?: number },
   ): string {
-    return hermesInstanceComposeTemplate(projectName, userId, port, proxyMode, instanceHostDir, gatewayAllowAllUsers ?? false);
+    return hermesInstanceComposeTemplate(
+      projectName, userId, port, proxyMode, instanceHostDir, gatewayAllowAllUsers ?? false,
+      weixinSidecarOptions?.enableWeixinSidecar ?? false,
+      weixinSidecarOptions?.weixinEnvFile ?? ".env.weixin",
+      weixinSidecarOptions?.weixinSidecarPort ?? 8787,
+    );
   },
 
   configTemplate(

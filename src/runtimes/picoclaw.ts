@@ -32,6 +32,7 @@ export const picoClawRuntime: AgentRuntime = {
     proxyMode: ProxyMode,
     _instanceHostDir?: string,
     _gatewayAllowAllUsers?: boolean,
+    _weixinSidecarOptions?: { enableWeixinSidecar?: boolean; weixinEnvFile?: string; weixinSidecarPort?: number },
   ): string {
     if (proxyMode === "shared") {
       return picoClawInstanceSharedProxyComposeTemplate(projectName, userId, port);

@@ -31,7 +31,10 @@ export const openclawRuntime: AgentRuntime = {
     proxyMode: ProxyMode,
     instanceHostDir?: string,
     _gatewayAllowAllUsers?: boolean,
+    _weixinSidecarOptions?: { enableWeixinSidecar?: boolean; weixinEnvFile?: string; weixinSidecarPort?: number },
   ): string {
+    // #159B: OpenClaw with weixin sidecar is handled by buildInstanceCompose in api.ts,
+    // not here. This method is only used for the non-sidecar case.
     return instanceComposeTemplate(projectName, userId, port, proxyMode, instanceHostDir);
   },
 
