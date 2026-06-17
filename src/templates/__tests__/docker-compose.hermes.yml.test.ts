@@ -74,3 +74,60 @@ describe("hermes runtime gatewayAllowAllUsers via instanceComposeTemplate", () =
     expect(composeDefault).toContain('GATEWAY_ALLOW_ALL_USERS: "false"');
   });
 });
+
+describe("hermesInstanceComposeTemplate with weixin sidecar (#159B)", () => {
+  test("without sidecar has no weixin-sidecar service", () => {
+    const compose = hermesInstanceComposeTemplate("test-proj", "user-1", 18790);
+    expect(compose).not.toContain("weixin-sidecar:");
+    expect(compose).not.toContain("sidecar-net");
+  });
+
+  test("with sidecar includes weixin-sidecar service and sidecar-net", () => {
+    const compose = hermesInstanceComposeTemplate(
+      "test-proj", "user-1", 18790, "none", undefined, false, true, ".env.weixin", 8787
+    );
+    expect(compose).toContain("weixin-sidecar:");
+    expect(compose).toContain("sidecar-net:");
+    expect(compose).toContain("container_name: test-proj-user-1-weixin");
+  });
+
+  test("uses pre-built sidecar image (not local build context)", () => {
+    const compose = hermesInstanceComposeTemplate(
+      "test-proj", "user-1", 18790, "none", undefined, false, true
+    );
+    expect(compose).toContain("image: clawbay-bay-sidecar-weixin:latest");
+    expect(compose).not.toContain("build: ../../claw-sidecar-weixin");
+  });
+
+  test("consumes token via env_file (.env.weixin) without overriding in environment", () => {
+    const compose = hermesInstanceComposeTemplate(
+      "test-proj", "user-1", 18790, "none", undefined, false, true, ".env.weixin"
+    );
+    expect(compose).toContain("- ./.env.weixin");
+    // WEIXIN_BINDING_TOKEN should NOT appear in environment (would override env_file)
+    const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
+    expect(weixinSection).not.toMatch(/WEIXIN_BINDING_TOKEN:/);
+    expect(compose).not.toMatch(/WEIXIN_BINDING_TOKEN=cbt_/);
+  });
+
+  test("uses per-instance port mapping", () => {
+    const compose = hermesInstanceComposeTemplate(
+      "test-proj", "user-1", 18790, "none", undefined, false, true, ".env.weixin", 18887
+    );
+    expect(compose).toContain("127.0.0.1:18887:8787");
+  });
+
+  test("connects to sidecar-gateway via host.docker.internal", () => {
+    const compose = hermesInstanceComposeTemplate(
+      "test-proj", "user-1", 18790, "none", undefined, false, true
+    );
+    expect(compose).toContain("SIDECAR_GATEWAY_URL: http://host.docker.internal:3002");
+  });
+
+  test("does not contain plaintext token", () => {
+    const compose = hermesInstanceComposeTemplate(
+      "test-proj", "user-1", 18790, "none", undefined, false, true
+    );
+    expect(compose).not.toMatch(/cbt_[a-zA-Z0-9_-]{20,}/);
+  });
+});
