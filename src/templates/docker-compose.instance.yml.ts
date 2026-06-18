@@ -93,11 +93,11 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
       - ./logs:/logs
     networks:
       - proxy-net
-    read_only: true
     tmpfs:
       - /tmp:size=50M
     security_opt:
       - no-new-privileges:true
+    read_only: true
     cap_drop:
       - ALL
     deploy:
@@ -146,11 +146,11 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
       - ${openclawMountSource}/workspace/runtime/sidecar-weixin:/data
     networks:
       - sidecar-net
-    read_only: true
     tmpfs:
       - /tmp:size=50M
     security_opt:
       - no-new-privileges:true
+    read_only: true
     cap_drop:
       - ALL
     deploy:
@@ -191,12 +191,12 @@ ${hasProxy ? `      OPENCLAW_API_PROXY: http://api-proxy:8080` : `      # OPENCL
       OPENCLAW_GATEWAY_TOKEN: \${OPENCLAW_GATEWAY_TOKEN:?Set OPENCLAW_GATEWAY_TOKEN for OpenClaw HTTP access}
 ${hasProxy ? `    networks:
       - proxy-net` : ""}
-    read_only: true
     tmpfs:
       - /tmp:size=100M
       - /home/node/.cache:size=200M
     security_opt:
       - no-new-privileges:true
+    read_only: true
     cap_drop:
       - ALL
     deploy:

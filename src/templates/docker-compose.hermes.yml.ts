@@ -101,11 +101,11 @@ export function hermesInstanceComposeTemplate(
       - ${hermesMountSource}/workspace/runtime/sidecar-weixin:/data
     networks:
       - sidecar-net
-    read_only: true
     tmpfs:
       - /tmp:size=50M
     security_opt:
       - no-new-privileges:true
+    read_only: true
     cap_drop:
       - ALL
     deploy:
