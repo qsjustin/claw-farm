@@ -83,6 +83,7 @@ export function hermesInstanceComposeTemplate(
   const weixinSidecarService = enableWeixinSidecar ? `  weixin-sidecar:
     container_name: ${containerPrefix}-weixin
     image: clawbay-bay-sidecar-weixin:latest
+    user: "1000:1000"
     env_file:
       - ./${weixinEnvFile}
       - ./instance.env
@@ -106,6 +107,9 @@ export function hermesInstanceComposeTemplate(
       - /tmp:size=50M
     security_opt:
       - no-new-privileges:true
+    read_only: true
+    cap_drop:
+      - ALL
     deploy:
       resources:
         limits:

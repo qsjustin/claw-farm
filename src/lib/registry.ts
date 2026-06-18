@@ -281,15 +281,18 @@ export async function addInstance(
     }
 
     const port = allocatePort(reg);
-    const weixinSidecarPort = allocatePort(reg);
+    // #159B: weixinSidecarPort is no longer allocated from registry — the sidecar
+    // uses container-internal port 8787 only (no host publishing). The field is
+    // kept in InstanceEntry for backward compat with old registry entries but
+    // is not used by new code.
     project.instances[userId] = {
       userId,
       port,
-      weixinSidecarPort,
       createdAt: new Date().toISOString(),
     };
     await saveRegistry(reg);
-    return { port, weixinSidecarPort };
+    // Return 8787 for backward compat — callers that check this value get the fixed internal port
+    return { port, weixinSidecarPort: 8787 };
   });
 }
 
@@ -317,34 +320,6 @@ export async function getInstance(
   const project = reg.projects[projectName];
   if (!project) return null;
   return project.instances?.[userId] ?? null;
-}
-
-/**
- * #159B: Ensure an instance has a weixinSidecarPort allocated.
- * Old instances created before #159B don't have this field.
- * This function allocates and persists a port if missing.
- */
-export async function ensureSidecarPort(
-  projectName: string,
-  userId: string,
-): Promise<number> {
-  return withLock(async () => {
-    const reg = await loadRegistry();
-    const project = reg.projects[projectName];
-    if (!project) throw new Error(`Project "${projectName}" not found in registry`);
-    const inst = project.instances?.[userId];
-    if (!inst) throw new Error(`Instance for user "${userId}" not found in "${projectName}"`);
-
-    if (typeof inst.weixinSidecarPort === "number") {
-      return inst.weixinSidecarPort;
-    }
-
-    // Allocate and persist a new sidecar port for old instances
-    const port = allocatePort(reg);
-    inst.weixinSidecarPort = port;
-    await saveRegistry(reg);
-    return port;
-  });
 }
 
 export async function listInstances(

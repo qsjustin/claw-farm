@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, chown } from "node:fs/promises";
 import { join } from "node:path";
 import type { RuntimeType } from "../runtimes/interface.ts";
 import { buildSidecarAttachRuntimeMount } from "./backup-bundle.ts";
@@ -54,16 +54,27 @@ function attachDescriptor(attach: SidecarAttachPoint): string {
   }, null, 2)}\n`;
 }
 
+/** Sidecar container uid/gid — must match the `user:` directive in compose template */
+const SIDECAR_UID = 1000;
+const SIDECAR_GID = 1000;
+
 export async function ensureSidecarAttachPoint(attach: SidecarAttachPoint): Promise<void> {
   await mkdir(attach.configDir, { recursive: true, mode: 0o755 });
   await writeFile(join(attach.configDir, "attach-point.json"), attachDescriptor(attach), "utf8");
 
   // #159B: Pre-create state/session subdirs for the weixin sidecar container.
   // The sidecar mounts configDir as /data and needs /data/openclaw and /data/weixin-sessions.
-  // Without pre-creation, the sidecar process (running with restricted capabilities)
-  // may fail with EACCES when trying to mkdir these paths.
-  await mkdir(join(attach.configDir, "openclaw"), { recursive: true, mode: 0o755 });
-  await mkdir(join(attach.configDir, "weixin-sessions"), { recursive: true, mode: 0o755 });
+  // Without pre-creation, the sidecar process (running as uid 1000 with cap_drop: ALL)
+  // cannot mkdir these paths due to missing DAC_OVERRIDE.
+  //
+  // Dirs are chowned to SIDECAR_UID:SIDECAR_GID so the non-root sidecar process can write.
+  const openclawDir = join(attach.configDir, "openclaw");
+  const sessionsDir = join(attach.configDir, "weixin-sessions");
+  await mkdir(openclawDir, { recursive: true, mode: 0o755 });
+  await mkdir(sessionsDir, { recursive: true, mode: 0o755 });
+  await chown(openclawDir, SIDECAR_UID, SIDECAR_GID);
+  await chown(sessionsDir, SIDECAR_UID, SIDECAR_GID);
+  await chown(attach.configDir, SIDECAR_UID, SIDECAR_GID);
 }
 
 export async function ensureDefaultSidecarAttachPoints(input: {

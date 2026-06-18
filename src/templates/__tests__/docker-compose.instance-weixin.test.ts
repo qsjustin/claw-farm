@@ -120,17 +120,17 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(compose).toContain("/runtime/instance/openclaw/workspace/runtime/sidecar-weixin:/data");
     });
 
-    it("applies security hardening (no-new-privileges, no read_only/cap_drop to match shared sidecar)", () => {
+    it("applies security hardening (read_only, no-new-privileges, cap_drop, non-root user)", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
       // Slice only the weixin-sidecar section
       const start = compose.indexOf("weixin-sidecar:");
       const end = compose.indexOf("openclaw-gateway:");
       const weixinSection = compose.slice(start, end);
       expect(weixinSection).toContain("no-new-privileges:true");
-      // read_only and cap_drop removed to match shared sidecar configuration
-      // (shared sidecar runs as root without these restrictions)
-      expect(weixinSection).not.toContain("read_only: true");
-      expect(weixinSection).not.toContain("cap_drop:");
+      expect(weixinSection).toContain("read_only: true");
+      expect(weixinSection).toContain("cap_drop:");
+      expect(weixinSection).toContain("- ALL");
+      expect(weixinSection).toContain('user: "1000:1000"');
     });
 
     it("respects custom weixinEnvFile path", () => {

@@ -14,7 +14,6 @@ import {
   listInstances as registryListInstances,
   getInstance,
   getProject,
-  ensureSidecarPort,
   validateName,
   type InstanceEntry,
   type ProjectEntry,
@@ -182,9 +181,23 @@ function runtimeAttachNetworks(): string[] {
  * #159B: Resolve the first external network for per-instance sidecar compose.
  * The sidecar joins this network to reach claw-bay-api, sidecar-gateway via Docker DNS.
  * Source: CLAW_FARM_RUNTIME_ATTACH_NETWORKS (first entry).
+ * Throws if the network name is missing or contains unsafe characters.
  */
-function resolveExternalNetwork(): string | undefined {
-  return runtimeAttachNetworks()[0];
+function resolveExternalNetwork(): string {
+  const networks = runtimeAttachNetworks();
+  if (networks.length === 0) {
+ throw new Error(
+      "CLAW_FARM_RUNTIME_ATTACH_NETWORKS is not set — per-instance weixin sidecar requires " +
+      "an external Docker network for API/gateway connectivity. " +
+      "Set CLAW_FARM_RUNTIME_ATTACH_NETWORKS=clawbay_default (or equivalent) in the API container env."
+    );
+  }
+  const network = networks[0];
+  // Validate network name for Docker safety (alphanumeric, underscore, hyphen only)
+  if (!/^[a-zA-Z0-9_-]+$/.test(network)) {
+    throw new Error(`Invalid external network name: "${network}" — must be alphanumeric/underscore/hyphen only`);
+  }
+  return network;
 }
 
 function resolveDockerHostInstanceDir(instDir: string): string | undefined {
@@ -732,6 +745,46 @@ export async function spawn(options: {
         runtimeType,
         quiet,
       });
+
+      // #159B: Post-up sidecar health verification (fail-closed)
+      // If weixin sidecar is enabled, verify the sidecar container is healthy
+      // before returning create success. This catches network/config issues
+      // that would otherwise leave a half-functional runtime.
+      if (enableWeixinSidecar) {
+        const sidecarContainer = `${projectName}-${userId}-weixin`;
+        const sidecarHealthUrl = `http://${sidecarContainer}:8787/healthz`;
+        const maxWaitMs = 60_000;
+        const pollIntervalMs = 3_000;
+        let waited = 0;
+        let sidecarHealthy = false;
+        while (waited < maxWaitMs) {
+          try {
+            const resp = await fetch(sidecarHealthUrl, { signal: AbortSignal.timeout(5_000) });
+            if (resp.ok) {
+              const body = await resp.json() as { ok?: boolean; ready?: boolean };
+              if (body.ok && body.ready) {
+                sidecarHealthy = true;
+                break;
+              }
+            }
+          } catch {
+            // Container not ready yet — retry
+          }
+          await new Promise((r) => setTimeout(r, pollIntervalMs));
+          waited += pollIntervalMs;
+        }
+        if (!sidecarHealthy) {
+ throw new Error(
+              `Weixin sidecar health check failed after ${maxWaitMs / 1000}s — ` +
+              `container ${sidecarContainer} did not become ready. ` +
+              `Check network connectivity and sidecar configuration.`
+            );
+        }
+        if (!quiet) {
+          console.log(`   ✅ Weixin sidecar healthy (${sidecarContainer})`);
+        }
+      }
+
       await updateRuntimeInstanceStatus(projectName, userId, "running");
 
       // Hermes generates config.yaml on first start with default model settings.
@@ -925,12 +978,6 @@ export async function upInstance(
   const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
   const instDir = instanceDir(projectDir, userId);
 
-  // #159B: Backfill sidecar port for old instances that don't have one
-  let effectiveSidecarPort = options?.weixinSidecarPort ?? instance.weixinSidecarPort;
-  if (options?.enableWeixinSidecar && typeof effectiveSidecarPort !== "number") {
-    effectiveSidecarPort = await ensureSidecarPort(projectName, userId);
-  }
-
   const externalNetwork = resolveExternalNetwork();
 
   await ensureSharedProxy(projectDir, projectName, runtimeType, proxyMode, options?.quiet ?? false);
@@ -943,7 +990,7 @@ export async function upInstance(
     runtime,
     proxyMode,
     enableWeixinSidecar: options?.enableWeixinSidecar,
-    weixinSidecarPort: effectiveSidecarPort,
+    weixinSidecarPort: options?.weixinSidecarPort ?? instance.weixinSidecarPort ?? 8787,
     weixinEnvFile: options?.weixinEnvFile,
     externalNetwork,
   });

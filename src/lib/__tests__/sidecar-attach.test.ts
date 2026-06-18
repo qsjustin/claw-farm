@@ -53,7 +53,7 @@ describe("sidecar-attach", () => {
     expect(descriptor.sidecarCode).toBe("weixin-auth-sidecar");
   });
 
-  it("#159B: pre-creates openclaw and weixin-sessions subdirs for sidecar data mount", async () => {
+  it("#159B: pre-creates openclaw and weixin-sessions subdirs with correct uid/gid for sidecar data mount", async () => {
     const layout = resolveWorkspaceLayout(tmp, "bob", "hermes");
     await ensureWorkspaceLayout(layout);
 
@@ -64,15 +64,17 @@ describe("sidecar-attach", () => {
 
     // The sidecar mounts configDir as /data and needs these subdirs
     const sidecarDir = join(layout.runtimeDataDir, "sidecar-weixin");
-    const openclawDir = await readFile(join(sidecarDir, "openclaw"), "utf8").catch(() => null);
-    const sessionsDir = await readFile(join(sidecarDir, "weixin-sessions"), "utf8").catch(() => null);
-
-    // Directories should exist (readFile will fail for dirs, but stat should succeed)
     const { stat } = await import("node:fs/promises");
     const openclawStat = await stat(join(sidecarDir, "openclaw")).catch(() => null);
     const sessionsStat = await stat(join(sidecarDir, "weixin-sessions")).catch(() => null);
 
     expect(openclawStat?.isDirectory()).toBe(true);
     expect(sessionsStat?.isDirectory()).toBe(true);
+
+    // Verify uid/gid is 1000:1000 (matching the sidecar container user directive)
+    expect(openclawStat?.uid).toBe(1000);
+    expect(openclawStat?.gid).toBe(1000);
+    expect(sessionsStat?.uid).toBe(1000);
+    expect(sessionsStat?.gid).toBe(1000);
   });
 });
