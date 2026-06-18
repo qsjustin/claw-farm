@@ -139,10 +139,25 @@ async function ensureRuntimeContainerWritable(options: {
   instDir: string;
   runtimeType: RuntimeType;
 }): Promise<void> {
-  if (options.runtimeType !== "openclaw") return;
-  const uid = parsePositiveIntegerEnv("OPENCLAW_CONTAINER_UID", 1000);
-  const gid = parsePositiveIntegerEnv("OPENCLAW_CONTAINER_GID", 1000);
-  await chownTreeIfNeeded(join(options.instDir, "openclaw"), uid, gid);
+  if (options.runtimeType === "openclaw") {
+    const uid = parsePositiveIntegerEnv("OPENCLAW_CONTAINER_UID", 1000);
+    const gid = parsePositiveIntegerEnv("OPENCLAW_CONTAINER_GID", 1000);
+    await chownTreeIfNeeded(join(options.instDir, "openclaw"), uid, gid);
+  }
+
+  // #159B: Ensure sidecar attach dirs are owned by the sidecar uid/gid (1000:1000).
+  // This runs after docker compose up to fix any ownership changes caused by
+  // the volume mount or container creation.
+  const sidecarDir = join(options.instDir, options.runtimeType === "hermes" ? "hermes" : "openclaw", "workspace", "runtime", "sidecar-weixin");
+  try {
+    const sidecarUid = 1000;
+    const sidecarGid = 1000;
+    await chown(sidecarDir, sidecarUid, sidecarGid).catch(() => {});
+    await chown(join(sidecarDir, "openclaw"), sidecarUid, sidecarGid).catch(() => {});
+    await chown(join(sidecarDir, "weixin-sessions"), sidecarUid, sidecarGid).catch(() => {});
+  } catch {
+    // Best effort — sidecar dir may not exist if sidecar is not enabled
+  }
 }
 
 export interface ApplyInstanceModelControlOptions {
