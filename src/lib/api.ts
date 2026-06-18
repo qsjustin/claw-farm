@@ -605,7 +605,8 @@ export async function spawn(options: {
     }
 
     // Write compose (always regenerate)
-    const externalNetwork = resolveExternalNetwork();
+    // #159B: Only resolve external network when weixin sidecar is enabled
+    const externalNetwork = enableWeixinSidecar ? resolveExternalNetwork() : undefined;
     const composePath = await writeInstanceCompose({
       projectName,
       userId,
@@ -774,11 +775,42 @@ export async function spawn(options: {
           waited += pollIntervalMs;
         }
         if (!sidecarHealthy) {
- throw new Error(
-              `Weixin sidecar health check failed after ${maxWaitMs / 1000}s — ` +
-              `container ${sidecarContainer} did not become ready. ` +
-              `Check network connectivity and sidecar configuration.`
-            );
+          // #159B: Rollback on health failure — best-effort compose down + token revoke
+          if (!quiet) {
+            console.error(`   ❌ Sidecar health check failed, rolling back...`);
+          }
+          try {
+            await runCompose(projectDir, "down", {
+              composePath,
+              projectName: composeProject,
+              quiet: true,
+            });
+          } catch {
+            // Best effort cleanup
+          }
+          // Revoke the token that was minted during provision
+          if (managedInstanceId && clawBayApiUrl && clawBayAdminToken) {
+            try {
+              await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-claw-bay-admin-token": clawBayAdminToken,
+                },
+                body: JSON.stringify({
+                  serviceRuntimeInstanceId: managedInstanceId,
+                  sidecarCode: "weixin-auth-sidecar",
+                }),
+              });
+            } catch {
+              // Best effort token cleanup
+            }
+          }
+          throw new Error(
+            `Weixin sidecar health check failed after ${maxWaitMs / 1000}s — ` +
+            `container ${sidecarContainer} did not become ready. ` +
+            `Check network connectivity and sidecar configuration. `
+          );
         }
         if (!quiet) {
           console.log(`   ✅ Weixin sidecar healthy (${sidecarContainer})`);
@@ -978,7 +1010,8 @@ export async function upInstance(
   const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
   const instDir = instanceDir(projectDir, userId);
 
-  const externalNetwork = resolveExternalNetwork();
+  // #159B: Only resolve external network when weixin sidecar is enabled
+  const externalNetwork = options?.enableWeixinSidecar ? resolveExternalNetwork() : undefined;
 
   await ensureSharedProxy(projectDir, projectName, runtimeType, proxyMode, options?.quiet ?? false);
   await writeInstanceCompose({

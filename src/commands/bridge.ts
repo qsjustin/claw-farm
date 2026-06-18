@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { mkdir, rm } from "node:fs/promises";
-import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, applyInstanceModelControl } from "../lib/api.ts";
+import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl } from "../lib/api.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { exportCommand } from "./export.ts";
 import { importCommand } from "./import.ts";
@@ -474,7 +474,10 @@ async function bridgeInstanceStop(payload: Record<string, unknown>): Promise<Bri
   validateBridgeName(userId, "user ID");
   const context = await requireManagedInstance("instance.stop", project, userId);
   if ("ok" in context) return context;
-  await downInstance(project, userId, { quiet: true });
+  // #159B: Use stopInstance (compose stop) not downInstance (compose down).
+  // stopInstance keeps containers/networks in stopped state so start can resume;
+  // downInstance removes containers/networks, causing container name conflicts on restart.
+  await stopInstance(project, userId, { quiet: true });
   return bridgeSuccess({
     action: "instance.stop",
     message: `Stopped instance "${userId}"`,
