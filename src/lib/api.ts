@@ -234,6 +234,103 @@ function resolveDockerHostInstanceDir(instDir: string): string | undefined {
   return join(hostRoot, rel);
 }
 
+// ─── #159B: Sidecar health verification with rollback ─────────────────────
+//
+// Extracted from spawn() for testability. Verifies the per-instance weixin
+// sidecar is healthy after compose up. On failure, performs best-effort
+// rollback: compose down + token revoke, then throws.
+
+export interface SidecarHealthRollbackDeps {
+  /** Override fetch for health check + revoke (testing) */
+  fetchFn?: typeof fetch;
+  /** Override compose runner (testing) */
+  composeRunner?: typeof runCompose;
+}
+
+export async function verifySidecarHealthWithRollback(input: {
+  sidecarContainer: string;
+  composePath: string;
+  composeProject: string;
+  projectDir: string;
+  managedInstanceId?: string;
+  clawBayApiUrl?: string;
+  clawBayAdminToken?: string;
+  quiet?: boolean;
+  /** Override max wait time for health check (default: 60000ms) */
+  maxWaitMs?: number;
+  /** Override poll interval (default: 3000ms) */
+  pollIntervalMs?: number;
+  deps?: SidecarHealthRollbackDeps;
+}): Promise<void> {
+  const fetchFn = input.deps?.fetchFn ?? fetch;
+  const composeRunner = input.deps?.composeRunner ?? runCompose;
+
+  const sidecarHealthUrl = `http://${input.sidecarContainer}:8787/healthz`;
+  const maxWaitMs = input.maxWaitMs ?? 60_000;
+  const pollIntervalMs = input.pollIntervalMs ?? 3_000;
+  let waited = 0;
+  let sidecarHealthy = false;
+
+  while (waited < maxWaitMs) {
+    try {
+      const resp = await fetchFn(sidecarHealthUrl, { signal: AbortSignal.timeout(5_000) });
+      if (resp.ok) {
+        const body = await resp.json() as { ok?: boolean; ready?: boolean };
+        if (body.ok && body.ready) {
+          sidecarHealthy = true;
+          break;
+        }
+      }
+    } catch {
+      // Container not ready yet — retry
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+    waited += pollIntervalMs;
+  }
+
+  if (!sidecarHealthy) {
+    if (!input.quiet) {
+      console.error(`   ❌ Sidecar health check failed, rolling back...`);
+    }
+    // Best-effort compose down
+    try {
+      await composeRunner(input.projectDir, "down", {
+        composePath: input.composePath,
+        projectName: input.composeProject,
+        quiet: true,
+      });
+    } catch {
+      // Best effort cleanup
+    }
+    // Revoke the token that was minted during provision
+    if (input.managedInstanceId && input.clawBayApiUrl && input.clawBayAdminToken) {
+      try {
+        await fetchFn(`${input.clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-claw-bay-admin-token": input.clawBayAdminToken,
+          },
+          body: JSON.stringify({
+            serviceRuntimeInstanceId: input.managedInstanceId,
+            sidecarCode: "weixin-auth-sidecar",
+          }),
+        });
+      } catch {
+        // Best effort token cleanup
+      }
+    }
+    throw new Error(
+      `Weixin sidecar health check failed after ${maxWaitMs / 1000}s — ` +
+      `container ${input.sidecarContainer} did not become ready. ` +
+      `Check network connectivity and sidecar configuration. `
+    );
+  }
+  if (!input.quiet) {
+    console.log(`   ✅ Weixin sidecar healthy (${input.sidecarContainer})`);
+  }
+}
+
 async function connectRuntimeAttachNetworks(input: {
   projectName: string;
   userId: string;
@@ -771,69 +868,16 @@ export async function spawn(options: {
       // before returning create success. This catches network/config issues
       // that would otherwise leave a half-functional runtime.
       if (enableWeixinSidecar) {
-        const sidecarContainer = `${projectName}-${userId}-weixin`;
-        const sidecarHealthUrl = `http://${sidecarContainer}:8787/healthz`;
-        const maxWaitMs = 60_000;
-        const pollIntervalMs = 3_000;
-        let waited = 0;
-        let sidecarHealthy = false;
-        while (waited < maxWaitMs) {
-          try {
-            const resp = await fetch(sidecarHealthUrl, { signal: AbortSignal.timeout(5_000) });
-            if (resp.ok) {
-              const body = await resp.json() as { ok?: boolean; ready?: boolean };
-              if (body.ok && body.ready) {
-                sidecarHealthy = true;
-                break;
-              }
-            }
-          } catch {
-            // Container not ready yet — retry
-          }
-          await new Promise((r) => setTimeout(r, pollIntervalMs));
-          waited += pollIntervalMs;
-        }
-        if (!sidecarHealthy) {
-          // #159B: Rollback on health failure — best-effort compose down + token revoke
-          if (!quiet) {
-            console.error(`   ❌ Sidecar health check failed, rolling back...`);
-          }
-          try {
-            await runCompose(projectDir, "down", {
-              composePath,
-              projectName: composeProject,
-              quiet: true,
-            });
-          } catch {
-            // Best effort cleanup
-          }
-          // Revoke the token that was minted during provision
-          if (managedInstanceId && clawBayApiUrl && clawBayAdminToken) {
-            try {
-              await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "x-claw-bay-admin-token": clawBayAdminToken,
-                },
-                body: JSON.stringify({
-                  serviceRuntimeInstanceId: managedInstanceId,
-                  sidecarCode: "weixin-auth-sidecar",
-                }),
-              });
-            } catch {
-              // Best effort token cleanup
-            }
-          }
-          throw new Error(
-            `Weixin sidecar health check failed after ${maxWaitMs / 1000}s — ` +
-            `container ${sidecarContainer} did not become ready. ` +
-            `Check network connectivity and sidecar configuration. `
-          );
-        }
-        if (!quiet) {
-          console.log(`   ✅ Weixin sidecar healthy (${sidecarContainer})`);
-        }
+        await verifySidecarHealthWithRollback({
+          sidecarContainer: `${projectName}-${userId}-weixin`,
+          composePath,
+          composeProject,
+          projectDir,
+          managedInstanceId,
+          clawBayApiUrl,
+          clawBayAdminToken,
+          quiet,
+        });
       }
 
       await updateRuntimeInstanceStatus(projectName, userId, "running");
