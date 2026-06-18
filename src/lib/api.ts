@@ -762,6 +762,9 @@ export async function spawn(options: {
         quiet,
       });
 
+      // #159B: Re-chown sidecar dirs after compose up (volume mount may reset ownership)
+      await ensureRuntimeContainerWritable({ instDir, runtimeType });
+
       // #159B: Post-up sidecar health verification (fail-closed)
       // If weixin sidecar is enabled, verify the sidecar container is healthy
       // before returning create success. This catches network/config issues
@@ -831,9 +834,6 @@ export async function spawn(options: {
           console.log(`   ✅ Weixin sidecar healthy (${sidecarContainer})`);
         }
       }
-
-      // #159B: Re-chown sidecar dirs after compose up (in case volume mount changed ownership)
-      await ensureRuntimeContainerWritable({ instDir, runtimeType });
 
       await updateRuntimeInstanceStatus(projectName, userId, "running");
 
