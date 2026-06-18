@@ -248,41 +248,6 @@ describe("resolveExternalNetwork behavioral", () => {
   });
 });
 
-// ─── 3. spawn health-failure rollback behavioral ────────────────────────────
-//
-// We verify the rollback contract by reading the actual control flow:
-// When health check fails, the code must call runCompose("down") and
-// fetch the revoke endpoint. We verify this by checking the source
-// contains the correct action sequence (since spawn requires complex
-// project setup that can't be easily mocked without refactoring).
-//
-// NOTE: This is a transitional test. Full behavioral testing of spawn
-// requires injecting compose/provision/health deps, which is tracked
-// as a follow-up refactoring item.
-
-describe("spawn health-failure rollback contract", () => {
-  it("health check failure triggers compose down + token revoke", async () => {
-    // Read the spawn function source to verify the rollback sequence
-    const apiSource = await Bun.file(
-      join(process.cwd(), "src/lib/api.ts"),
-    ).text();
-
-    const healthFailStart = apiSource.indexOf("Sidecar health check failed, rolling back");
-    expect(healthFailStart).toBeGreaterThan(-1);
-
-    const rollbackSection = apiSource.substring(healthFailStart, healthFailStart + 1500);
-
-    // Must call compose down for cleanup
-    expect(rollbackSection).toContain('"down"');
-    // Must call revoke endpoint
-    expect(rollbackSection).toContain("/api/internal/weixin-binding-provision/revoke");
-    // Must revoke with serviceRuntimeInstanceId
-    expect(rollbackSection).toContain("serviceRuntimeInstanceId");
-    // Must throw after rollback (fail-closed)
-    expect(rollbackSection).toContain("throw new Error");
-  });
-});
-
 // ─── 4. verifySidecarHealthWithRollback behavioral tests ─────────────────────
 
 import { verifySidecarHealthWithRollback } from "../api.ts";
