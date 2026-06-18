@@ -1085,12 +1085,25 @@ export async function upInstance(
   }
 
   await ensureRuntimeContainerWritable({ instDir, runtimeType });
-  await runCompose(projectDir, "up", {
-    composePath,
-    projectName: composeProject,
-    connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
-    quiet: options?.quiet,
-  });
+
+  // #159B: If weixin sidecar rotate already recreated the sidecar,
+  // use compose start (not up) to avoid container name conflicts.
+  // If no rotate happened (no sidecar), use compose up to create/start all.
+  if (options?.enableWeixinSidecar && options?.managedInstanceId) {
+    // Rotate already recreated the sidecar — just start all containers
+    await runCompose(projectDir, "start", {
+      composePath,
+      projectName: composeProject,
+      quiet: options?.quiet,
+    });
+  } else {
+    await runCompose(projectDir, "up", {
+      composePath,
+      projectName: composeProject,
+      connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
+      quiet: options?.quiet,
+    });
+  }
   await connectRuntimeAttachNetworks({
     projectName,
     userId,
