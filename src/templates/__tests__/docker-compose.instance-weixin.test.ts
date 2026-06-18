@@ -78,28 +78,35 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(weixinSection).toContain("sidecar-net");
     });
 
-    it("maps per-instance port to avoid conflicts", () => {
+    it("exposes port 8787 internally (no host port publishing)", () => {
       const compose = buildInstanceCompose({
         ...baseOpts,
         enableWeixinSidecar: true,
         weixinSidecarPort: 18887,
       });
-      expect(compose).toContain("0.0.0.0:18887:8787");
+      // Slice only the weixin-sidecar section (up to the next service)
+      const start = compose.indexOf("weixin-sidecar:");
+      const end = compose.indexOf("openclaw-gateway:");
+      const weixinSection = compose.slice(start, end);
+      // Sidecar uses expose (container-internal) instead of ports (host-published)
+      expect(weixinSection).toContain("expose:");
+      expect(weixinSection).toContain("\"8787\"");
+      // Must NOT publish to host interfaces (security: avoid 0.0.0.0 binding)
+      expect(weixinSection).not.toContain("0.0.0.0:");
+      expect(weixinSection).not.toMatch(/ports:/);
     });
 
-    it("uses default port 8787 when not specified", () => {
+    it("connects to shared sidecar-gateway via Docker DNS", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
-      expect(compose).toContain("0.0.0.0:8787:8787");
+      expect(compose).toContain("SIDECAR_GATEWAY_URL: http://sidecar-gateway:3002");
+      // Must NOT use host.docker.internal (requires extra_hosts, less portable)
+      expect(compose).not.toContain("host.docker.internal");
     });
 
-    it("connects to shared sidecar-gateway via host.docker.internal", () => {
+    it("connects to shared claw-bay-api via Docker DNS", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
-      expect(compose).toContain("SIDECAR_GATEWAY_URL: http://host.docker.internal:3002");
-    });
-
-    it("connects to shared claw-bay-api via host.docker.internal", () => {
-      const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
-      expect(compose).toContain("SIDECAR_CLAW_BAY_API_URL: http://host.docker.internal:3001");
+      expect(compose).toContain("SIDECAR_CLAW_BAY_API_URL: http://claw-bay-api:3001");
+      expect(compose).not.toContain("host.docker.internal");
     });
 
     it("has a healthcheck on /healthz for readiness verification", () => {
@@ -113,13 +120,17 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(compose).toContain("/runtime/instance/openclaw/workspace/runtime/sidecar-weixin:/data");
     });
 
-    it("applies security hardening (read_only, no-new-privileges, cap_drop)", () => {
+    it("applies security hardening (no-new-privileges, no read_only/cap_drop to match shared sidecar)", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
-      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
-      expect(weixinSection).toContain("read_only: true");
+      // Slice only the weixin-sidecar section
+      const start = compose.indexOf("weixin-sidecar:");
+      const end = compose.indexOf("openclaw-gateway:");
+      const weixinSection = compose.slice(start, end);
       expect(weixinSection).toContain("no-new-privileges:true");
-      expect(weixinSection).toContain("cap_drop:");
-      expect(weixinSection).toContain("- ALL");
+      // read_only and cap_drop removed to match shared sidecar configuration
+      // (shared sidecar runs as root without these restrictions)
+      expect(weixinSection).not.toContain("read_only: true");
+      expect(weixinSection).not.toContain("cap_drop:");
     });
 
     it("respects custom weixinEnvFile path", () => {
@@ -202,7 +213,8 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
       expect(weixinSection).toContain("WEIXIN_SIDECAR_PORT: \"8787\"");
       expect(weixinSection).toContain("http://127.0.0.1:8787/healthz");
-      expect(weixinSection).toContain("0.0.0.0:18887:8787");
+      // Uses expose, not ports (no host publishing)
+      expect(weixinSection).not.toContain("0.0.0.0:");
     });
 
     it("generates valid compose that passes docker compose config (no-proxy)", async () => {
@@ -280,6 +292,32 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(weixinSection).toContain("OPENCLAW_STATE_DIR: /data/openclaw");
       expect(weixinSection).toContain("SESSION_STORAGE_PATH: /data/weixin-sessions");
       expect(weixinSection).toContain("WEIXIN_HEALTH_CHECK_URL:");
+    });
+
+    it("declares external network when provided", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        enableWeixinSidecar: true,
+        externalNetwork: "clawbay_default",
+      });
+      // External network declared at top level
+      expect(compose).toContain("clawbay_default:");
+      expect(compose).toContain("external: true");
+      // Sidecar service joins both sidecar-net and the external network
+      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"), compose.indexOf("openclaw-gateway:"));
+      expect(weixinSection).toContain("- sidecar-net");
+      expect(weixinSection).toContain("- clawbay_default");
+    });
+
+    it("does not declare external network when not provided", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        enableWeixinSidecar: true,
+      });
+      expect(compose).not.toContain("external: true");
+      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"), compose.indexOf("openclaw-gateway:"));
+      expect(weixinSection).toContain("- sidecar-net");
+      expect(weixinSection).not.toContain("clawbay_default");
     });
   });
 });

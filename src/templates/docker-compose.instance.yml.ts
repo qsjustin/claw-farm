@@ -24,6 +24,13 @@ export interface InstanceComposeOptions {
    * Each instance gets a unique port to avoid conflicts.
    */
   weixinSidecarPort?: number;
+  /**
+   * #159B: External Docker network name for sidecar-to-API/gateway connectivity.
+   * When provided, the sidecar joins this network in addition to sidecar-net,
+   * enabling Docker DNS resolution of claw-bay-api, sidecar-gateway, etc.
+   * Source: CLAW_FARM_RUNTIME_ATTACH_NETWORKS (first entry).
+   */
+  externalNetwork?: string;
 }
 
 /**
@@ -69,6 +76,7 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
     enableWeixinSidecar = false,
     weixinEnvFile = ".env.weixin",
     weixinSidecarPort = 8787,
+    externalNetwork,
   } = opts;
 
   safeYamlIdentifier(projectName, "project name");
@@ -131,28 +139,25 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
       - ./${weixinEnvFile}
       - ./instance.env
     environment:
-      SIDECAR_GATEWAY_URL: http://host.docker.internal:3002
+      SIDECAR_GATEWAY_URL: http://sidecar-gateway:3002
       GATEWAY_INTERNAL_TOKEN: \${GATEWAY_INTERNAL_TOKEN:-gateway-dev-token}
-      SIDECAR_CLAW_BAY_API_URL: http://host.docker.internal:3001
+      SIDECAR_CLAW_BAY_API_URL: http://claw-bay-api:3001
       WEIXIN_ENABLE_ILINK_TRANSPORT: \${WEIXIN_ENABLE_ILINK_TRANSPORT:-false}
       OPENCLAW_STATE_DIR: /data/openclaw
       SESSION_STORAGE_PATH: /data/weixin-sessions
-      WEIXIN_HEALTH_CHECK_URL: http://host.docker.internal:3001/health
+      WEIXIN_HEALTH_CHECK_URL: http://claw-bay-api:3001/health
       WEIXIN_SIDECAR_HOST: "0.0.0.0"
       WEIXIN_SIDECAR_PORT: "8787"
-    ports:
-      - "0.0.0.0:${weixinSidecarPort}:8787"
+    expose:
+      - "8787"
     volumes:
       - ${openclawMountSource}/workspace/runtime/sidecar-weixin:/data
     networks:
-      - sidecar-net
+      - sidecar-net${externalNetwork ? `\n      - ${externalNetwork}` : ""}
     tmpfs:
       - /tmp:size=50M
     security_opt:
       - no-new-privileges:true
-    read_only: true
-    cap_drop:
-      - ALL
     deploy:
       resources:
         limits:
@@ -215,6 +220,7 @@ ${hasProxy ? `    depends_on:
   // ─── networks ─────────────────────────────────────────────────────────────
   // sidecar-net is always present when weixin sidecar is enabled.
   // proxy-net is present when proxy mode is enabled.
+  // externalNetwork is declared as external when provided (for sidecar↔API DNS).
   const networks: string[] = [];
   if (hasProxy) {
     networks.push(`  proxy-net:
@@ -224,6 +230,10 @@ ${hasProxy ? `    depends_on:
   if (enableWeixinSidecar) {
     networks.push(`  sidecar-net:
     # Bridge network for per-instance weixin sidecar isolation`);
+    if (externalNetwork) {
+      networks.push(`  ${externalNetwork}:
+    external: true`);
+    }
   }
   const networksSection = networks.length > 0 ? `\nnetworks:\n${networks.join("\n")}\n` : "";
 

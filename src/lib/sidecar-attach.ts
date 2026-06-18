@@ -57,6 +57,13 @@ function attachDescriptor(attach: SidecarAttachPoint): string {
 export async function ensureSidecarAttachPoint(attach: SidecarAttachPoint): Promise<void> {
   await mkdir(attach.configDir, { recursive: true, mode: 0o755 });
   await writeFile(join(attach.configDir, "attach-point.json"), attachDescriptor(attach), "utf8");
+
+  // #159B: Pre-create state/session subdirs for the weixin sidecar container.
+  // The sidecar mounts configDir as /data and needs /data/openclaw and /data/weixin-sessions.
+  // Without pre-creation, the sidecar process (running with restricted capabilities)
+  // may fail with EACCES when trying to mkdir these paths.
+  await mkdir(join(attach.configDir, "openclaw"), { recursive: true, mode: 0o755 });
+  await mkdir(join(attach.configDir, "weixin-sessions"), { recursive: true, mode: 0o755 });
 }
 
 export async function ensureDefaultSidecarAttachPoints(input: {

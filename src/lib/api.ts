@@ -14,6 +14,7 @@ import {
   listInstances as registryListInstances,
   getInstance,
   getProject,
+  ensureSidecarPort,
   validateName,
   type InstanceEntry,
   type ProjectEntry,
@@ -175,6 +176,15 @@ function runtimeAttachNetworks(): string[] {
     .split(",")
     .map((network) => network.trim())
     .filter(Boolean);
+}
+
+/**
+ * #159B: Resolve the first external network for per-instance sidecar compose.
+ * The sidecar joins this network to reach claw-bay-api, sidecar-gateway via Docker DNS.
+ * Source: CLAW_FARM_RUNTIME_ATTACH_NETWORKS (first entry).
+ */
+function resolveExternalNetwork(): string | undefined {
+  return runtimeAttachNetworks()[0];
 }
 
 function resolveDockerHostInstanceDir(instDir: string): string | undefined {
@@ -368,6 +378,8 @@ async function writeInstanceCompose(options: {
   weixinSidecarPort?: number;
   /** #159B: Per-instance weixin env file name (default: .env.weixin) */
   weixinEnvFile?: string;
+  /** #159B: External Docker network for sidecar↔API/gateway DNS */
+  externalNetwork?: string;
 }): Promise<string> {
   const instanceHostDir = resolveDockerHostInstanceDir(options.instDir);
   const enableWeixin = options.enableWeixinSidecar ?? false;
@@ -384,6 +396,7 @@ async function writeInstanceCompose(options: {
       enableWeixinSidecar: true,
       weixinSidecarPort: options.weixinSidecarPort,
       weixinEnvFile: options.weixinEnvFile,
+      externalNetwork: options.externalNetwork,
     });
   } else if (options.runtimeType === "openclaw") {
     composeContent = instanceComposeTemplate(
@@ -406,6 +419,7 @@ async function writeInstanceCompose(options: {
         enableWeixinSidecar: true,
         weixinEnvFile: options.weixinEnvFile ?? ".env.weixin",
         weixinSidecarPort: options.weixinSidecarPort ?? 8787,
+        externalNetwork: options.externalNetwork,
       },
     );
   } else {
@@ -578,6 +592,7 @@ export async function spawn(options: {
     }
 
     // Write compose (always regenerate)
+    const externalNetwork = resolveExternalNetwork();
     const composePath = await writeInstanceCompose({
       projectName,
       userId,
@@ -590,6 +605,7 @@ export async function spawn(options: {
       enableWeixinSidecar,
       weixinSidecarPort: effectiveSidecarPort,
       weixinEnvFile,
+      externalNetwork,
     });
     await ensureRuntimeContainerWritable({ instDir, runtimeType });
 
@@ -611,7 +627,7 @@ export async function spawn(options: {
     if (enableWeixinSidecar && managedInstanceId && clawBayApiUrl && clawBayAdminToken) {
       try {
         const envFile = join(instDir, weixinEnvFile ?? ".env.weixin");
-        const sidecarPort = effectiveSidecarPort ?? 8787;
+        const sidecarContainer = `${projectName}-${userId}-weixin`;
 
         const provisionResponse = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision`, {
           method: "POST",
@@ -631,7 +647,7 @@ export async function spawn(options: {
                 serviceName: "weixin-sidecar",
                 envFile,
               },
-              healthUrl: `http://host.docker.internal:${sidecarPort}/healthz`,
+              healthUrl: `http://${sidecarContainer}:8787/healthz`,
               readinessTimeoutMs: 60_000,
               readinessIntervalMs: 2_000,
             },
@@ -909,6 +925,14 @@ export async function upInstance(
   const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
   const instDir = instanceDir(projectDir, userId);
 
+  // #159B: Backfill sidecar port for old instances that don't have one
+  let effectiveSidecarPort = options?.weixinSidecarPort ?? instance.weixinSidecarPort;
+  if (options?.enableWeixinSidecar && typeof effectiveSidecarPort !== "number") {
+    effectiveSidecarPort = await ensureSidecarPort(projectName, userId);
+  }
+
+  const externalNetwork = resolveExternalNetwork();
+
   await ensureSharedProxy(projectDir, projectName, runtimeType, proxyMode, options?.quiet ?? false);
   await writeInstanceCompose({
     projectName,
@@ -919,14 +943,15 @@ export async function upInstance(
     runtime,
     proxyMode,
     enableWeixinSidecar: options?.enableWeixinSidecar,
-    weixinSidecarPort: options?.weixinSidecarPort ?? instance.weixinSidecarPort,
+    weixinSidecarPort: effectiveSidecarPort,
     weixinEnvFile: options?.weixinEnvFile,
+    externalNetwork,
   });
 
   // #159B: Rotate weixin sidecar token on rebuild/restore (fail-closed)
   if (options?.enableWeixinSidecar && options?.managedInstanceId && options?.clawBayApiUrl && options?.clawBayAdminToken) {
     const envFile = join(instDir, options.weixinEnvFile ?? ".env.weixin");
-    const sidecarPort = options.weixinSidecarPort ?? instance.weixinSidecarPort ?? 8787;
+    const sidecarContainer = `${projectName}-${userId}-weixin`;
     const rotateResponse = await fetch(`${options.clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/rotate`, {
       method: "POST",
       headers: {
@@ -945,7 +970,7 @@ export async function upInstance(
             serviceName: "weixin-sidecar",
             envFile,
           },
-          healthUrl: `http://host.docker.internal:${sidecarPort}/healthz`,
+          healthUrl: `http://${sidecarContainer}:8787/healthz`,
           readinessTimeoutMs: 60_000,
           readinessIntervalMs: 2_000,
         },

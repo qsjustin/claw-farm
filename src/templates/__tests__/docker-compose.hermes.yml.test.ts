@@ -110,18 +110,24 @@ describe("hermesInstanceComposeTemplate with weixin sidecar (#159B)", () => {
     expect(compose).not.toMatch(/WEIXIN_BINDING_TOKEN=cbt_/);
   });
 
-  test("uses per-instance port mapping", () => {
+  test("exposes port 8787 internally (no host port publishing)", () => {
     const compose = hermesInstanceComposeTemplate(
       "test-proj", "user-1", 18790, "none", undefined, false, true, ".env.weixin", 18887
     );
-    expect(compose).toContain("0.0.0.0:18887:8787");
+    const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
+    expect(weixinSection).toContain("expose:");
+    expect(weixinSection).toContain("\"8787\"");
+    // Must NOT publish to host interfaces
+    expect(weixinSection).not.toContain("0.0.0.0:");
+    expect(weixinSection).not.toMatch(/ports:/);
   });
 
-  test("connects to sidecar-gateway via host.docker.internal", () => {
+  test("connects to sidecar-gateway via Docker DNS", () => {
     const compose = hermesInstanceComposeTemplate(
       "test-proj", "user-1", 18790, "none", undefined, false, true
     );
-    expect(compose).toContain("SIDECAR_GATEWAY_URL: http://host.docker.internal:3002");
+    expect(compose).toContain("SIDECAR_GATEWAY_URL: http://sidecar-gateway:3002");
+    expect(compose).not.toContain("host.docker.internal");
   });
 
   test("does not contain plaintext token", () => {
@@ -138,5 +144,23 @@ describe("hermesInstanceComposeTemplate with weixin sidecar (#159B)", () => {
     expect(compose).toContain("OPENCLAW_STATE_DIR: /data/openclaw");
     expect(compose).toContain("SESSION_STORAGE_PATH: /data/weixin-sessions");
     expect(compose).toContain("WEIXIN_HEALTH_CHECK_URL:");
+  });
+
+  test("declares external network when provided", () => {
+    const compose = hermesInstanceComposeTemplate(
+      "test-proj", "user-1", 18790, "none", undefined, false, true, ".env.weixin", 8787, "clawbay_default"
+    );
+    expect(compose).toContain("clawbay_default:");
+    expect(compose).toContain("external: true");
+    const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
+    expect(weixinSection).toContain("- sidecar-net");
+    expect(weixinSection).toContain("- clawbay_default");
+  });
+
+  test("no external network when not provided", () => {
+    const compose = hermesInstanceComposeTemplate(
+      "test-proj", "user-1", 18790, "none", undefined, false, true
+    );
+    expect(compose).not.toContain("external: true");
   });
 });

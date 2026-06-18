@@ -188,15 +188,25 @@ export async function saveRegistry(reg: Registry): Promise<void> {
   await chmod(REGISTRY_PATH, 0o600);
 }
 
-function allocatePort(reg: Registry): number {
+/**
+ * Allocate a unique port from the registry.
+ * Collects all ports in use — including per-instance weixin sidecar ports —
+ * to prevent collisions.
+ *
+ * Exported for testing.
+ */
+export function allocatePort(reg: Registry): number {
   const usedPorts = new Set<number>();
 
-  // Collect all ports in use
+  // Collect all ports in use — including per-instance weixin sidecar ports
   for (const project of Object.values(reg.projects)) {
     usedPorts.add(project.port);
     if (project.instances) {
       for (const inst of Object.values(project.instances)) {
         usedPorts.add(inst.port);
+        if (typeof inst.weixinSidecarPort === "number") {
+          usedPorts.add(inst.weixinSidecarPort);
+        }
       }
     }
   }
@@ -307,6 +317,34 @@ export async function getInstance(
   const project = reg.projects[projectName];
   if (!project) return null;
   return project.instances?.[userId] ?? null;
+}
+
+/**
+ * #159B: Ensure an instance has a weixinSidecarPort allocated.
+ * Old instances created before #159B don't have this field.
+ * This function allocates and persists a port if missing.
+ */
+export async function ensureSidecarPort(
+  projectName: string,
+  userId: string,
+): Promise<number> {
+  return withLock(async () => {
+    const reg = await loadRegistry();
+    const project = reg.projects[projectName];
+    if (!project) throw new Error(`Project "${projectName}" not found in registry`);
+    const inst = project.instances?.[userId];
+    if (!inst) throw new Error(`Instance for user "${userId}" not found in "${projectName}"`);
+
+    if (typeof inst.weixinSidecarPort === "number") {
+      return inst.weixinSidecarPort;
+    }
+
+    // Allocate and persist a new sidecar port for old instances
+    const port = allocatePort(reg);
+    inst.weixinSidecarPort = port;
+    await saveRegistry(reg);
+    return port;
+  });
 }
 
 export async function listInstances(
