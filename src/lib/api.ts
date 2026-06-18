@@ -832,6 +832,9 @@ export async function spawn(options: {
         }
       }
 
+      // #159B: Re-chown sidecar dirs after compose up (in case volume mount changed ownership)
+      await ensureRuntimeContainerWritable({ instDir, runtimeType });
+
       await updateRuntimeInstanceStatus(projectName, userId, "running");
 
       // Hermes generates config.yaml on first start with default model settings.
