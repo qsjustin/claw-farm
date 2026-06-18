@@ -114,7 +114,7 @@ describe("hermesInstanceComposeTemplate with weixin sidecar (#159B)", () => {
     const compose = hermesInstanceComposeTemplate(
       "test-proj", "user-1", 18790, "none", undefined, false, true, ".env.weixin", 18887
     );
-    expect(compose).toContain("127.0.0.1:18887:8787");
+    expect(compose).toContain("0.0.0.0:18887:8787");
   });
 
   test("connects to sidecar-gateway via host.docker.internal", () => {

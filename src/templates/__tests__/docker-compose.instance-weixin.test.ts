@@ -84,12 +84,12 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
         enableWeixinSidecar: true,
         weixinSidecarPort: 18887,
       });
-      expect(compose).toContain("127.0.0.1:18887:8787");
+      expect(compose).toContain("0.0.0.0:18887:8787");
     });
 
     it("uses default port 8787 when not specified", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
-      expect(compose).toContain("127.0.0.1:8787:8787");
+      expect(compose).toContain("0.0.0.0:8787:8787");
     });
 
     it("connects to shared sidecar-gateway via host.docker.internal", () => {
@@ -202,7 +202,7 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
       expect(weixinSection).toContain("WEIXIN_SIDECAR_PORT: \"8787\"");
       expect(weixinSection).toContain("http://127.0.0.1:8787/healthz");
-      expect(weixinSection).toContain("127.0.0.1:18887:8787");
+      expect(weixinSection).toContain("0.0.0.0:18887:8787");
     });
 
     it("generates valid compose that passes docker compose config (no-proxy)", async () => {

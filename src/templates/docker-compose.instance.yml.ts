@@ -141,7 +141,7 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
       WEIXIN_SIDECAR_HOST: "0.0.0.0"
       WEIXIN_SIDECAR_PORT: "8787"
     ports:
-      - "127.0.0.1:${weixinSidecarPort}:8787"
+      - "0.0.0.0:${weixinSidecarPort}:8787"
     volumes:
       - ${openclawMountSource}/workspace/runtime/sidecar-weixin:/data
     networks:
