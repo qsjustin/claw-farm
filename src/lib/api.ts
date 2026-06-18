@@ -619,7 +619,7 @@ export async function spawn(options: {
           },
           body: JSON.stringify({
             spec: {
-              managedInstanceId,
+              serviceRuntimeInstanceId: managedInstanceId,
               userId,
               sidecarCode: "weixin-auth-sidecar",
               ttlSeconds: 3600,
@@ -629,7 +629,7 @@ export async function spawn(options: {
                 serviceName: "weixin-sidecar",
                 envFile,
               },
-              healthUrl: `http://127.0.0.1:${sidecarPort}/healthz`,
+              healthUrl: `http://host.docker.internal:${sidecarPort}/healthz`,
               readinessTimeoutMs: 60_000,
               readinessIntervalMs: 2_000,
             },
@@ -800,7 +800,7 @@ export async function despawn(
         "x-claw-bay-admin-token": options.clawBayAdminToken,
       },
       body: JSON.stringify({
-        managedInstanceId: options.managedInstanceId,
+        serviceRuntimeInstanceId: options.managedInstanceId,
         sidecarCode: "weixin-auth-sidecar",
       }),
     });
@@ -933,7 +933,7 @@ export async function upInstance(
       },
       body: JSON.stringify({
         spec: {
-          managedInstanceId: options.managedInstanceId,
+          serviceRuntimeInstanceId: options.managedInstanceId,
           userId,
           sidecarCode: "weixin-auth-sidecar",
           ttlSeconds: 3600,
@@ -943,7 +943,7 @@ export async function upInstance(
             serviceName: "weixin-sidecar",
             envFile,
           },
-          healthUrl: `http://127.0.0.1:${sidecarPort}/healthz`,
+          healthUrl: `http://host.docker.internal:${sidecarPort}/healthz`,
           readinessTimeoutMs: 60_000,
           readinessIntervalMs: 2_000,
         },
