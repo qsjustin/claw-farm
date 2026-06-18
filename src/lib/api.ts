@@ -488,7 +488,9 @@ export async function spawn(options: {
   }
 
   // Register instance (validates userId again, acquires lock)
-  const { port } = await addInstance(projectName, userId);
+  const { port, weixinSidecarPort: allocatedSidecarPort } = await addInstance(projectName, userId);
+  // Use explicitly provided sidecar port, or the one allocated from registry
+  const effectiveSidecarPort = weixinSidecarPort ?? allocatedSidecarPort;
 
   let runtimeRegistryCreated = false;
 
@@ -586,7 +588,7 @@ export async function spawn(options: {
       proxyMode,
       gatewayAllowAllUsers,
       enableWeixinSidecar,
-      weixinSidecarPort,
+      weixinSidecarPort: effectiveSidecarPort,
       weixinEnvFile,
     });
     await ensureRuntimeContainerWritable({ instDir, runtimeType });
@@ -609,7 +611,7 @@ export async function spawn(options: {
     if (enableWeixinSidecar && managedInstanceId && clawBayApiUrl && clawBayAdminToken) {
       try {
         const envFile = join(instDir, weixinEnvFile ?? ".env.weixin");
-        const sidecarPort = weixinSidecarPort ?? 8787;
+        const sidecarPort = effectiveSidecarPort ?? 8787;
 
         const provisionResponse = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision`, {
           method: "POST",
@@ -917,14 +919,14 @@ export async function upInstance(
     runtime,
     proxyMode,
     enableWeixinSidecar: options?.enableWeixinSidecar,
-    weixinSidecarPort: options?.weixinSidecarPort,
+    weixinSidecarPort: options?.weixinSidecarPort ?? instance.weixinSidecarPort,
     weixinEnvFile: options?.weixinEnvFile,
   });
 
   // #159B: Rotate weixin sidecar token on rebuild/restore (fail-closed)
   if (options?.enableWeixinSidecar && options?.managedInstanceId && options?.clawBayApiUrl && options?.clawBayAdminToken) {
     const envFile = join(instDir, options.weixinEnvFile ?? ".env.weixin");
-    const sidecarPort = options.weixinSidecarPort ?? 8787;
+    const sidecarPort = options.weixinSidecarPort ?? instance.weixinSidecarPort ?? 8787;
     const rotateResponse = await fetch(`${options.clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/rotate`, {
       method: "POST",
       headers: {

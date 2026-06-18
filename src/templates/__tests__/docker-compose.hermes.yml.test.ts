@@ -130,4 +130,13 @@ describe("hermesInstanceComposeTemplate with weixin sidecar (#159B)", () => {
     );
     expect(compose).not.toMatch(/cbt_[a-zA-Z0-9_-]{20,}/);
   });
+
+  test("hermes sidecar includes readiness env vars (OPENCLAW_STATE_DIR, SESSION_STORAGE_PATH)", () => {
+    const compose = hermesInstanceComposeTemplate(
+      "clawbay-hermes", "test-user", 18850, "none", "/tmp/test-hermes", false, true
+    );
+    expect(compose).toContain("OPENCLAW_STATE_DIR: /data/openclaw");
+    expect(compose).toContain("SESSION_STORAGE_PATH: /data/weixin-sessions");
+    expect(compose).toContain("WEIXIN_HEALTH_CHECK_URL:");
+  });
 });

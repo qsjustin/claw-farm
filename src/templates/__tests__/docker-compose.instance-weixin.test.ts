@@ -193,14 +193,14 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(compose).toMatch(/networks:[\s\S]*sidecar-net:/);
     });
 
-    it("does not set WEIXIN_SIDECAR_PORT (container port stays 8787)", () => {
+    it("sets WEIXIN_SIDECAR_PORT=8787 in environment (container port stays 8787)", () => {
       const compose = buildInstanceCompose({
         ...baseOpts,
         enableWeixinSidecar: true,
         weixinSidecarPort: 18887,
       });
       const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
-      expect(weixinSection).not.toContain("WEIXIN_SIDECAR_PORT");
+      expect(weixinSection).toContain("WEIXIN_SIDECAR_PORT: \"8787\"");
       expect(weixinSection).toContain("http://127.0.0.1:8787/healthz");
       expect(weixinSection).toContain("127.0.0.1:18887:8787");
     });
@@ -268,6 +268,19 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
 
       expect(exitCode).toBe(0);
       expect(stderr).not.toContain("must be a mapping");
+  
+  });
+
+    it("includes readiness env vars (OPENCLAW_STATE_DIR, SESSION_STORAGE_PATH, WEIXIN_HEALTH_CHECK_URL)", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        enableWeixinSidecar: true,
+      });
+      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
+      expect(weixinSection).toContain("OPENCLAW_STATE_DIR: /data/openclaw");
+      expect(weixinSection).toContain("SESSION_STORAGE_PATH: /data/weixin-sessions");
+      expect(weixinSection).toContain("WEIXIN_HEALTH_CHECK_URL:");
     });
   });
 });
+

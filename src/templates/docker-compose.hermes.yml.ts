@@ -90,6 +90,11 @@ export function hermesInstanceComposeTemplate(
       GATEWAY_INTERNAL_TOKEN: \${GATEWAY_INTERNAL_TOKEN:-gateway-dev-token}
       SIDECAR_CLAW_BAY_API_URL: http://host.docker.internal:3001
       WEIXIN_ENABLE_ILINK_TRANSPORT: \${WEIXIN_ENABLE_ILINK_TRANSPORT:-false}
+      OPENCLAW_STATE_DIR: /data/openclaw
+      SESSION_STORAGE_PATH: /data/weixin-sessions
+      WEIXIN_HEALTH_CHECK_URL: http://host.docker.internal:3001/health
+      WEIXIN_SIDECAR_HOST: "0.0.0.0"
+      WEIXIN_SIDECAR_PORT: "8787"
     ports:
       - "127.0.0.1:${weixinSidecarPort}:8787"
     volumes:

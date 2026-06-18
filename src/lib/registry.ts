@@ -37,6 +37,8 @@ export function validateName(value: string, label: string): void {
 export interface InstanceEntry {
   userId: string;
   port: number;
+  /** #159B: Per-instance weixin sidecar port (allocated alongside instance port) */
+  weixinSidecarPort?: number;
   createdAt: string;
 }
 
@@ -254,7 +256,7 @@ export async function getProject(name: string): Promise<ProjectEntry | null> {
 export async function addInstance(
   projectName: string,
   userId: string,
-): Promise<{ port: number }> {
+): Promise<{ port: number; weixinSidecarPort: number }> {
   validateName(userId, "user ID");
 
   return withLock(async () => {
@@ -269,13 +271,15 @@ export async function addInstance(
     }
 
     const port = allocatePort(reg);
+    const weixinSidecarPort = allocatePort(reg);
     project.instances[userId] = {
       userId,
       port,
+      weixinSidecarPort,
       createdAt: new Date().toISOString(),
     };
     await saveRegistry(reg);
-    return { port };
+    return { port, weixinSidecarPort };
   });
 }
 
