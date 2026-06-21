@@ -355,7 +355,7 @@ describe("upInstance behavioral — sidecar spec integration", () => {
     expect(composeCommands).toHaveLength(0);
   });
 
-  it("explicit false → sidecar disabled, spec removed, no rotation fetch", async () => {
+  it("lifecycle payload enableWeixinSidecar=false does NOT override canonical enabled spec", async () => {
     const instDir = join(tmpProjectDir, "instances", userId);
     await _writeSpec2(instDir, {
       schemaVersion: 1,
@@ -368,10 +368,8 @@ describe("upInstance behavioral — sidecar spec integration", () => {
     });
 
     const fetchCalls: { url: string }[] = [];
-    const composeCommands: string[] = [];
 
     Bun.spawn = ((args: string[], _opts?: { cwd?: string }) => {
-      composeCommands.push(args.join(" "));
       return {
         exited: Promise.resolve(0),
         stdout: new Blob([""]).stream(),
@@ -381,25 +379,29 @@ describe("upInstance behavioral — sidecar spec integration", () => {
 
     globalThis.fetch = ((url: string) => {
       fetchCalls.push({ url: url as string });
-      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      return Promise.resolve(new Response(JSON.stringify({ ok: true, token: "cbt_test" }), { status: 200 }));
     }) as typeof fetch;
 
-    // Explicit false should disable sidecar and remove spec
+    // Pass enableWeixinSidecar=false — should be IGNORED, spec is canonical
     await upInstance(projectName, userId, {
       quiet: true,
       enableWeixinSidecar: false,
+      managedInstanceId: "sri_test",
+      clawBayApiUrl: "http://api:3001",
+      clawBayAdminToken: "token",
     });
 
-    // No rotation fetch should have been called
-    expect(fetchCalls).toHaveLength(0);
-
-    // Spec should be removed
+    // Spec should still exist (not removed)
     const specExists = await Bun.file(join(instDir, "sidecar-spec.json")).exists();
-    expect(specExists).toBe(false);
+    expect(specExists).toBe(true);
 
-    // Compose should NOT contain sidecar
+    // Compose should contain sidecar (spec is canonical, false ignored)
     const composeContent = await Bun.file(join(instDir, "docker-compose.openclaw.yml")).text();
-    expect(composeContent).not.toContain("weixin-sidecar");
+    expect(composeContent).toContain("weixin-sidecar");
+
+    // Rotation should still be called (spec enabled)
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/rotate");
   });
 
   it("rotate fetch failure → throws, no compose start/up command", async () => {

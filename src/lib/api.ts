@@ -1104,11 +1104,9 @@ export async function upInstance(
   // Explicit false disables sidecar and clears stale spec; undefined falls back to spec.
   // Backfill is explicit — callers must use backfillSidecarSpec() with authoritative data.
   const sidecarSpec = await readSidecarSpec(instDir);
-  const explicitWeixin = options?.enableWeixinSidecar;
-  const enableWeixin = explicitWeixin ?? sidecarSpec?.enabled ?? false;
-  // #171: If explicitly disabled, defer spec removal until after compose succeeds.
-  // If compose fails, the old enabled spec is preserved so the instance can recover.
-  const shouldRemoveSpecAfterCompose = explicitWeixin === false;
+  // #171: Lifecycle reads canonical spec only — no enable/disable override.
+  // spawn() writes spec; attach/detach/backfill is Slice 2 control-plane operation.
+  const enableWeixin = sidecarSpec?.enabled ?? false;
 
   const effectiveWeixinSidecarPort = options?.weixinSidecarPort ?? sidecarSpec?.port ?? 8787;
   const effectiveWeixinEnvFile = options?.weixinEnvFile ?? sidecarSpec?.envFile ?? ".env.weixin";
@@ -1216,12 +1214,6 @@ export async function upInstance(
     quiet: options?.quiet,
   });
   await updateRuntimeInstanceStatus(projectName, userId, "running", { ready: true });
-
-  // #171: Only remove spec after compose succeeds (transactional semantics).
-  // If compose failed, the throw above prevents reaching here, preserving the old spec.
-  if (shouldRemoveSpecAfterCompose) {
-    await removeSidecarSpec(instDir);
-  }
 
   return { port: instance.port };
 }
