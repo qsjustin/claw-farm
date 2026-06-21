@@ -450,7 +450,7 @@ async function bridgeInstanceStart(payload: Record<string, unknown>): Promise<Br
   // Use undefined (not false) when not in payload so upInstance falls back to sidecar spec.
   const started = await upInstance(project, userId, {
     quiet: true,
-    enableWeixinSidecar: payload.enableWeixinSidecar === true ? true : undefined,
+    enableWeixinSidecar: typeof payload.enableWeixinSidecar === "boolean" ? payload.enableWeixinSidecar : undefined,
     weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
     weixinEnvFile: asString(payload.weixinEnvFile),
     managedInstanceId: asString(payload.managedInstanceId),
@@ -501,7 +501,7 @@ async function bridgeInstanceRestart(payload: Record<string, unknown>): Promise<
   // Use undefined (not false) when not in payload so upInstance falls back to sidecar spec.
   await upInstance(project, userId, {
     quiet: true,
-    enableWeixinSidecar: payload.enableWeixinSidecar === true ? true : undefined,
+    enableWeixinSidecar: typeof payload.enableWeixinSidecar === "boolean" ? payload.enableWeixinSidecar : undefined,
     weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
     weixinEnvFile: asString(payload.weixinEnvFile),
     managedInstanceId: asString(payload.managedInstanceId),
@@ -882,7 +882,7 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
     // Use undefined (not false) when not in payload so upInstance falls back to spec.
     await upInstance(project, userId, {
       quiet: true,
-      enableWeixinSidecar: payload.enableWeixinSidecar === true ? true : undefined,
+      enableWeixinSidecar: typeof payload.enableWeixinSidecar === "boolean" ? payload.enableWeixinSidecar : undefined,
       weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
       weixinEnvFile: asString(payload.weixinEnvFile),
       managedInstanceId: asString(payload.managedInstanceId),

@@ -17,24 +17,28 @@
  */
 
 import { join } from "node:path";
-import { chmod, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, rename, unlink, writeFile, open } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 
 const SPEC_FILENAME = "sidecar-spec.json";
+const SCHEMA_VERSION = 1;
 
 export interface SidecarSpec {
+  /** Schema version for forward compatibility */
+  schemaVersion: number;
   /** Whether the weixin sidecar is enabled for this instance */
   enabled: boolean;
-  /** Sidecar service name in compose (default: "weixin-sidecar") */
+  /** Sidecar service name in compose (fixed: "weixin-sidecar") */
   serviceName: string;
-  /** Env file reference (default: ".env.weixin") */
+  /** Env file reference (fixed: ".env.weixin") */
   envFile: string;
-  /** Internal container port (default: 8787) */
+  /** Internal container port (fixed: 8787) */
   port: number;
-  /** External network name (optional) */
+  /** External network name (optional, Docker-safe) */
   externalNetwork?: string;
-  /** Compose project name */
+  /** Compose project name (Docker-safe) */
   composeProject: string;
-  /** Created/updated timestamp */
+  /** Created/updated timestamp (ISO 8601) */
   updatedAt: string;
 }
 
@@ -59,54 +63,89 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
     throw new SidecarSpecError("sidecar spec is not an object", "spec-invalid");
   }
   const obj = data as Record<string, unknown>;
+
+  // Schema version must be exactly 1
+  if (obj.schemaVersion !== SCHEMA_VERSION) {
+    throw new SidecarSpecError(
+      `sidecar spec schemaVersion must be ${SCHEMA_VERSION}, got ${JSON.stringify(obj.schemaVersion)}`,
+      "spec-invalid",
+    );
+  }
+
   if (typeof obj.enabled !== "boolean") {
     throw new SidecarSpecError(
       `sidecar spec 'enabled' must be boolean, got ${typeof obj.enabled}`,
       "spec-invalid",
     );
   }
-  if (typeof obj.serviceName !== "string" || obj.serviceName.length === 0) {
+
+  // serviceName must be exactly "weixin-sidecar"
+  if (obj.serviceName !== "weixin-sidecar") {
     throw new SidecarSpecError(
-      "sidecar spec 'serviceName' must be a non-empty string",
+      `sidecar spec 'serviceName' must be "weixin-sidecar", got ${JSON.stringify(obj.serviceName)}`,
       "spec-invalid",
     );
   }
-  if (typeof obj.envFile !== "string" || obj.envFile.length === 0) {
+
+  // envFile must be exactly ".env.weixin" (basename only, no path traversal)
+  if (obj.envFile !== ".env.weixin") {
     throw new SidecarSpecError(
-      "sidecar spec 'envFile' must be a non-empty string",
+      `sidecar spec 'envFile' must be ".env.weixin", got ${JSON.stringify(obj.envFile)}`,
       "spec-invalid",
     );
   }
-  if (typeof obj.port !== "number" || !Number.isInteger(obj.port) || obj.port < 1 || obj.port > 65535) {
+
+  // port must be exactly 8787 (fixed internal port)
+  if (obj.port !== 8787) {
     throw new SidecarSpecError(
-      `sidecar spec 'port' must be an integer 1-65535, got ${obj.port}`,
+      `sidecar spec 'port' must be 8787, got ${obj.port}`,
       "spec-invalid",
     );
   }
-  if (typeof obj.composeProject !== "string" || obj.composeProject.length === 0) {
+
+  // composeProject must be Docker-safe: alphanumeric + dash + underscore, max 128
+  if (typeof obj.composeProject !== "string" || !/^[a-zA-Z0-9_-]+$/.test(obj.composeProject) || obj.composeProject.length > 128) {
     throw new SidecarSpecError(
-      "sidecar spec 'composeProject' must be a non-empty string",
+      `sidecar spec 'composeProject' must be Docker-safe (alphanumeric/dash/underscore, max 128), got ${JSON.stringify(obj.composeProject)}`,
       "spec-invalid",
     );
   }
-  if (obj.externalNetwork !== undefined && (typeof obj.externalNetwork !== "string" || obj.externalNetwork.length === 0)) {
+
+  // externalNetwork must be Docker-safe if present
+  if (obj.externalNetwork !== undefined) {
+    if (typeof obj.externalNetwork !== "string" || !/^[a-zA-Z0-9_-]+$/.test(obj.externalNetwork) || obj.externalNetwork.length > 128) {
+      throw new SidecarSpecError(
+        `sidecar spec 'externalNetwork' must be Docker-safe if present, got ${JSON.stringify(obj.externalNetwork)}`,
+        "spec-invalid",
+      );
+    }
+  }
+
+  // updatedAt must be valid ISO 8601
+  if (typeof obj.updatedAt !== "string" || isNaN(Date.parse(obj.updatedAt))) {
     throw new SidecarSpecError(
-      "sidecar spec 'externalNetwork' must be a non-empty string if present",
+      `sidecar spec 'updatedAt' must be valid ISO 8601, got ${JSON.stringify(obj.updatedAt)}`,
       "spec-invalid",
     );
   }
-  if (typeof obj.updatedAt !== "string" || obj.updatedAt.length === 0) {
-    throw new SidecarSpecError(
-      "sidecar spec 'updatedAt' must be a non-empty string",
-      "spec-invalid",
-    );
+
+  // Reject unknown fields
+  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "composeProject", "updatedAt"]);
+  for (const key of Object.keys(obj)) {
+    if (!allowed.has(key)) {
+      throw new SidecarSpecError(
+        `sidecar spec has unknown field '${key}', allowed: ${[...allowed].join(", ")}`,
+        "spec-invalid",
+      );
+    }
   }
 }
 
 /**
  * Write the sidecar spec to the instance directory atomically.
  * Called during create/restore when weixin sidecar is provisioned.
- * Uses temp file + rename for atomicity. Permissions set to 0600.
+ * Uses random unique temp file + rename for concurrency-safe atomicity.
+ * Permissions set to 0600.
  */
 export async function writeSidecarSpec(
   instDir: string,
@@ -114,14 +153,18 @@ export async function writeSidecarSpec(
 ): Promise<void> {
   validateSpec(spec);
   const specPath = join(instDir, SPEC_FILENAME);
-  const tmpPath = join(instDir, `${SPEC_FILENAME}.tmp`);
+  // Random unique temp file for concurrency safety
+  const tmpPath = join(instDir, `${SPEC_FILENAME}.${randomBytes(8).toString("hex")}.tmp`);
 
   try {
-    await writeFile(tmpPath, JSON.stringify(spec, null, 2) + "\n", { mode: 0o600 });
+    // Exclusive create — fails if file exists (race protection)
+    const fd = await open(tmpPath, "wx", 0o600);
+    await fd.writeFile(JSON.stringify(spec, null, 2) + "\n");
+    await fd.close();
     await chmod(tmpPath, 0o600);
     await rename(tmpPath, specPath);
   } catch (error) {
-    // Clean up temp file if rename failed
+    // Clean up temp file on any failure
     await unlink(tmpPath).catch(() => {});
     throw new SidecarSpecError(
       `Failed to write sidecar spec: ${error instanceof Error ? error.message : String(error)}`,
@@ -181,3 +224,42 @@ export async function isSidecarEnabled(
 
 export { SidecarSpecError };
 export const SIDECAR_SPEC_FILENAME = SPEC_FILENAME;
+
+/**
+ * #171: Backfill sidecar spec for pre-#171 instances.
+ *
+ * Pre-#171 instances have `.env.weixin` and a compose file with a weixin-sidecar
+ * service, but no `sidecar-spec.json`. This function detects that state and
+ * writes a spec if appropriate.
+ *
+ * Returns true if a spec was written, false if no backfill was needed.
+ */
+export async function backfillSidecarSpec(
+  instDir: string,
+  composeProject: string,
+): Promise<boolean> {
+  // Check if spec already exists
+  const existing = await readSidecarSpec(instDir).catch(() => null);
+  if (existing !== null) {
+    return false; // Already has a spec
+  }
+
+  // Check if .env.weixin exists — indicates sidecar was previously provisioned
+  const envFile = Bun.file(join(instDir, ".env.weixin"));
+  if (!await envFile.exists()) {
+    return false; // No sidecar env file, nothing to backfill
+  }
+
+  // Write a spec from the detected state
+  await writeSidecarSpec(instDir, {
+    schemaVersion: 1,
+    enabled: true,
+    serviceName: "weixin-sidecar",
+    envFile: ".env.weixin",
+    port: 8787,
+    composeProject,
+    updatedAt: new Date().toISOString(),
+  });
+
+  return true;
+}

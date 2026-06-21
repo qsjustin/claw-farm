@@ -31,8 +31,7 @@ import {
   writeSidecarSpec,
   readSidecarSpec,
   removeSidecarSpec,
-  isSidecarEnabled,
-  type SidecarSpec,
+  backfillSidecarSpec,
 } from "./sidecar-spec.ts";
 import { resolveWorkspaceLayout } from "./workspace-layout.ts";
 
@@ -747,10 +746,11 @@ export async function spawn(options: {
     // If sidecar is explicitly disabled, remove any stale spec to prevent resurrection.
     if (enableWeixinSidecar) {
       await writeSidecarSpec(instDir, {
+        schemaVersion: 1,
         enabled: true,
         serviceName: "weixin-sidecar",
-        envFile: weixinEnvFile ?? ".env.weixin",
-        port: effectiveSidecarPort ?? 8787,
+        envFile: ".env.weixin",
+        port: 8787,
         externalNetwork,
         composeProject: `${projectName}-${userId}`,
         updatedAt: new Date().toISOString(),
@@ -1098,12 +1098,26 @@ export async function upInstance(
   const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
   const instDir = instanceDir(projectDir, userId);
 
+  // #171: Backfill spec for pre-#171 instances that have .env.weixin but no spec file.
+  // This ensures existing instances survive model-apply rebuilds after the #171 upgrade.
+  await backfillSidecarSpec(instDir, composeProject).catch(() => {
+    // Backfill failure is non-fatal — readSidecarSpec will handle the actual spec
+  });
+
   // #171: Read canonical sidecar spec if it exists. This ensures the sidecar
   // survives compose regeneration even when the caller (e.g. applyModelControl)
   // doesn't pass weixin options explicitly.
   // Fail-closed: corrupted spec throws (does not silently disable).
+  // Explicit false disables sidecar and clears stale spec; undefined falls back to spec.
   const sidecarSpec = await readSidecarSpec(instDir);
-  const enableWeixin = options?.enableWeixinSidecar ?? sidecarSpec?.enabled ?? false;
+  const explicitWeixin = options?.enableWeixinSidecar;
+  const enableWeixin = explicitWeixin ?? sidecarSpec?.enabled ?? false;
+
+  // If explicitly disabled, clear any stale spec to prevent resurrection
+  if (explicitWeixin === false) {
+    await removeSidecarSpec(instDir);
+  }
+
   const effectiveWeixinSidecarPort = options?.weixinSidecarPort ?? sidecarSpec?.port ?? 8787;
   const effectiveWeixinEnvFile = options?.weixinEnvFile ?? sidecarSpec?.envFile ?? ".env.weixin";
   const externalNetwork = enableWeixin
