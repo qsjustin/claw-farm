@@ -744,6 +744,7 @@ export async function spawn(options: {
 
     // #171: Persist canonical sidecar spec so all subsequent lifecycle operations
     // (start, restart, model apply, rebuild) know to include the sidecar.
+    // If sidecar is explicitly disabled, remove any stale spec to prevent resurrection.
     if (enableWeixinSidecar) {
       await writeSidecarSpec(instDir, {
         enabled: true,
@@ -754,6 +755,9 @@ export async function spawn(options: {
         composeProject: `${projectName}-${userId}`,
         updatedAt: new Date().toISOString(),
       });
+    } else {
+      // Explicitly disabled — remove any stale spec from a previous enabled state
+      await removeSidecarSpec(instDir);
     }
 
     // #159B Phase 3: Provision weixin sidecar token after compose is ready
@@ -1097,6 +1101,7 @@ export async function upInstance(
   // #171: Read canonical sidecar spec if it exists. This ensures the sidecar
   // survives compose regeneration even when the caller (e.g. applyModelControl)
   // doesn't pass weixin options explicitly.
+  // Fail-closed: corrupted spec throws (does not silently disable).
   const sidecarSpec = await readSidecarSpec(instDir);
   const enableWeixin = options?.enableWeixinSidecar ?? sidecarSpec?.enabled ?? false;
   const effectiveWeixinSidecarPort = options?.weixinSidecarPort ?? sidecarSpec?.port ?? 8787;
@@ -1104,6 +1109,24 @@ export async function upInstance(
   const externalNetwork = enableWeixin
     ? (sidecarSpec?.externalNetwork ?? resolveExternalNetwork())
     : undefined;
+
+  // #171: Fail-closed — if sidecar is enabled (from spec or explicit),
+  // rotation inputs must be present to ensure token freshness on rebuild.
+  const managedInstanceId = options?.managedInstanceId;
+  const clawBayApiUrl = options?.clawBayApiUrl;
+  const clawBayAdminToken = options?.clawBayAdminToken;
+  if (enableWeixin) {
+    const missing: string[] = [];
+    if (!managedInstanceId) missing.push("managedInstanceId");
+    if (!clawBayApiUrl) missing.push("clawBayApiUrl");
+    if (!clawBayAdminToken) missing.push("clawBayAdminToken");
+    if (missing.length > 0) {
+      throw new Error(
+        `Weixin sidecar is enabled (spec or explicit) but missing token rotation inputs: ${missing.join(", ")}. ` +
+        "Provide managedInstanceId, clawBayApiUrl, and clawBayAdminToken, or disable the sidecar."
+      );
+    }
+  }
 
   await ensureSharedProxy(projectDir, projectName, runtimeType, proxyMode, options?.quiet ?? false);
   await writeInstanceCompose({
@@ -1123,9 +1146,7 @@ export async function upInstance(
   // #159B/#171: Rotate weixin sidecar token on rebuild/restore (fail-closed).
   // Uses resolved enableWeixin (from spec or explicit options) so that
   // applyModelControl-triggered rebuilds also rotate the token.
-  const managedInstanceId = options?.managedInstanceId;
-  const clawBayApiUrl = options?.clawBayApiUrl;
-  const clawBayAdminToken = options?.clawBayAdminToken;
+  // Rotation inputs were validated above (fail-closed if missing).
   if (enableWeixin && managedInstanceId && clawBayApiUrl && clawBayAdminToken) {
     const envFile = join(instDir, effectiveWeixinEnvFile);
     const sidecarContainer = `${projectName}-${userId}-weixin`;

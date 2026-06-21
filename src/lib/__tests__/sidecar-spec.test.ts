@@ -4,9 +4,12 @@
  * Verifies that:
  * 1. writeSidecarSpec / readSidecarSpec round-trip works
  * 2. readSidecarSpec returns null when no spec exists
- * 3. isSidecarEnabled returns correct boolean
- * 4. removeSidecarSpec cleans up
- * 5. Spec survives across simulated lifecycle operations
+ * 3. readSidecarSpec THROWS on corrupted spec (fail-closed)
+ * 4. readSidecarSpec THROWS on invalid spec fields
+ * 5. isSidecarEnabled returns correct boolean
+ * 6. removeSidecarSpec cleans up and is idempotent
+ * 7. Spec with externalNetwork round-trips
+ * 8. writeSidecarSpec validates fields
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
@@ -18,6 +21,7 @@ import {
   readSidecarSpec,
   removeSidecarSpec,
   isSidecarEnabled,
+  SidecarSpecError,
   type SidecarSpec,
 } from "../sidecar-spec.ts";
 
@@ -58,18 +62,44 @@ describe("sidecar-spec persistence", () => {
     expect(read).toBeNull();
   });
 
-  it("returns null for corrupted spec file", async () => {
+  it("throws SidecarSpecError for corrupted JSON", async () => {
     const specPath = join(tempDir, "sidecar-spec.json");
     await Bun.write(specPath, "{ not valid json ");
-    const read = await readSidecarSpec(tempDir);
-    expect(read).toBeNull();
+    expect(readSidecarSpec(tempDir)).rejects.toThrow(SidecarSpecError);
+    expect(readSidecarSpec(tempDir)).rejects.toMatchObject({ code: "spec-corrupted" });
   });
 
-  it("returns null for spec with missing enabled field", async () => {
+  it("throws SidecarSpecError for spec with missing enabled field", async () => {
     const specPath = join(tempDir, "sidecar-spec.json");
     await Bun.write(specPath, JSON.stringify({ port: 8787 }));
-    const read = await readSidecarSpec(tempDir);
-    expect(read).toBeNull();
+    expect(readSidecarSpec(tempDir)).rejects.toThrow(SidecarSpecError);
+    expect(readSidecarSpec(tempDir)).rejects.toMatchObject({ code: "spec-invalid" });
+  });
+
+  it("throws SidecarSpecError for spec with invalid port", async () => {
+    const specPath = join(tempDir, "sidecar-spec.json");
+    await Bun.write(specPath, JSON.stringify({
+      enabled: true,
+      serviceName: "weixin-sidecar",
+      envFile: ".env.weixin",
+      port: "not-a-number",
+      composeProject: "proj",
+      updatedAt: "2026-06-21T12:00:00Z",
+    }));
+    expect(readSidecarSpec(tempDir)).rejects.toThrow(SidecarSpecError);
+  });
+
+  it("throws SidecarSpecError for spec with empty serviceName", async () => {
+    const specPath = join(tempDir, "sidecar-spec.json");
+    await Bun.write(specPath, JSON.stringify({
+      enabled: true,
+      serviceName: "",
+      envFile: ".env.weixin",
+      port: 8787,
+      composeProject: "proj",
+      updatedAt: "2026-06-21T12:00:00Z",
+    }));
+    expect(readSidecarSpec(tempDir)).rejects.toThrow(SidecarSpecError);
   });
 
   it("isSidecarEnabled returns true when spec exists and enabled", async () => {
@@ -136,5 +166,31 @@ describe("sidecar-spec persistence", () => {
     const read = await readSidecarSpec(tempDir);
     expect(read).not.toBeNull();
     expect(read!.externalNetwork).toBe("clawbay_default");
+  });
+
+  it("writeSidecarSpec rejects invalid spec (missing composeProject)", async () => {
+    const badSpec = {
+      enabled: true,
+      serviceName: "weixin-sidecar",
+      envFile: ".env.weixin",
+      port: 8787,
+      composeProject: "",
+      updatedAt: new Date().toISOString(),
+    } as SidecarSpec;
+
+    expect(writeSidecarSpec(tempDir, badSpec)).rejects.toThrow(SidecarSpecError);
+  });
+
+  it("writeSidecarSpec rejects out-of-range port", async () => {
+    const badSpec = {
+      enabled: true,
+      serviceName: "weixin-sidecar",
+      envFile: ".env.weixin",
+      port: 99999,
+      composeProject: "proj",
+      updatedAt: new Date().toISOString(),
+    } as SidecarSpec;
+
+    expect(writeSidecarSpec(tempDir, badSpec)).rejects.toThrow(SidecarSpecError);
   });
 });
