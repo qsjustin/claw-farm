@@ -202,7 +202,7 @@ function runtimeAttachNetworks(): string[] {
  * Source: CLAW_FARM_RUNTIME_ATTACH_NETWORKS (first entry).
  * Throws if the network name is missing or contains unsafe characters.
  */
-export function resolveExternalNetwork(): string {
+function resolveExternalNetwork(): string {
   const networks = runtimeAttachNetworks();
   if (networks.length === 0) {
  throw new Error(
