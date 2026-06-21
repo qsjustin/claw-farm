@@ -874,7 +874,18 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
   let restarted = false;
   if (previousStatus.status === "running") {
     await downInstance(project, userId, { quiet: true });
-    await upInstance(project, userId, { quiet: true });
+    // #171: upInstance now reads canonical sidecar spec from sidecar-spec.json,
+    // so the sidecar survives model-apply rebuilds even without explicit options.
+    // Forward any weixin options from the bridge payload for token rotation.
+    await upInstance(project, userId, {
+      quiet: true,
+      enableWeixinSidecar: payload.enableWeixinSidecar === true,
+      weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
+      weixinEnvFile: asString(payload.weixinEnvFile),
+      managedInstanceId: asString(payload.managedInstanceId),
+      clawBayApiUrl: asString(payload.clawBayApiUrl),
+      clawBayAdminToken: asString(payload.clawBayAdminToken),
+    });
     runtimeState = "running";
     restarted = true;
   }

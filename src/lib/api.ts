@@ -27,6 +27,13 @@ import {
 } from "./config.ts";
 import { fileExists } from "./fs-utils.ts";
 import { ensureInstanceDirs, instanceDir, templateDir } from "./instance.ts";
+import {
+  writeSidecarSpec,
+  readSidecarSpec,
+  removeSidecarSpec,
+  isSidecarEnabled,
+  type SidecarSpec,
+} from "./sidecar-spec.ts";
 import { resolveWorkspaceLayout } from "./workspace-layout.ts";
 
 import { instanceComposeTemplate, buildInstanceCompose } from "../templates/docker-compose.instance.yml.ts";
@@ -735,6 +742,20 @@ export async function spawn(options: {
     });
     await ensureRuntimeContainerWritable({ instDir, runtimeType });
 
+    // #171: Persist canonical sidecar spec so all subsequent lifecycle operations
+    // (start, restart, model apply, rebuild) know to include the sidecar.
+    if (enableWeixinSidecar) {
+      await writeSidecarSpec(instDir, {
+        enabled: true,
+        serviceName: "weixin-sidecar",
+        envFile: weixinEnvFile ?? ".env.weixin",
+        port: effectiveSidecarPort ?? 8787,
+        externalNetwork,
+        composeProject: `${projectName}-${userId}`,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
     // #159B Phase 3: Provision weixin sidecar token after compose is ready
     // Fail-closed: if weixin sidecar is enabled but provisioning inputs are missing, abort
     if (enableWeixinSidecar) {
@@ -1073,8 +1094,16 @@ export async function upInstance(
   const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
   const instDir = instanceDir(projectDir, userId);
 
-  // #159B: Only resolve external network when weixin sidecar is enabled
-  const externalNetwork = options?.enableWeixinSidecar ? resolveExternalNetwork() : undefined;
+  // #171: Read canonical sidecar spec if it exists. This ensures the sidecar
+  // survives compose regeneration even when the caller (e.g. applyModelControl)
+  // doesn't pass weixin options explicitly.
+  const sidecarSpec = await readSidecarSpec(instDir);
+  const enableWeixin = options?.enableWeixinSidecar ?? sidecarSpec?.enabled ?? false;
+  const effectiveWeixinSidecarPort = options?.weixinSidecarPort ?? sidecarSpec?.port ?? 8787;
+  const effectiveWeixinEnvFile = options?.weixinEnvFile ?? sidecarSpec?.envFile ?? ".env.weixin";
+  const externalNetwork = enableWeixin
+    ? (sidecarSpec?.externalNetwork ?? resolveExternalNetwork())
+    : undefined;
 
   await ensureSharedProxy(projectDir, projectName, runtimeType, proxyMode, options?.quiet ?? false);
   await writeInstanceCompose({
@@ -1085,25 +1114,30 @@ export async function upInstance(
     runtimeType,
     runtime,
     proxyMode,
-    enableWeixinSidecar: options?.enableWeixinSidecar,
-    weixinSidecarPort: options?.weixinSidecarPort ?? instance.weixinSidecarPort ?? 8787,
-    weixinEnvFile: options?.weixinEnvFile,
+    enableWeixinSidecar: enableWeixin,
+    weixinSidecarPort: effectiveWeixinSidecarPort,
+    weixinEnvFile: effectiveWeixinEnvFile,
     externalNetwork,
   });
 
-  // #159B: Rotate weixin sidecar token on rebuild/restore (fail-closed)
-  if (options?.enableWeixinSidecar && options?.managedInstanceId && options?.clawBayApiUrl && options?.clawBayAdminToken) {
-    const envFile = join(instDir, options.weixinEnvFile ?? ".env.weixin");
+  // #159B/#171: Rotate weixin sidecar token on rebuild/restore (fail-closed).
+  // Uses resolved enableWeixin (from spec or explicit options) so that
+  // applyModelControl-triggered rebuilds also rotate the token.
+  const managedInstanceId = options?.managedInstanceId;
+  const clawBayApiUrl = options?.clawBayApiUrl;
+  const clawBayAdminToken = options?.clawBayAdminToken;
+  if (enableWeixin && managedInstanceId && clawBayApiUrl && clawBayAdminToken) {
+    const envFile = join(instDir, effectiveWeixinEnvFile);
     const sidecarContainer = `${projectName}-${userId}-weixin`;
-    const rotateResponse = await fetch(`${options.clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/rotate`, {
+    const rotateResponse = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/rotate`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-claw-bay-admin-token": options.clawBayAdminToken,
+        "x-claw-bay-admin-token": clawBayAdminToken,
       },
       body: JSON.stringify({
         spec: {
-          serviceRuntimeInstanceId: options.managedInstanceId,
+          serviceRuntimeInstanceId: managedInstanceId,
           userId,
           sidecarCode: "weixin-auth-sidecar",
           ttlSeconds: 3600,
@@ -1130,10 +1164,10 @@ export async function upInstance(
 
   await ensureRuntimeContainerWritable({ instDir, runtimeType });
 
-  // #159B: If weixin sidecar rotate already recreated the sidecar,
+  // #159B/#171: If weixin sidecar rotate already recreated the sidecar,
   // use compose start (not up) to avoid container name conflicts.
-  // If no rotate happened (no sidecar), use compose up to create/start all.
-  if (options?.enableWeixinSidecar && options?.managedInstanceId) {
+  // If no rotate happened (no sidecar or no managedInstanceId), use compose up.
+  if (enableWeixin && managedInstanceId) {
     // Rotate already recreated the sidecar — just start all containers
     await runCompose(projectDir, "start", {
       composePath,
