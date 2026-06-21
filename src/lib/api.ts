@@ -174,19 +174,18 @@ export interface ApplyInstanceModelControlOptions {
   baseUrl?: string | null;
 }
 
+/**
+ * #171: Lifecycle control options — only quiet + rotation identity/credentials.
+ * Topology (enable/port/env/network) is read from canonical sidecar spec only.
+ * Use spawn() options for initial sidecar configuration.
+ */
 export interface ManagedInstanceControlOptions {
   quiet?: boolean;
-  /** #159B: Enable per-instance weixin sidecar */
-  enableWeixinSidecar?: boolean;
-  /** #159B: Per-instance weixin sidecar port */
-  weixinSidecarPort?: number;
-  /** #159B: Per-instance weixin env file name */
-  weixinEnvFile?: string;
-  /** #159B: ClawBay ManagedInstance.id for token provisioning */
+  /** ClawBay ServiceRuntimeInstance.id for token rotation */
   managedInstanceId?: string;
-  /** #159B: ClawBay API URL for token provisioning */
+  /** ClawBay API URL for token rotation */
   clawBayApiUrl?: string;
-  /** #159B: ClawBay admin token for token provisioning */
+  /** ClawBay admin token for token rotation */
   clawBayAdminToken?: string;
 }
 
@@ -1097,19 +1096,15 @@ export async function upInstance(
   const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
   const instDir = instanceDir(projectDir, userId);
 
-  // #171: Read canonical sidecar spec if it exists. This ensures the sidecar
-  // survives compose regeneration even when the caller (e.g. applyModelControl)
-  // doesn't pass weixin options explicitly.
+  // #171: Read canonical sidecar spec. Lifecycle reads spec only — no topology override.
   // Fail-closed: corrupted spec throws (does not silently disable).
-  // Explicit false disables sidecar and clears stale spec; undefined falls back to spec.
-  // Backfill is explicit — callers must use backfillSidecarSpec() with authoritative data.
-  const sidecarSpec = await readSidecarSpec(instDir);
-  // #171: Lifecycle reads canonical spec only — no enable/disable override.
   // spawn() writes spec; attach/detach/backfill is Slice 2 control-plane operation.
+  const sidecarSpec = await readSidecarSpec(instDir);
   const enableWeixin = sidecarSpec?.enabled ?? false;
 
-  const effectiveWeixinSidecarPort = options?.weixinSidecarPort ?? sidecarSpec?.port ?? 8787;
-  const effectiveWeixinEnvFile = options?.weixinEnvFile ?? sidecarSpec?.envFile ?? ".env.weixin";
+  // Port/env/network come exclusively from the canonical spec
+  const effectiveWeixinSidecarPort = sidecarSpec?.port ?? 8787;
+  const effectiveWeixinEnvFile = sidecarSpec?.envFile ?? ".env.weixin";
   const externalNetwork = enableWeixin
     ? (sidecarSpec?.externalNetwork ?? resolveExternalNetwork())
     : undefined;

@@ -355,7 +355,7 @@ describe("upInstance behavioral — sidecar spec integration", () => {
     expect(composeCommands).toHaveLength(0);
   });
 
-  it("lifecycle payload enableWeixinSidecar=false does NOT override canonical enabled spec", async () => {
+  it("lifecycle cannot override canonical spec — upInstance only accepts rotation creds", async () => {
     const instDir = join(tmpProjectDir, "instances", userId);
     await _writeSpec2(instDir, {
       schemaVersion: 1,
@@ -382,24 +382,23 @@ describe("upInstance behavioral — sidecar spec integration", () => {
       return Promise.resolve(new Response(JSON.stringify({ ok: true, token: "cbt_test" }), { status: 200 }));
     }) as typeof fetch;
 
-    // Pass enableWeixinSidecar=false — should be IGNORED, spec is canonical
+    // upInstance only accepts quiet + rotation creds — no enable/port/env override
     await upInstance(projectName, userId, {
       quiet: true,
-      enableWeixinSidecar: false,
       managedInstanceId: "sri_test",
       clawBayApiUrl: "http://api:3001",
       clawBayAdminToken: "token",
     });
 
-    // Spec should still exist (not removed)
+    // Spec should still exist
     const specExists = await Bun.file(join(instDir, "sidecar-spec.json")).exists();
     expect(specExists).toBe(true);
 
-    // Compose should contain sidecar (spec is canonical, false ignored)
+    // Compose should contain sidecar (from canonical spec)
     const composeContent = await Bun.file(join(instDir, "docker-compose.openclaw.yml")).text();
     expect(composeContent).toContain("weixin-sidecar");
 
-    // Rotation should still be called (spec enabled)
+    // Rotation should be called (spec enabled)
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0].url).toContain("/rotate");
   });

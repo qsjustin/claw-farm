@@ -446,12 +446,10 @@ async function bridgeInstanceStart(payload: Record<string, unknown>): Promise<Br
   validateBridgeName(userId, "user ID");
   const context = await requireManagedInstance("instance.start", project, userId);
   if ("ok" in context) return context;
-  // #171: Lifecycle reads canonical sidecar spec — no enable/disable override.
-  // Only forward rotation creds (managedInstanceId etc.) for token refresh.
+  // #171: Lifecycle reads canonical sidecar spec — no topology override.
+  // Only forward rotation creds for token refresh.
   const started = await upInstance(project, userId, {
     quiet: true,
-    weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
-    weixinEnvFile: asString(payload.weixinEnvFile),
     managedInstanceId: asString(payload.managedInstanceId),
     clawBayApiUrl: asString(payload.clawBayApiUrl),
     clawBayAdminToken: asString(payload.clawBayAdminToken),
@@ -496,12 +494,10 @@ async function bridgeInstanceRestart(payload: Record<string, unknown>): Promise<
   const context = await requireManagedInstance("instance.restart", project, userId);
   if ("ok" in context) return context;
   await downInstance(project, userId, { quiet: true });
-  // #171: Lifecycle reads canonical sidecar spec — no enable/disable override.
+  // #171: Lifecycle reads canonical sidecar spec — no topology override.
   // Only forward rotation creds for token refresh.
   await upInstance(project, userId, {
     quiet: true,
-    weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
-    weixinEnvFile: asString(payload.weixinEnvFile),
     managedInstanceId: asString(payload.managedInstanceId),
     clawBayApiUrl: asString(payload.clawBayApiUrl),
     clawBayAdminToken: asString(payload.clawBayAdminToken),
@@ -874,12 +870,10 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
   let restarted = false;
   if (previousStatus.status === "running") {
     await downInstance(project, userId, { quiet: true });
-    // #171: Lifecycle reads canonical sidecar spec — no enable/disable override.
+    // #171: Lifecycle reads canonical sidecar spec — no topology override.
     // Only forward rotation creds for token refresh.
     await upInstance(project, userId, {
       quiet: true,
-      weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
-      weixinEnvFile: asString(payload.weixinEnvFile),
       managedInstanceId: asString(payload.managedInstanceId),
       clawBayApiUrl: asString(payload.clawBayApiUrl),
       clawBayAdminToken: asString(payload.clawBayAdminToken),
