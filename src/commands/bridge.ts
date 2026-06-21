@@ -446,10 +446,11 @@ async function bridgeInstanceStart(payload: Record<string, unknown>): Promise<Br
   validateBridgeName(userId, "user ID");
   const context = await requireManagedInstance("instance.start", project, userId);
   if ("ok" in context) return context;
-  // #159B: Forward weixin sidecar options for start/rebuild
+  // #159B/#171: Forward weixin sidecar options for start/rebuild.
+  // Use undefined (not false) when not in payload so upInstance falls back to sidecar spec.
   const started = await upInstance(project, userId, {
     quiet: true,
-    enableWeixinSidecar: payload.enableWeixinSidecar === true,
+    enableWeixinSidecar: payload.enableWeixinSidecar === true ? true : undefined,
     weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
     weixinEnvFile: asString(payload.weixinEnvFile),
     managedInstanceId: asString(payload.managedInstanceId),
@@ -496,10 +497,11 @@ async function bridgeInstanceRestart(payload: Record<string, unknown>): Promise<
   const context = await requireManagedInstance("instance.restart", project, userId);
   if ("ok" in context) return context;
   await downInstance(project, userId, { quiet: true });
-  // #159B: Forward weixin sidecar options for restart/rebuild
+  // #159B/#171: Forward weixin sidecar options for restart/rebuild.
+  // Use undefined (not false) when not in payload so upInstance falls back to sidecar spec.
   await upInstance(project, userId, {
     quiet: true,
-    enableWeixinSidecar: payload.enableWeixinSidecar === true,
+    enableWeixinSidecar: payload.enableWeixinSidecar === true ? true : undefined,
     weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
     weixinEnvFile: asString(payload.weixinEnvFile),
     managedInstanceId: asString(payload.managedInstanceId),
@@ -877,9 +879,10 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
     // #171: upInstance now reads canonical sidecar spec from sidecar-spec.json,
     // so the sidecar survives model-apply rebuilds even without explicit options.
     // Forward any weixin options from the bridge payload for token rotation.
+    // Use undefined (not false) when not in payload so upInstance falls back to spec.
     await upInstance(project, userId, {
       quiet: true,
-      enableWeixinSidecar: payload.enableWeixinSidecar === true,
+      enableWeixinSidecar: payload.enableWeixinSidecar === true ? true : undefined,
       weixinSidecarPort: typeof payload.weixinSidecarPort === "number" ? payload.weixinSidecarPort : undefined,
       weixinEnvFile: asString(payload.weixinEnvFile),
       managedInstanceId: asString(payload.managedInstanceId),
