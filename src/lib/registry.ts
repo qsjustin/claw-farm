@@ -4,9 +4,15 @@ import { mkdir, writeFile, readFile, stat, unlink, copyFile, chmod } from "node:
 
 import type { RuntimeType } from "../runtimes/interface.ts";
 
-const REGISTRY_DIR = join(homedir(), ".claw-farm");
-const REGISTRY_PATH = join(REGISTRY_DIR, "registry.json");
-const LOCK_PATH = join(REGISTRY_DIR, "registry.lock");
+function getRegistryDir(): string {
+  return process.env.CLAW_FARM_REGISTRY_DIR ?? join(homedir(), ".claw-farm");
+}
+function getRegistryPath(): string {
+  return join(getRegistryDir(), "registry.json");
+}
+function getLockPath(): string {
+  return join(getRegistryDir(), "registry.lock");
+}
 
 /** Validates userId/projectName for filesystem and Docker safety */
 export const SAFE_NAME_REGEX = /^[a-z0-9][a-z0-9_-]{0,62}$/;
@@ -77,26 +83,26 @@ let _inProcessLockChain: Promise<void> = Promise.resolve();
  * Retries with backoff for up to ~5 seconds.
  */
 async function acquireLock(): Promise<void> {
-  await mkdir(REGISTRY_DIR, { recursive: true, mode: 0o700 });
+  await mkdir(getRegistryDir(), { recursive: true, mode: 0o700 });
 
   const maxAttempts = 50;
   const baseDelay = 100; // ms
 
   for (let i = 0; i < maxAttempts; i++) {
     try {
-      await writeFile(LOCK_PATH, String(process.pid), { flag: "wx", mode: 0o600 });
+      await writeFile(getLockPath(), String(process.pid), { flag: "wx", mode: 0o600 });
       return; // Lock acquired
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
 
       // Check if lock is stale by reading the PID and verifying the process is alive
       try {
-        const lockStat = await stat(LOCK_PATH);
+        const lockStat = await stat(getLockPath());
         const ageMs = Date.now() - lockStat.mtimeMs;
         if (ageMs > 30_000) {
           // Also verify the owning process is truly gone before unlinking
           try {
-            const pidStr = await readFile(LOCK_PATH, "utf8");
+            const pidStr = await readFile(getLockPath(), "utf8");
             const pid = parseInt(pidStr.trim(), 10);
             if (!isNaN(pid)) {
               try {
@@ -104,11 +110,11 @@ async function acquireLock(): Promise<void> {
                 // Process is still alive — not safe to steal the lock, keep waiting
               } catch {
                 // Process is dead — safe to remove stale lock
-                await unlink(LOCK_PATH);
+                await unlink(getLockPath());
                 continue;
               }
             } else {
-              await unlink(LOCK_PATH);
+              await unlink(getLockPath());
               continue;
             }
           } catch {
@@ -127,7 +133,7 @@ async function acquireLock(): Promise<void> {
 
 async function releaseLock(): Promise<void> {
   try {
-    await unlink(LOCK_PATH);
+    await unlink(getLockPath());
   } catch {
     // Lock already released — fine
   }
@@ -158,7 +164,7 @@ export function withLock<T>(fn: () => Promise<T>): Promise<T> {
 
 export async function loadRegistry(): Promise<Registry> {
   try {
-    const raw = await Bun.file(REGISTRY_PATH).text();
+    const raw = await Bun.file(getRegistryPath()).text();
     const parsed = JSON.parse(raw);
     // Basic schema validation
     if (typeof parsed !== "object" || !parsed.projects || typeof parsed.nextPort !== "number") {
@@ -174,7 +180,7 @@ export async function loadRegistry(): Promise<Registry> {
     if (err instanceof SyntaxError) {
       console.warn("⚠ Registry file is corrupted JSON, creating backup and using defaults");
       try {
-        await copyFile(REGISTRY_PATH, REGISTRY_PATH + ".corrupted." + Date.now());
+        await copyFile(getRegistryPath(), getRegistryPath() + ".corrupted." + Date.now());
       } catch { /* best effort */ }
       return defaultRegistry();
     }
@@ -183,9 +189,9 @@ export async function loadRegistry(): Promise<Registry> {
 }
 
 export async function saveRegistry(reg: Registry): Promise<void> {
-  await mkdir(REGISTRY_DIR, { recursive: true, mode: 0o700 });
-  await Bun.write(REGISTRY_PATH, JSON.stringify(reg, null, 2) + "\n");
-  await chmod(REGISTRY_PATH, 0o600);
+  await mkdir(getRegistryDir(), { recursive: true, mode: 0o700 });
+  await Bun.write(getRegistryPath(), JSON.stringify(reg, null, 2) + "\n");
+  await chmod(getRegistryPath(), 0o600);
 }
 
 /**

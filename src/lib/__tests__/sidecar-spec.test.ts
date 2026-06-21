@@ -190,6 +190,7 @@ import { mkdir, writeFile as fsWriteFile } from "node:fs/promises";
 
 describe("upInstance behavioral — sidecar spec integration", () => {
   let tmpProjectDir: string;
+  let tmpHome: string;
   let projectName: string;
   let testCounter = 0;
   const userId = "test-user-171";
@@ -200,31 +201,24 @@ describe("upInstance behavioral — sidecar spec integration", () => {
     testCounter++;
     projectName = `test-171-${Date.now()}-${testCounter}`;
     tmpProjectDir = await mkdtemp(join(tmpdir(), "claw-farm-171-"));
+    // Isolate registry via CLAW_FARM_REGISTRY_DIR env var
+    tmpHome = await mkdtemp(join(tmpdir(), "claw-farm-home-"));
+    process.env.CLAW_FARM_REGISTRY_DIR = tmpHome;
     // Set required env for sidecar network resolution
     process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS = "clawbay_default";
-    // Create project in registry
-    try {
-      await addProject(projectName, tmpProjectDir, "builtin", "hermes");
-      // Set multiInstance flag by directly editing registry
-      const { loadRegistry, saveRegistry } = await import("../registry.ts");
-      const reg = await loadRegistry();
-      if (reg.projects[projectName]) {
-        reg.projects[projectName].multiInstance = true;
-        await saveRegistry(reg);
-      }
-    } catch {
-      // Project may already exist from a previous test run
-    }
+    // Create project in registry — fail on setup errors (no catch/swallow)
+    await addProject(projectName, tmpProjectDir, "builtin", "hermes");
+    // Set multiInstance flag
+    const { loadRegistry, saveRegistry } = await import("../registry.ts");
+    const reg = await loadRegistry();
+    reg.projects[projectName].multiInstance = true;
+    await saveRegistry(reg);
 
     // Create instance dirs
     await ensureInstanceDirs(tmpProjectDir, userId, "hermes");
 
-    // Add instance to registry
-    try {
-      await addInstance(projectName, userId);
-    } catch {
-      // May already exist
-    }
+    // Add instance to registry — fail on setup errors
+    await addInstance(projectName, userId);
 
     // Write project config
     await fsWriteFile(
@@ -234,14 +228,14 @@ describe("upInstance behavioral — sidecar spec integration", () => {
   });
 
   afterEach(async () => {
-    // Cleanup
+    // Restore and cleanup
     Bun.spawn = originalSpawn;
     globalThis.fetch = originalFetch;
     delete process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS;
-    try {
-      await removeInstance(projectName, userId);
-    } catch {}
+    delete process.env.CLAW_FARM_REGISTRY_DIR;
+    // Registry is in tmpHome which gets rm'd, no need to removeInstance
     await rm(tmpProjectDir, { recursive: true, force: true });
+    await rm(tmpHome, { recursive: true, force: true });
   });
 
   it("enabled spec + no explicit options → compose includes sidecar, rotation called", async () => {
@@ -407,4 +401,49 @@ describe("upInstance behavioral — sidecar spec integration", () => {
     const composeContent = await Bun.file(join(instDir, "docker-compose.openclaw.yml")).text();
     expect(composeContent).not.toContain("weixin-sidecar");
   });
+
+  it("rotate fetch failure → throws, no compose start/up command", async () => {
+    const instDir = join(tmpProjectDir, "instances", userId);
+    await _writeSpec2(instDir, {
+      schemaVersion: 1,
+      enabled: true,
+      serviceName: "weixin-sidecar",
+      envFile: ".env.weixin",
+      port: 8787,
+      composeProject: `${projectName}-${userId}`,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const composeCommands: string[] = [];
+
+    Bun.spawn = ((_args: string[], _opts?: { cwd?: string }) => {
+      composeCommands.push(_args.join(" "));
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([""]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as unknown as typeof Bun.spawn;
+
+    // Mock fetch to return rotate failure
+    globalThis.fetch = ((_url: string) => {
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: false, error: "token rotation denied" }), { status: 403 }),
+      );
+    }) as typeof fetch;
+
+    await expect(
+      upInstance(projectName, userId, {
+        quiet: true,
+        managedInstanceId: "sri_test",
+        clawBayApiUrl: "http://api:3001",
+        clawBayAdminToken: "token",
+      }),
+    ).rejects.toThrow("token rotation failed");
+
+    // No compose start/up should have run
+    expect(composeCommands.filter(c => c.includes("start") || c.includes("up"))).toHaveLength(0);
+  });
 });
+
+// ─── #171 behavioral: rotate failure prevents compose start ──────────────────

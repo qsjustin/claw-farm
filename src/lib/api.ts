@@ -1106,11 +1106,9 @@ export async function upInstance(
   const sidecarSpec = await readSidecarSpec(instDir);
   const explicitWeixin = options?.enableWeixinSidecar;
   const enableWeixin = explicitWeixin ?? sidecarSpec?.enabled ?? false;
-
-  // If explicitly disabled, clear any stale spec to prevent resurrection
-  if (explicitWeixin === false) {
-    await removeSidecarSpec(instDir);
-  }
+  // #171: If explicitly disabled, defer spec removal until after compose succeeds.
+  // If compose fails, the old enabled spec is preserved so the instance can recover.
+  const shouldRemoveSpecAfterCompose = explicitWeixin === false;
 
   const effectiveWeixinSidecarPort = options?.weixinSidecarPort ?? sidecarSpec?.port ?? 8787;
   const effectiveWeixinEnvFile = options?.weixinEnvFile ?? sidecarSpec?.envFile ?? ".env.weixin";
@@ -1218,6 +1216,12 @@ export async function upInstance(
     quiet: options?.quiet,
   });
   await updateRuntimeInstanceStatus(projectName, userId, "running", { ready: true });
+
+  // #171: Only remove spec after compose succeeds (transactional semantics).
+  // If compose failed, the throw above prevents reaching here, preserving the old spec.
+  if (shouldRemoveSpecAfterCompose) {
+    await removeSidecarSpec(instDir);
+  }
 
   return { port: instance.port };
 }
