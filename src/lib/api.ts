@@ -31,7 +31,6 @@ import {
   writeSidecarSpec,
   readSidecarSpec,
   removeSidecarSpec,
-  backfillSidecarSpec,
 } from "./sidecar-spec.ts";
 import { resolveWorkspaceLayout } from "./workspace-layout.ts";
 
@@ -1098,17 +1097,12 @@ export async function upInstance(
   const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, entry);
   const instDir = instanceDir(projectDir, userId);
 
-  // #171: Backfill spec for pre-#171 instances that have .env.weixin but no spec file.
-  // This ensures existing instances survive model-apply rebuilds after the #171 upgrade.
-  await backfillSidecarSpec(instDir, composeProject).catch(() => {
-    // Backfill failure is non-fatal — readSidecarSpec will handle the actual spec
-  });
-
   // #171: Read canonical sidecar spec if it exists. This ensures the sidecar
   // survives compose regeneration even when the caller (e.g. applyModelControl)
   // doesn't pass weixin options explicitly.
   // Fail-closed: corrupted spec throws (does not silently disable).
   // Explicit false disables sidecar and clears stale spec; undefined falls back to spec.
+  // Backfill is explicit — callers must use backfillSidecarSpec() with authoritative data.
   const sidecarSpec = await readSidecarSpec(instDir);
   const explicitWeixin = options?.enableWeixinSidecar;
   const enableWeixin = explicitWeixin ?? sidecarSpec?.enabled ?? false;

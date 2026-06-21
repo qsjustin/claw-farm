@@ -174,3 +174,237 @@ describe("sidecar-spec persistence", () => {
     expect(read!.serviceName).toBe("weixin-sidecar");
   });
 });
+
+// ─── #171 behavioral: upInstance with real project + mocked compose/fetch ───
+//
+// These tests create a real temp project in the claw-farm registry,
+// write a sidecar spec, then call upInstance() with mocked Bun.spawn
+// (for docker compose commands) and mocked fetch (for token rotation).
+// They verify the actual code path, not simulated logic.
+
+import { upInstance } from "../api.ts";
+import { writeSidecarSpec as _writeSpec2 } from "../sidecar-spec.ts";
+import { addProject, addInstance, removeInstance } from "../registry.ts";
+import { ensureInstanceDirs } from "../instance.ts";
+import { mkdir, writeFile as fsWriteFile } from "node:fs/promises";
+
+describe("upInstance behavioral — sidecar spec integration", () => {
+  let tmpProjectDir: string;
+  let projectName: string;
+  let testCounter = 0;
+  const userId = "test-user-171";
+  const originalSpawn = Bun.spawn;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    testCounter++;
+    projectName = `test-171-${Date.now()}-${testCounter}`;
+    tmpProjectDir = await mkdtemp(join(tmpdir(), "claw-farm-171-"));
+    // Set required env for sidecar network resolution
+    process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS = "clawbay_default";
+    // Create project in registry
+    try {
+      await addProject(projectName, tmpProjectDir, "builtin", "hermes");
+      // Set multiInstance flag by directly editing registry
+      const { loadRegistry, saveRegistry } = await import("../registry.ts");
+      const reg = await loadRegistry();
+      if (reg.projects[projectName]) {
+        reg.projects[projectName].multiInstance = true;
+        await saveRegistry(reg);
+      }
+    } catch {
+      // Project may already exist from a previous test run
+    }
+
+    // Create instance dirs
+    await ensureInstanceDirs(tmpProjectDir, userId, "hermes");
+
+    // Add instance to registry
+    try {
+      await addInstance(projectName, userId);
+    } catch {
+      // May already exist
+    }
+
+    // Write project config
+    await fsWriteFile(
+      join(tmpProjectDir, "project.json"),
+      JSON.stringify({ multiInstance: true, runtime: "hermes" }),
+    );
+  });
+
+  afterEach(async () => {
+    // Cleanup
+    Bun.spawn = originalSpawn;
+    globalThis.fetch = originalFetch;
+    delete process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS;
+    try {
+      await removeInstance(projectName, userId);
+    } catch {}
+    await rm(tmpProjectDir, { recursive: true, force: true });
+  });
+
+  it("enabled spec + no explicit options → compose includes sidecar, rotation called", async () => {
+    // Write sidecar spec
+    const instDir = join(tmpProjectDir, "instances", userId);
+    await _writeSpec2(instDir, {
+      schemaVersion: 1,
+      enabled: true,
+      serviceName: "weixin-sidecar",
+      envFile: ".env.weixin",
+      port: 8787,
+      composeProject: `${projectName}-${userId}`,
+      updatedAt: new Date().toISOString(),
+    });
+
+    // Track compose commands and fetch calls
+    const composeCommands: string[] = [];
+    const fetchCalls: { url: string; method: string }[] = [];
+
+    // Mock Bun.spawn for docker compose commands
+    Bun.spawn = ((args: string[], _opts?: { cwd?: string }) => {
+      composeCommands.push(args.join(" "));
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([""]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as unknown as typeof Bun.spawn;
+
+    // Mock fetch for token rotation
+    globalThis.fetch = ((url: string, opts?: RequestInit) => {
+      fetchCalls.push({ url: url as string, method: opts?.method ?? "GET" });
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true, token: "cbt_test123" }), { status: 200 }),
+      );
+    }) as typeof fetch;
+
+    // Call upInstance with rotation inputs but no explicit enableWeixinSidecar
+    // Should read spec and enable sidecar
+    await upInstance(projectName, userId, {
+      quiet: true,
+      managedInstanceId: "sri_test_171",
+      clawBayApiUrl: "http://claw-bay-api:3001",
+      clawBayAdminToken: "test-admin-token",
+    });
+
+    // Verify compose was called (at least start or up)
+    expect(composeCommands.length).toBeGreaterThan(0);
+    expect(composeCommands.some((c) => c.includes("docker compose"))).toBe(true);
+
+    // Verify token rotation was called (because spec enabled it)
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/api/internal/weixin-binding-provision/rotate");
+    expect(fetchCalls[0].method).toBe("POST");
+
+    // Verify compose file was written with sidecar service
+    const composeContent = await Bun.file(join(instDir, "docker-compose.openclaw.yml")).text();
+    expect(composeContent).toContain("weixin-sidecar");
+  });
+
+  it("corrupted spec → throws, compose not written, commands not run", async () => {
+    const instDir = join(tmpProjectDir, "instances", userId);
+    // Write corrupted spec
+    await Bun.write(join(instDir, "sidecar-spec.json"), "{ corrupted json");
+
+    const composeCommands: string[] = [];
+    Bun.spawn = ((args: string[], _opts?: { cwd?: string }) => {
+      composeCommands.push(args.join(" "));
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([""]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as unknown as typeof Bun.spawn;
+
+    // Should throw SidecarSpecError
+    await expect(
+      upInstance(projectName, userId, {
+        quiet: true,
+        managedInstanceId: "sri_test",
+        clawBayApiUrl: "http://api:3001",
+        clawBayAdminToken: "token",
+      }),
+    ).rejects.toThrow();
+
+    // No compose commands should have been run
+    expect(composeCommands).toHaveLength(0);
+  });
+
+  it("enabled spec + missing rotation inputs → throws, no compose commands", async () => {
+    const instDir = join(tmpProjectDir, "instances", userId);
+    await _writeSpec2(instDir, {
+      schemaVersion: 1,
+      enabled: true,
+      serviceName: "weixin-sidecar",
+      envFile: ".env.weixin",
+      port: 8787,
+      composeProject: `${projectName}-${userId}`,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const composeCommands: string[] = [];
+    Bun.spawn = ((args: string[], _opts?: { cwd?: string }) => {
+      composeCommands.push(args.join(" "));
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([""]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as unknown as typeof Bun.spawn;
+
+    // Missing managedInstanceId, clawBayApiUrl, clawBayAdminToken
+    await expect(
+      upInstance(projectName, userId, { quiet: true }),
+    ).rejects.toThrow("missing token rotation inputs");
+
+    expect(composeCommands).toHaveLength(0);
+  });
+
+  it("explicit false → sidecar disabled, spec removed, no rotation fetch", async () => {
+    const instDir = join(tmpProjectDir, "instances", userId);
+    await _writeSpec2(instDir, {
+      schemaVersion: 1,
+      enabled: true,
+      serviceName: "weixin-sidecar",
+      envFile: ".env.weixin",
+      port: 8787,
+      composeProject: `${projectName}-${userId}`,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const fetchCalls: { url: string }[] = [];
+    const composeCommands: string[] = [];
+
+    Bun.spawn = ((args: string[], _opts?: { cwd?: string }) => {
+      composeCommands.push(args.join(" "));
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([""]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as unknown as typeof Bun.spawn;
+
+    globalThis.fetch = ((url: string) => {
+      fetchCalls.push({ url: url as string });
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    }) as typeof fetch;
+
+    // Explicit false should disable sidecar and remove spec
+    await upInstance(projectName, userId, {
+      quiet: true,
+      enableWeixinSidecar: false,
+    });
+
+    // No rotation fetch should have been called
+    expect(fetchCalls).toHaveLength(0);
+
+    // Spec should be removed
+    const specExists = await Bun.file(join(instDir, "sidecar-spec.json")).exists();
+    expect(specExists).toBe(false);
+
+    // Compose should NOT contain sidecar
+    const composeContent = await Bun.file(join(instDir, "docker-compose.openclaw.yml")).text();
+    expect(composeContent).not.toContain("weixin-sidecar");
+  });
+});

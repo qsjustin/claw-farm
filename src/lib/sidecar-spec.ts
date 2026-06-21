@@ -159,8 +159,11 @@ export async function writeSidecarSpec(
   try {
     // Exclusive create — fails if file exists (race protection)
     const fd = await open(tmpPath, "wx", 0o600);
-    await fd.writeFile(JSON.stringify(spec, null, 2) + "\n");
-    await fd.close();
+    try {
+      await fd.writeFile(JSON.stringify(spec, null, 2) + "\n");
+    } finally {
+      await fd.close();
+    }
     await chmod(tmpPath, 0o600);
     await rename(tmpPath, specPath);
   } catch (error) {
@@ -228,38 +231,30 @@ export const SIDECAR_SPEC_FILENAME = SPEC_FILENAME;
 /**
  * #171: Backfill sidecar spec for pre-#171 instances.
  *
- * Pre-#171 instances have `.env.weixin` and a compose file with a weixin-sidecar
- * service, but no `sidecar-spec.json`. This function detects that state and
- * writes a spec if appropriate.
+ * Pre-#171 instances may have a compose file with a weixin-sidecar service
+ * but no `sidecar-spec.json`. This function provides EXPLICIT backfill —
+ * the caller must provide authoritative spec data (from ClawBay control-plane
+ * SRI configuration), not guessed from .env.weixin existence.
  *
- * Returns true if a spec was written, false if no backfill was needed.
+ * Fail-closed: if an existing spec is corrupted, throws (does not overwrite).
+ * Returns true if a spec was written, false if one already exists.
  */
 export async function backfillSidecarSpec(
   instDir: string,
-  composeProject: string,
+  spec: SidecarSpec,
 ): Promise<boolean> {
-  // Check if spec already exists
-  const existing = await readSidecarSpec(instDir).catch(() => null);
-  if (existing !== null) {
-    return false; // Already has a spec
+  // Check if spec already exists — distinguish ENOENT from corruption
+  try {
+    const existing = await readSidecarSpec(instDir);
+    if (existing !== null) {
+      return false; // Already has a valid spec
+    }
+  } catch (error) {
+    // Corrupted or invalid spec — fail-closed, do NOT overwrite
+    throw error;
   }
 
-  // Check if .env.weixin exists — indicates sidecar was previously provisioned
-  const envFile = Bun.file(join(instDir, ".env.weixin"));
-  if (!await envFile.exists()) {
-    return false; // No sidecar env file, nothing to backfill
-  }
-
-  // Write a spec from the detected state
-  await writeSidecarSpec(instDir, {
-    schemaVersion: 1,
-    enabled: true,
-    serviceName: "weixin-sidecar",
-    envFile: ".env.weixin",
-    port: 8787,
-    composeProject,
-    updatedAt: new Date().toISOString(),
-  });
-
+  // No spec exists — write the authoritative one
+  await writeSidecarSpec(instDir, spec);
   return true;
 }
