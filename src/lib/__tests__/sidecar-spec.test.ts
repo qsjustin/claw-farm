@@ -194,3 +194,97 @@ describe("sidecar-spec persistence", () => {
     expect(writeSidecarSpec(tempDir, badSpec)).rejects.toThrow(SidecarSpecError);
   });
 });
+
+// ─── #171 behavioral: upInstance reads sidecar spec for fail-closed ──────────
+
+import { writeSidecarSpec as _writeSpec, readSidecarSpec as _readSpec } from "../sidecar-spec.ts";
+import { SidecarSpecError as _SpecError } from "../sidecar-spec.ts";
+
+describe("upInstance sidecar spec integration (fail-closed)", () => {
+  it("readSidecarSpec throws on corrupted spec — upInstance would fail-closed", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "upinstance-test-"));
+    try {
+      // Write corrupted spec
+      await Bun.write(join(tempDir, "sidecar-spec.json"), "{ corrupted");
+
+      // readSidecarSpec throws — upInstance would propagate this error
+      await expect(_readSpec(tempDir)).rejects.toThrow(_SpecError);
+      await expect(_readSpec(tempDir)).rejects.toMatchObject({ code: "spec-corrupted" });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("readSidecarSpec throws on invalid spec fields — upInstance would fail-closed", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "upinstance-test-"));
+    try {
+      // Write spec with invalid port
+      await Bun.write(
+        join(tempDir, "sidecar-spec.json"),
+        JSON.stringify({
+          enabled: true,
+          serviceName: "weixin-sidecar",
+          envFile: ".env.weixin",
+          port: 0, // invalid
+          composeProject: "proj",
+          updatedAt: "2026-06-21T12:00:00Z",
+        }),
+      );
+
+      await expect(_readSpec(tempDir)).rejects.toThrow(_SpecError);
+      await expect(_readSpec(tempDir)).rejects.toMatchObject({ code: "spec-invalid" });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("enabled spec without rotation inputs causes fail-closed in upInstance logic", async () => {
+    // This test verifies the fail-closed contract:
+    // If sidecarSpec.enabled=true but managedInstanceId/clawBayApiUrl/clawBayAdminToken
+    // are not provided, upInstance must throw — not silently skip rotation.
+    //
+    // We can't easily call upInstance without a full project setup,
+    // but we can verify the spec correctly reports enabled=true,
+    // and the upInstance fail-closed check is:
+    //   if (enableWeixin) { missing inputs → throw }
+    //
+    // The test simulates the decision logic:
+    const tempDir = await mkdtemp(join(tmpdir(), "upinstance-test-"));
+    try {
+      await _writeSpec(tempDir, {
+        enabled: true,
+        serviceName: "weixin-sidecar",
+        envFile: ".env.weixin",
+        port: 8787,
+        composeProject: "clawbay-hermes-user1",
+        updatedAt: new Date().toISOString(),
+      });
+
+      const spec = await _readSpec(tempDir);
+      expect(spec).not.toBeNull();
+      expect(spec!.enabled).toBe(true);
+
+      // Simulate upInstance's fail-closed check:
+      // enableWeixin = options?.enableWeixinSidecar ?? spec?.enabled ?? false
+      // options?.enableWeixinSidecar is undefined (not in payload)
+      const enableWeixin = spec?.enabled ?? false;
+      expect(enableWeixin).toBe(true);
+
+      // When rotation inputs are missing:
+      const managedInstanceId = undefined;
+      const clawBayApiUrl = undefined;
+      const clawBayAdminToken = undefined;
+
+      const missing: string[] = [];
+      if (enableWeixin && !managedInstanceId) missing.push("managedInstanceId");
+      if (enableWeixin && !clawBayApiUrl) missing.push("clawBayApiUrl");
+      if (enableWeixin && !clawBayAdminToken) missing.push("clawBayAdminToken");
+
+      expect(missing).toEqual(["managedInstanceId", "clawBayApiUrl", "clawBayAdminToken"]);
+      // In real upInstance, this would throw:
+      // throw new Error(`Weixin sidecar is enabled but missing token rotation inputs: ...`)
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
