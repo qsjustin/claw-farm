@@ -922,6 +922,7 @@ async function bridgeInstanceExport(payload: Record<string, unknown>): Promise<B
       ? payload.excludedPaths.filter((item): item is string => typeof item === "string")
       : undefined,
     bundleFormat: asString(payload.bundleFormat) ?? undefined,
+    backupId: asString(payload.backupId) ?? undefined,
   });
 
   return bridgeSuccess({

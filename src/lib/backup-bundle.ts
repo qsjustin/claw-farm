@@ -49,6 +49,7 @@ export interface ExportBundleOptions {
   excludedPaths?: string[];
   bundleFormat?: string;
   instanceId?: string;
+  backupId?: string;
 }
 
 export interface ExportBundleResult {
@@ -283,7 +284,7 @@ export async function exportInstanceBundle(options: ExportBundleOptions): Promis
   );
   const includedPaths = normalizeIncludedPaths(options.includedPaths);
   const excludedPaths = normalizeExcludedPaths(options.excludedPaths);
-  const backupId = `bkp_${Date.now()}_${randomUUID().slice(0, 8)}`;
+  const backupId = options.backupId ?? `bkp_${Date.now()}_${randomUUID().slice(0, 8)}`;
   const exportDir = join(options.exportRoot, backupId);
   const stageRoot = join(exportDir, "stage");
 
