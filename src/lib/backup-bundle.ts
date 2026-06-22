@@ -11,7 +11,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { getRuntime } from "../runtimes/index.ts";
 import type { RuntimeType } from "../runtimes/interface.ts";
 import { dirExists, fileExists } from "./fs-utils.ts";
@@ -270,6 +270,40 @@ async function extractArchive(bundlePath: string, extractRoot: string): Promise<
   ]);
 }
 
+/**
+ * Validate that a backupId is canonical and safe.
+ * Rejects path traversal, absolute paths, dot segments, control chars,
+ * and IDs that don't match the expected pattern.
+ *
+ * Canonical pattern: bkp_[A-Za-z0-9_-]{1,120}
+ * This matches ClawBay's bkp_<base36-timestamp> and bkp_<timestamp> formats.
+ */
+function validateBackupId(backupId: string): void {
+  if (!backupId || typeof backupId !== "string") {
+    throw new Error("backupId must be a non-empty string.");
+  }
+  // Reject path separators
+  if (backupId.includes("/") || backupId.includes("\\")) {
+    throw new Error(`backupId must not contain path separators: ${backupId}`);
+  }
+  // Reject absolute paths
+  if (backupId.startsWith("/") || backupId.startsWith("\\")) {
+    throw new Error(`backupId must not be an absolute path: ${backupId}`);
+  }
+  // Reject dot segments
+  if (backupId === "." || backupId === ".." || backupId.includes("..")) {
+    throw new Error(`backupId must not contain dot segments: ${backupId}`);
+  }
+  // Reject control characters
+  if (/[\x00-\x1f\x7f]/.test(backupId)) {
+    throw new Error(`backupId must not contain control characters: ${backupId}`);
+  }
+  // Enforce canonical pattern
+  if (!/^bkp_[A-Za-z0-9_-]{1,120}$/.test(backupId)) {
+    throw new Error(`backupId format invalid (expected bpk_<alphanumeric>): ${backupId}`);
+  }
+}
+
 export async function exportInstanceBundle(options: ExportBundleOptions): Promise<ExportBundleResult> {
   if ((options.bundleFormat ?? BUNDLE_FORMAT) !== BUNDLE_FORMAT) {
     throw new Error(`Unsupported bundleFormat: "${options.bundleFormat}"`);
@@ -285,7 +319,15 @@ export async function exportInstanceBundle(options: ExportBundleOptions): Promis
   const includedPaths = normalizeIncludedPaths(options.includedPaths);
   const excludedPaths = normalizeExcludedPaths(options.excludedPaths);
   const backupId = options.backupId ?? `bkp_${Date.now()}_${randomUUID().slice(0, 8)}`;
+  // Validate backupId to prevent path traversal
+  validateBackupId(backupId);
+  // Verify resolved exportDir is still under exportRoot
   const exportDir = join(options.exportRoot, backupId);
+  const resolvedExportDir = resolve(exportDir);
+  const resolvedExportRoot = resolve(options.exportRoot);
+  if (!resolvedExportDir.startsWith(resolvedExportRoot + sep) && resolvedExportDir !== resolvedExportRoot) {
+    throw new Error(`backupId escapes exportRoot: ${backupId}`);
+  }
   const stageRoot = join(exportDir, "stage");
 
   await mkdir(stageRoot, { recursive: true });
