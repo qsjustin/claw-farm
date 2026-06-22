@@ -125,6 +125,139 @@ describe("backup bundle", () => {
     expect(await readFile(join(targetLayout.skillsDir, "skill.md"), "utf8")).toBe("# skill\n");
   });
 
+  it("accepts valid external backupId from manual-backup", async () => {
+    await seedWorkspace(tmp, "alice");
+    const exportRoot = join(tmp, "exports");
+
+    const result = await exportInstanceBundle({
+      projectDir: tmp,
+      projectName: "demo",
+      userId: "alice",
+      runtimeType: "openclaw",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "bkp_test123",
+    });
+
+    // backupId should appear in the export path
+    expect(result.bundlePath).toContain("bkp_test123");
+
+    // manifest should contain the same backupId
+    const manifest = JSON.parse(await readFile(result.manifestPath, "utf8")) as { backupId: string };
+    expect(manifest.backupId).toBe("bkp_test123");
+  });
+
+  it("rejects backupId with path traversal", async () => {
+    await seedWorkspace(tmp, "alice");
+    const exportRoot = join(tmp, "exports");
+
+    await expect(exportInstanceBundle({
+      projectDir: tmp,
+      projectName: "demo",
+      userId: "alice",
+      runtimeType: "openclaw",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "../../etc/passwd",
+    })).rejects.toThrow("path separators");
+  });
+
+  it("rejects backupId with absolute path", async () => {
+    await seedWorkspace(tmp, "alice");
+    const exportRoot = join(tmp, "exports");
+
+    await expect(exportInstanceBundle({
+      projectDir: tmp,
+      projectName: "demo",
+      userId: "alice",
+      runtimeType: "openclaw",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "/etc/shadow",
+    })).rejects.toThrow("path separators");
+  });
+
+  it("rejects backupId with dot segments", async () => {
+    await seedWorkspace(tmp, "alice");
+    const exportRoot = join(tmp, "exports");
+
+    await expect(exportInstanceBundle({
+      projectDir: tmp,
+      projectName: "demo",
+      userId: "alice",
+      runtimeType: "openclaw",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "../foo",
+    })).rejects.toThrow("path separators");
+  });
+
+  it("rejects backupId with control characters", async () => {
+    await seedWorkspace(tmp, "alice");
+    const exportRoot = join(tmp, "exports");
+
+    await expect(exportInstanceBundle({
+      projectDir: tmp,
+      projectName: "demo",
+      userId: "alice",
+      runtimeType: "openclaw",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "bkp_test\x00evil",
+    })).rejects.toThrow("control characters");
+  });
+
+  it("rejects backupId that doesn't match canonical pattern", async () => {
+    await seedWorkspace(tmp, "alice");
+    const exportRoot = join(tmp, "exports");
+
+    await expect(exportInstanceBundle({
+      projectDir: tmp,
+      projectName: "demo",
+      userId: "alice",
+      runtimeType: "openclaw",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "not-bkp-format",
+    })).rejects.toThrow("format invalid");
+  });
+
+  it("rejects overlong backupId", async () => {
+    await seedWorkspace(tmp, "alice");
+    const exportRoot = join(tmp, "exports");
+
+    await expect(exportInstanceBundle({
+      projectDir: tmp,
+      projectName: "demo",
+      userId: "alice",
+      runtimeType: "openclaw",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "bkp_" + "a".repeat(200),
+    })).rejects.toThrow("format invalid");
+  });
+
+  it("works without external backupId (uses internal safe ID)", async () => {
+    await seedWorkspace(tmp, "alice");
+    const exportRoot = join(tmp, "exports");
+
+    // No backupId provided — should use internally generated safe ID
+    const result = await exportInstanceBundle({
+      projectDir: tmp,
+      projectName: "demo",
+      userId: "alice",
+      runtimeType: "openclaw",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+    });
+
+    expect(result.bundlePath.endsWith("instance.tar.zst")).toBe(true);
+
+    // manifest should contain a valid backupId
+    const manifest = JSON.parse(await readFile(result.manifestPath, "utf8")) as { backupId: string };
+    expect(manifest.backupId).toMatch(/^bkp_[A-Za-z0-9_-]+$/);
+  });
+
   it("rejects cross-runtime imports", async () => {
     await seedWorkspace(tmp, "alice", "openclaw");
     const exportRoot = join(tmp, "exports");

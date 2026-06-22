@@ -319,14 +319,18 @@ export async function exportInstanceBundle(options: ExportBundleOptions): Promis
   const includedPaths = normalizeIncludedPaths(options.includedPaths);
   const excludedPaths = normalizeExcludedPaths(options.excludedPaths);
   const backupId = options.backupId ?? `bkp_${Date.now()}_${randomUUID().slice(0, 8)}`;
-  // Validate backupId to prevent path traversal
-  validateBackupId(backupId);
-  // Verify resolved exportDir is still under exportRoot
+  // Validate externally-provided backupId to prevent path traversal.
+  // Only manual-backup passes an external backupId from ClawBay.
+  // Upgrade-migration/reset use internally-generated safe IDs.
   const exportDir = join(options.exportRoot, backupId);
-  const resolvedExportDir = resolve(exportDir);
-  const resolvedExportRoot = resolve(options.exportRoot);
-  if (!resolvedExportDir.startsWith(resolvedExportRoot + sep) && resolvedExportDir !== resolvedExportRoot) {
-    throw new Error(`backupId escapes exportRoot: ${backupId}`);
+  if (options.backupId) {
+    validateBackupId(backupId);
+    // Verify resolved exportDir is still under exportRoot
+    const resolvedExportDir = resolve(exportDir);
+    const resolvedExportRoot = resolve(options.exportRoot);
+    if (!resolvedExportDir.startsWith(resolvedExportRoot + sep) && resolvedExportDir !== resolvedExportRoot) {
+      throw new Error(`backupId escapes exportRoot: ${backupId}`);
+    }
   }
   const stageRoot = join(exportDir, "stage");
 
