@@ -129,8 +129,6 @@ describe("bridge dispatch: instance.export through dispatch()", () => {
 
     expect(output.ok).toBe(false);
     if (!output.ok) {
-      // Error from producer propagates through dispatch as unknown
-      // (toBridgeFailure doesn't match backupId validation patterns)
       expect(output.error).toContain("backupId");
     }
   });
