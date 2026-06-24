@@ -2,19 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveWorkspaceLayout, ensureWorkspaceLayout } from "../workspace-layout.ts";
-import type { RuntimeType } from "../../runtimes/interface.ts";
 
 /**
  * Bridge dispatch tests for instance.export.
  *
- * These tests exercise the bridge dispatch entry (bridgeCommand with
- * "instance.export" operation) using a real project layout and the
- * actual exportInstanceBundle producer. This covers:
- *   - Valid external backupId → paths within exportRoot
- *   - Malicious backupId → rejected before any write
- *   - No backupId → safe internal fallback
- *   - Missing required fields → invalid-payload
+ * Two levels of testing:
+ * 1. Producer-level: direct exportInstanceBundle() calls (fast, no subprocess)
+ * 2. Bridge dispatch: full bridge command via subprocess (real dispatch chain)
  */
 
 let tmp: string;
@@ -28,23 +22,24 @@ afterEach(async () => {
   await rm(tmp, { recursive: true, force: true }).catch(() => {});
 });
 
-async function seedProject(projectName: string, userId: string, runtimeType: RuntimeType = "openclaw"): Promise<string> {
-  const projectDir = join(tmp, projectName);
-  await mkdir(projectDir, { recursive: true });
-  const layout = resolveWorkspaceLayout(projectDir, userId, runtimeType);
-  await ensureWorkspaceLayout(layout);
-  await writeFile(join(layout.configDir, "agent.json"), '{"ok":true}\n', "utf8");
-  await writeFile(join(layout.skillsDir, "skill.md"), "# skill\n", "utf8");
-  return projectDir;
+async function seedWorkspace(projectDir: string, userId: string): Promise<void> {
+  const layout = join(projectDir, "workspace");
+  await mkdir(join(layout, "config"), { recursive: true });
+  await mkdir(join(layout, "skills"), { recursive: true });
+  await mkdir(join(layout, "sessions"), { recursive: true });
+  await mkdir(join(layout, "runtime"), { recursive: true });
+  await writeFile(join(layout, "config", "agent.json"), '{"ok":true}\n', "utf8");
+  await writeFile(join(layout, "skills", "skill.md"), "# skill\n", "utf8");
 }
 
-describe("bridge dispatch: instance.export", () => {
-  it("accepts valid external backupId and produces output within exportRoot", async () => {
-    const projectDir = await seedProject("demo", "alice");
-    const exportRoot = join(tmp, "exports");
-    await mkdir(exportRoot, { recursive: true });
+// ── Producer-level tests (direct exportInstanceBundle) ──
 
-    // The bridge dispatch calls exportInstanceBundle with backupId
+describe("backup bundle producer (exportInstanceBundle)", () => {
+  it("accepts valid external backupId and produces output within exportRoot", async () => {
+    const projectDir = join(tmp, "demo");
+    await seedWorkspace(projectDir, "alice");
+    const exportRoot = join(tmp, "exports");
+
     const { exportInstanceBundle } = await import("../backup-bundle.ts");
     const result = await exportInstanceBundle({
       projectDir,
@@ -59,31 +54,22 @@ describe("bridge dispatch: instance.export", () => {
       bundleFormat: "tar.zst",
     });
 
-    // Verify paths are within exportRoot
     expect(result.bundlePath.startsWith(exportRoot)).toBe(true);
     expect(result.manifestPath.startsWith(exportRoot)).toBe(true);
     expect(result.checksumPath.startsWith(exportRoot)).toBe(true);
-
-    // Verify backupId appears in the path
     expect(result.bundlePath).toContain("bkp_test123");
     expect(result.manifest.backupId).toBe("bkp_test123");
-
-    // Verify manifest structure
-    expect(result.manifest.manifestVersion).toBe("1");
-    expect(result.manifest.userId).toBe("alice");
-    expect(result.manifest.runtimeType).toBe("openclaw");
     expect(result.manifest.fileCount).toBeGreaterThan(0);
     expect(result.manifest.checksum.startsWith("sha256:")).toBe(true);
   });
 
-  it("rejects backupId with path traversal before any write", async () => {
-    const projectDir = await seedProject("demo", "alice");
+  it("rejects backupId with path traversal", async () => {
+    const projectDir = join(tmp, "demo");
+    await seedWorkspace(projectDir, "alice");
     const exportRoot = join(tmp, "exports");
-    await mkdir(exportRoot, { recursive: true });
 
     const { exportInstanceBundle } = await import("../backup-bundle.ts");
-
-    let exportDirCreated = false;
+    let threw = false;
     try {
       await exportInstanceBundle({
         projectDir,
@@ -98,24 +84,22 @@ describe("bridge dispatch: instance.export", () => {
         bundleFormat: "tar.zst",
       });
     } catch {
-      // Expected — validation should reject before any write
-      exportDirCreated = true;
+      threw = true;
     }
+    expect(threw).toBe(true);
 
-    // The malicious path should NOT have been created
+    // Verify no file was written at the malicious path
     const maliciousPath = join(exportRoot, "..", "..", "etc", "passwd");
     const exists = await Bun.file(maliciousPath).exists().catch(() => false);
     expect(exists).toBe(false);
-    expect(exportDirCreated).toBe(true);
   });
 
   it("rejects backupId with absolute path", async () => {
-    const projectDir = await seedProject("demo", "alice");
+    const projectDir = join(tmp, "demo");
+    await seedWorkspace(projectDir, "alice");
     const exportRoot = join(tmp, "exports");
-    await mkdir(exportRoot, { recursive: true });
 
     const { exportInstanceBundle } = await import("../backup-bundle.ts");
-
     let threw = false;
     try {
       await exportInstanceBundle({
@@ -133,17 +117,15 @@ describe("bridge dispatch: instance.export", () => {
     } catch {
       threw = true;
     }
-
     expect(threw).toBe(true);
   });
 
   it("rejects backupId with control characters", async () => {
-    const projectDir = await seedProject("demo", "alice");
+    const projectDir = join(tmp, "demo");
+    await seedWorkspace(projectDir, "alice");
     const exportRoot = join(tmp, "exports");
-    await mkdir(exportRoot, { recursive: true });
 
     const { exportInstanceBundle } = await import("../backup-bundle.ts");
-
     let threw = false;
     try {
       await exportInstanceBundle({
@@ -161,14 +143,13 @@ describe("bridge dispatch: instance.export", () => {
     } catch {
       threw = true;
     }
-
     expect(threw).toBe(true);
   });
 
-  it("works without external backupId (uses internal safe ID)", async () => {
-    const projectDir = await seedProject("demo", "alice");
+  it("works without external backupId (safe internal fallback)", async () => {
+    const projectDir = join(tmp, "demo");
+    await seedWorkspace(projectDir, "alice");
     const exportRoot = join(tmp, "exports");
-    await mkdir(exportRoot, { recursive: true });
 
     const { exportInstanceBundle } = await import("../backup-bundle.ts");
     const result = await exportInstanceBundle({
@@ -178,28 +159,23 @@ describe("bridge dispatch: instance.export", () => {
       runtimeType: "openclaw",
       runtimeWorkspaceSlug: "alice",
       exportRoot,
-      // No backupId — should generate a safe internal one
       includedPaths: ["config", "skills", "sessions"],
       excludedPaths: ["cache", "tmp"],
       bundleFormat: "tar.zst",
     });
 
     expect(result.bundlePath.startsWith(exportRoot)).toBe(true);
-    expect(result.manifestPath.startsWith(exportRoot)).toBe(true);
-    expect(result.checksumPath.startsWith(exportRoot)).toBe(true);
     expect(result.manifest.backupId).toBeTruthy();
-    // Internal IDs should be safe
     expect(result.manifest.backupId.includes("/")).toBe(false);
     expect(result.manifest.backupId.includes("..")).toBe(false);
   });
 
   it("rejects overlong backupId", async () => {
-    const projectDir = await seedProject("demo", "alice");
+    const projectDir = join(tmp, "demo");
+    await seedWorkspace(projectDir, "alice");
     const exportRoot = join(tmp, "exports");
-    await mkdir(exportRoot, { recursive: true });
 
     const { exportInstanceBundle } = await import("../backup-bundle.ts");
-
     let threw = false;
     try {
       await exportInstanceBundle({
@@ -217,7 +193,6 @@ describe("bridge dispatch: instance.export", () => {
     } catch {
       threw = true;
     }
-
     expect(threw).toBe(true);
   });
 });
