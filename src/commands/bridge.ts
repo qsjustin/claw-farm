@@ -1121,7 +1121,7 @@ async function bridgeAgentUpdateConfig(payload: Record<string, unknown>): Promis
   });
 }
 
-async function dispatch(operation: string, payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
+export async function dispatch(operation: string, payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
   if (!INSTANCE_OPERATIONS.has(operation)) {
     return bridgeFailure({
       action: operation,

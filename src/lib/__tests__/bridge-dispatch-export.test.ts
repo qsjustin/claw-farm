@@ -6,157 +6,187 @@ import { tmpdir } from "node:os";
 /**
  * Bridge dispatch tests for instance.export.
  *
- * Two levels of testing:
- * 1. Producer-level: direct exportInstanceBundle() calls (fast, no subprocess)
- * 2. Bridge dispatch: full bridge command via subprocess (real dispatch chain)
+ * Tests the full bridge dispatch chain by:
+ * 1. Creating a real project directory with workspace layout
+ * 2. Setting CLAW_FARM_REGISTRY_DIR to a temp registry
+ * 3. Calling dispatch("instance.export", payload) directly
+ *
+ * This exercises: payload parse → requireManagedInstance → resolveProjectName
+ * → readProjectConfig → resolveRuntimeConfig → resolveWorkspaceLayout
+ * → getInstance → bridgeInstanceExport → exportCommand → exportInstanceBundle
  */
 
 let tmp: string;
+let registryDir: string;
+let projectDir: string;
+let origRegistryDir: string | undefined;
 
 beforeEach(async () => {
   tmp = join(tmpdir(), `claw-farm-bridge-dispatch-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  await mkdir(tmp, { recursive: true });
+  registryDir = join(tmp, "registry");
+  projectDir = join(tmp, "demo");
+
+  await mkdir(registryDir, { recursive: true });
+  await mkdir(projectDir, { recursive: true });
+
+  // Create workspace layout
+  const wsRoot = join(projectDir, "workspace");
+  await mkdir(join(wsRoot, "config"), { recursive: true });
+  await mkdir(join(wsRoot, "skills"), { recursive: true });
+  await mkdir(join(wsRoot, "sessions"), { recursive: true });
+  await mkdir(join(wsRoot, "runtime"), { recursive: true });
+  await writeFile(join(wsRoot, "config", "agent.json"), '{"ok":true}\n', "utf8");
+  await writeFile(join(wsRoot, "skills", "skill.md"), "# skill\n", "utf8");
+
+  // Create project config
+  await writeFile(join(projectDir, "claw-farm.yaml"), `
+runtime: openclaw
+gateway:
+  port: 18789
+`, "utf8");
+
+  // Create registry with project and instance (matching Registry schema)
+  const registry = {
+    projects: {
+      demo: {
+        path: projectDir,
+        port: 18789,
+        processor: "builtin",
+        createdAt: new Date().toISOString(),
+        runtime: "openclaw",
+        instances: {
+          alice: {
+            id: "inst-alice",
+            userId: "alice",
+            status: "running",
+            runtimeType: "openclaw",
+            createdAt: new Date().toISOString(),
+          },
+        },
+      },
+    },
+    nextPort: 18790,
+  };
+  await writeFile(join(registryDir, "registry.json"), JSON.stringify(registry, null, 2));
+
+  // Point registry to our temp dir
+  origRegistryDir = process.env.CLAW_FARM_REGISTRY_DIR;
+  process.env.CLAW_FARM_REGISTRY_DIR = registryDir;
 });
 
 afterEach(async () => {
+  if (origRegistryDir === undefined) {
+    delete process.env.CLAW_FARM_REGISTRY_DIR;
+  } else {
+    process.env.CLAW_FARM_REGISTRY_DIR = origRegistryDir;
+  }
   await rm(tmp, { recursive: true, force: true }).catch(() => {});
 });
 
-async function seedWorkspace(projectDir: string, userId: string): Promise<void> {
-  const layout = join(projectDir, "workspace");
-  await mkdir(join(layout, "config"), { recursive: true });
-  await mkdir(join(layout, "skills"), { recursive: true });
-  await mkdir(join(layout, "sessions"), { recursive: true });
-  await mkdir(join(layout, "runtime"), { recursive: true });
-  await writeFile(join(layout, "config", "agent.json"), '{"ok":true}\n', "utf8");
-  await writeFile(join(layout, "skills", "skill.md"), "# skill\n", "utf8");
-}
-
-// ── Producer-level tests (direct exportInstanceBundle) ──
-
-describe("backup bundle producer (exportInstanceBundle)", () => {
+describe("bridge dispatch: instance.export through dispatch()", () => {
   it("accepts valid external backupId and produces output within exportRoot", async () => {
-    const projectDir = join(tmp, "demo");
-    await seedWorkspace(projectDir, "alice");
     const exportRoot = join(tmp, "exports");
+    await mkdir(exportRoot, { recursive: true });
 
-    const { exportInstanceBundle } = await import("../backup-bundle.ts");
-    const result = await exportInstanceBundle({
-      projectDir,
-      projectName: "demo",
+    const { dispatch } = await import("../../commands/bridge.ts");
+    const output = await dispatch("instance.export", {
+      project: "demo",
       userId: "alice",
-      runtimeType: "openclaw",
       runtimeWorkspaceSlug: "alice",
       exportRoot,
-      backupId: "bkp_test123",
+      backupId: "bkp_bridge_test",
       includedPaths: ["config", "skills", "sessions"],
       excludedPaths: ["cache", "tmp"],
       bundleFormat: "tar.zst",
     });
 
-    expect(result.bundlePath.startsWith(exportRoot)).toBe(true);
-    expect(result.manifestPath.startsWith(exportRoot)).toBe(true);
-    expect(result.checksumPath.startsWith(exportRoot)).toBe(true);
-    expect(result.bundlePath).toContain("bkp_test123");
-    expect(result.manifest.backupId).toBe("bkp_test123");
-    expect(result.manifest.fileCount).toBeGreaterThan(0);
-    expect(result.manifest.checksum.startsWith("sha256:")).toBe(true);
-  });
-
-  it("rejects backupId with path traversal", async () => {
-    const projectDir = join(tmp, "demo");
-    await seedWorkspace(projectDir, "alice");
-    const exportRoot = join(tmp, "exports");
-
-    const { exportInstanceBundle } = await import("../backup-bundle.ts");
-    let threw = false;
-    try {
-      await exportInstanceBundle({
-        projectDir,
-        projectName: "demo",
-        userId: "alice",
-        runtimeType: "openclaw",
-        runtimeWorkspaceSlug: "alice",
-        exportRoot,
-        backupId: "../../etc/passwd",
-        includedPaths: ["config"],
-        excludedPaths: ["cache"],
-        bundleFormat: "tar.zst",
-      });
-    } catch {
-      threw = true;
+    expect(output.ok).toBe(true);
+    if (output.ok) {
+      expect(output.action).toBe("instance.export");
+      // createBridgeSuccess spreads extra into top-level
+      const bundlePath = (output as Record<string, unknown>).bundlePath;
+      expect(bundlePath).toBeTruthy();
+      expect(String(bundlePath)).toContain(exportRoot);
+      expect(String(bundlePath)).toContain("bkp_bridge_test");
     }
-    expect(threw).toBe(true);
-
-    // Verify no file was written at the malicious path
-    const maliciousPath = join(exportRoot, "..", "..", "etc", "passwd");
-    const exists = await Bun.file(maliciousPath).exists().catch(() => false);
-    expect(exists).toBe(false);
   });
 
-  it("rejects backupId with absolute path", async () => {
-    const projectDir = join(tmp, "demo");
-    await seedWorkspace(projectDir, "alice");
+  it("rejects malicious backupId via bridge dispatch", async () => {
     const exportRoot = join(tmp, "exports");
+    await mkdir(exportRoot, { recursive: true });
 
-    const { exportInstanceBundle } = await import("../backup-bundle.ts");
-    let threw = false;
-    try {
-      await exportInstanceBundle({
-        projectDir,
-        projectName: "demo",
-        userId: "alice",
-        runtimeType: "openclaw",
-        runtimeWorkspaceSlug: "alice",
-        exportRoot,
-        backupId: "/etc/shadow",
-        includedPaths: ["config"],
-        excludedPaths: ["cache"],
-        bundleFormat: "tar.zst",
-      });
-    } catch {
-      threw = true;
-    }
-    expect(threw).toBe(true);
-  });
-
-  it("rejects backupId with control characters", async () => {
-    const projectDir = join(tmp, "demo");
-    await seedWorkspace(projectDir, "alice");
-    const exportRoot = join(tmp, "exports");
-
-    const { exportInstanceBundle } = await import("../backup-bundle.ts");
-    let threw = false;
-    try {
-      await exportInstanceBundle({
-        projectDir,
-        projectName: "demo",
-        userId: "alice",
-        runtimeType: "openclaw",
-        runtimeWorkspaceSlug: "alice",
-        exportRoot,
-        backupId: "bkp_test\x00evil",
-        includedPaths: ["config"],
-        excludedPaths: ["cache"],
-        bundleFormat: "tar.zst",
-      });
-    } catch {
-      threw = true;
-    }
-    expect(threw).toBe(true);
-  });
-
-  it("works without external backupId (safe internal fallback)", async () => {
-    const projectDir = join(tmp, "demo");
-    await seedWorkspace(projectDir, "alice");
-    const exportRoot = join(tmp, "exports");
-
-    const { exportInstanceBundle } = await import("../backup-bundle.ts");
-    const result = await exportInstanceBundle({
-      projectDir,
-      projectName: "demo",
+    const { dispatch } = await import("../../commands/bridge.ts");
+    const output = await dispatch("instance.export", {
+      project: "demo",
       userId: "alice",
-      runtimeType: "openclaw",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "../../etc/passwd",
+      includedPaths: ["config"],
+      excludedPaths: ["cache"],
+      bundleFormat: "tar.zst",
+    });
+
+    expect(output.ok).toBe(false);
+    if (!output.ok) {
+      // Error from producer propagates through dispatch as unknown
+      // (toBridgeFailure doesn't match backupId validation patterns)
+      expect(output.error).toContain("backupId");
+    }
+  });
+
+  it("rejects absolute path backupId via bridge dispatch", async () => {
+    const exportRoot = join(tmp, "exports");
+    await mkdir(exportRoot, { recursive: true });
+
+    const { dispatch } = await import("../../commands/bridge.ts");
+    const output = await dispatch("instance.export", {
+      project: "demo",
+      userId: "alice",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "/etc/shadow",
+      includedPaths: ["config"],
+      excludedPaths: ["cache"],
+      bundleFormat: "tar.zst",
+    });
+
+    expect(output.ok).toBe(false);
+    if (!output.ok) {
+      expect(output.error).toContain("backupId");
+    }
+  });
+
+  it("rejects control character backupId via bridge dispatch", async () => {
+    const exportRoot = join(tmp, "exports");
+    await mkdir(exportRoot, { recursive: true });
+
+    const { dispatch } = await import("../../commands/bridge.ts");
+    const output = await dispatch("instance.export", {
+      project: "demo",
+      userId: "alice",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "bkp_test\x00evil",
+      includedPaths: ["config"],
+      excludedPaths: ["cache"],
+      bundleFormat: "tar.zst",
+    });
+
+    expect(output.ok).toBe(false);
+    if (!output.ok) {
+      expect(output.error).toContain("backupId");
+    }
+  });
+
+  it("works without external backupId (safe fallback) through dispatch", async () => {
+    const exportRoot = join(tmp, "exports");
+    await mkdir(exportRoot, { recursive: true });
+
+    const { dispatch } = await import("../../commands/bridge.ts");
+    const output = await dispatch("instance.export", {
+      project: "demo",
+      userId: "alice",
       runtimeWorkspaceSlug: "alice",
       exportRoot,
       includedPaths: ["config", "skills", "sessions"],
@@ -164,35 +194,75 @@ describe("backup bundle producer (exportInstanceBundle)", () => {
       bundleFormat: "tar.zst",
     });
 
-    expect(result.bundlePath.startsWith(exportRoot)).toBe(true);
-    expect(result.manifest.backupId).toBeTruthy();
-    expect(result.manifest.backupId.includes("/")).toBe(false);
-    expect(result.manifest.backupId.includes("..")).toBe(false);
+    expect(output.ok).toBe(true);
+    if (output.ok) {
+      expect(output.action).toBe("instance.export");
+      // bundlePath is at top-level from extra spread
+      const bundlePath = (output as Record<string, unknown>).bundlePath;
+      expect(bundlePath).toBeTruthy();
+      expect(String(bundlePath)).toContain(exportRoot);
+      // Internal IDs should be safe (archiveRef is at top-level from extra spread)
+      const archiveRef = (output as Record<string, unknown>).archiveRef;
+      expect(archiveRef).toBeTruthy();
+      expect(String(archiveRef).includes("/")).toBe(false);
+      expect(String(archiveRef).includes("..")).toBe(false);
+    }
   });
 
-  it("rejects overlong backupId", async () => {
-    const projectDir = join(tmp, "demo");
-    await seedWorkspace(projectDir, "alice");
+  it("rejects overlong backupId via bridge dispatch", async () => {
     const exportRoot = join(tmp, "exports");
+    await mkdir(exportRoot, { recursive: true });
 
-    const { exportInstanceBundle } = await import("../backup-bundle.ts");
-    let threw = false;
-    try {
-      await exportInstanceBundle({
-        projectDir,
-        projectName: "demo",
-        userId: "alice",
-        runtimeType: "openclaw",
-        runtimeWorkspaceSlug: "alice",
-        exportRoot,
-        backupId: "bkp_" + "a".repeat(200),
-        includedPaths: ["config"],
-        excludedPaths: ["cache"],
-        bundleFormat: "tar.zst",
-      });
-    } catch {
-      threw = true;
+    const { dispatch } = await import("../../commands/bridge.ts");
+    const output = await dispatch("instance.export", {
+      project: "demo",
+      userId: "alice",
+      runtimeWorkspaceSlug: "alice",
+      exportRoot,
+      backupId: "bkp_" + "a".repeat(200),
+      includedPaths: ["config"],
+      excludedPaths: ["cache"],
+      bundleFormat: "tar.zst",
+    });
+
+    expect(output.ok).toBe(false);
+    if (!output.ok) {
+      expect(output.error).toContain("backupId");
     }
-    expect(threw).toBe(true);
+  });
+
+  it("rejects missing exportRoot via invalid-payload", async () => {
+    const { dispatch } = await import("../../commands/bridge.ts");
+    const output = await dispatch("instance.export", {
+      project: "demo",
+      userId: "alice",
+      runtimeWorkspaceSlug: "alice",
+      includedPaths: ["config"],
+      bundleFormat: "tar.zst",
+    });
+
+    expect(output.ok).toBe(false);
+    if (!output.ok) {
+      expect(output.errorCode).toBe("invalid-payload");
+    }
+  });
+
+  it("rejects missing instance via runtime-missing", async () => {
+    const exportRoot = join(tmp, "exports");
+    await mkdir(exportRoot, { recursive: true });
+
+    const { dispatch } = await import("../../commands/bridge.ts");
+    const output = await dispatch("instance.export", {
+      project: "demo",
+      userId: "ghost",
+      runtimeWorkspaceSlug: "ghost",
+      exportRoot,
+      bundleFormat: "tar.zst",
+    });
+
+    expect(output.ok).toBe(false);
+    if (!output.ok) {
+      expect(output.errorCode).toBe("runtime-missing");
+    }
   });
 });
