@@ -492,7 +492,7 @@ async function syncHermesConfigYaml(
   await Bun.write(configYamlPath, content);
 }
 
-async function writeInstanceCompose(options: {
+export async function writeInstanceCompose(options: {
   projectName: string;
   userId: string;
   port: number;

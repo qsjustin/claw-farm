@@ -1,11 +1,9 @@
 import { join } from "node:path";
 import { mkdir, rm } from "node:fs/promises";
-import { writeFile } from "node:fs/promises";
-import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl } from "../lib/api.ts";
+import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose } from "../lib/api.ts";
 import { runComposeService } from "../lib/compose.ts";
-import { readSidecarSpec, writeSidecarSpec } from "../lib/sidecar-spec.ts";
+import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec } from "../lib/sidecar-spec.ts";
 import { resolveSidecarAttachPoint, ensureSidecarAttachPoint } from "../lib/sidecar-attach.ts";
-import { buildInstanceCompose } from "../templates/docker-compose.instance.yml.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { exportCommand } from "./export.ts";
 import { importCommand } from "./import.ts";
@@ -950,7 +948,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   // Read existing sidecar spec (may be absent for first attach)
   const spec = await readSidecarSpec(instDir);
 
-  // Stale replay guard: if already attached with same or newer version, fail-closed
+  // Stale replay guard: if already attached, fail-closed
   if (spec && spec.enabled) {
     return bridgeFailure({
       action: "sidecar.attach",
@@ -960,10 +958,17 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
-  // Derive compose project from instance layout (caller must not pass this)
-  const composeProject = context.resolved.name;
+  // Ensure attach point directories exist
+  const attachPoint = resolveSidecarAttachPoint({
+    workspaceRoot: context.layout.workspaceRoot,
+    runtimeWorkspaceSlug: userId,
+    providerCode: "weixin",
+    runtimeType: context.runtimeType,
+  });
+  await ensureSidecarAttachPoint(attachPoint);
 
-  // Write target-version enabled spec
+  // Write versioned enabled spec BEFORE compose so rollback is possible
+  const composeProject = context.resolved.name;
   const newSpec = {
     schemaVersion: 1,
     enabled: true,
@@ -975,25 +980,30 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   };
   await writeSidecarSpec(instDir, newSpec);
 
-  // Ensure attach point directories exist
-  const attachPoint = resolveSidecarAttachPoint({
-    workspaceRoot: context.layout.workspaceRoot,
-    runtimeWorkspaceSlug: userId,
-    providerCode: "weixin",
-    runtimeType: context.runtimeType,
-  });
-  await ensureSidecarAttachPoint(attachPoint);
-
-  // Rebuild compose with sidecar service
-  const composeContent = buildInstanceCompose({
-    projectName: composeProject,
-    userId,
-    port: (await getInstance(context.resolved.name, userId))?.port ?? 3000,
-    instanceHostDir: instDir,
-    enableWeixinSidecar: true,
-  });
-  const composePath = join(instDir, "docker-compose.openclaw.yml");
-  await writeFile(composePath, composeContent, "utf8");
+  // Rebuild compose with sidecar using canonical writeInstanceCompose
+  // (handles OpenClaw/Hermes runtime templates correctly)
+  const instance = await getInstance(context.resolved.name, userId);
+  try {
+    await writeInstanceCompose({
+      projectName: composeProject,
+      userId,
+      port: instance?.port ?? 3000,
+      instDir,
+      runtimeType: context.runtimeType,
+      runtime: context.runtime,
+      proxyMode: context.runtime.defaultProxyMode,
+      enableWeixinSidecar: true,
+    });
+  } catch (error) {
+    // Rollback spec on compose failure
+    await removeSidecarSpec(instDir).catch(() => {});
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: error instanceof Error ? error.message : "Failed to write sidecar compose",
+      errorCode: "runtime-command-failed",
+      project: context.resolved.name, userId,
+    });
+  }
 
   // Start only the sidecar service (main instance untouched)
   try {
@@ -1002,6 +1012,8 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       projectName: composeProject,
     });
   } catch (error) {
+    // Rollback spec on start failure
+    await removeSidecarSpec(instDir).catch(() => {});
     return bridgeFailure({
       action: "sidecar.attach",
       message: error instanceof Error ? error.message : "Failed to start sidecar service",
@@ -1087,30 +1099,8 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
 
   const composeProject = context.resolved.name;
 
-  // Write target-version disabled spec
-  const newSpec = {
-    schemaVersion: 1,
-    enabled: false,
-    serviceName: "weixin-sidecar",
-    envFile: ".env.weixin",
-    port: 8787,
-    composeProject,
-    updatedAt: new Date().toISOString(),
-  };
-  await writeSidecarSpec(instDir, newSpec);
-
-  // Rebuild compose without sidecar service
-  const composeContent = buildInstanceCompose({
-    projectName: composeProject,
-    userId,
-    port: (await getInstance(context.resolved.name, userId))?.port ?? 3000,
-    instanceHostDir: instDir,
-    enableWeixinSidecar: false,
-  });
-  const composePath = join(instDir, "docker-compose.openclaw.yml");
-  await writeFile(composePath, composeContent, "utf8");
-
-  // Stop + remove sidecar service (main instance untouched)
+  // Step 1: Stop + remove sidecar service using EXISTING compose (which has the service)
+  // Do this BEFORE rewriting compose so docker can find the service definition.
   try {
     await runComposeService(instDir, "stop", "weixin-sidecar", {
       quiet: true,
@@ -1131,6 +1121,37 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       errorCode: "runtime-command-failed",
       project: context.resolved.name, userId,
     });
+  }
+
+  // Step 2: Write disabled spec + rebuild compose (atomic after successful removal)
+  const newSpec = {
+    schemaVersion: 1,
+    enabled: false,
+    serviceName: "weixin-sidecar",
+    envFile: ".env.weixin",
+    port: 8787,
+    composeProject,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeSidecarSpec(instDir, newSpec);
+
+  // Rebuild compose without sidecar using canonical writeInstanceCompose
+  const instance = await getInstance(context.resolved.name, userId);
+  try {
+    await writeInstanceCompose({
+      projectName: composeProject,
+      userId,
+      port: instance?.port ?? 3000,
+      instDir,
+      runtimeType: context.runtimeType,
+      runtime: context.runtime,
+      proxyMode: context.runtime.defaultProxyMode,
+      enableWeixinSidecar: false,
+    });
+  } catch (error) {
+    // Note: sidecar is already stopped/removed, so this is a degraded state
+    // (service gone but compose not updated). Log but don't fail the operation.
+    console.error(`[sidecar.detach] Failed to rewrite compose: ${error instanceof Error ? error.message : error}`);
   }
 
   return bridgeSuccess({
