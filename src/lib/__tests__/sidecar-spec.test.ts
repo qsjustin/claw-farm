@@ -19,12 +19,18 @@ import {
 } from "../sidecar-spec.ts";
 
 const validSpec: SidecarSpec = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   enabled: true,
   serviceName: "weixin-sidecar",
   envFile: ".env.weixin",
   port: 8787,
   composeProject: "clawbay-hermes-user1",
+  managedInstanceId: "instance-1",
+  bindingId: "binding-1",
+  operationId: "op-1",
+  targetAttachmentVersion: 1,
+  targetConfigVersion: 1,
+  desiredAttachmentState: "attached",
   updatedAt: "2026-06-21T12:00:00.000Z",
 };
 
@@ -44,7 +50,7 @@ describe("sidecar-spec persistence", () => {
     const read = await readSidecarSpec(tempDir);
 
     expect(read).not.toBeNull();
-    expect(read!.schemaVersion).toBe(1);
+    expect(read!.schemaVersion).toBe(2);
     expect(read!.enabled).toBe(true);
     expect(read!.serviceName).toBe("weixin-sidecar");
     expect(read!.envFile).toBe(".env.weixin");
@@ -69,7 +75,7 @@ describe("sidecar-spec persistence", () => {
   });
 
   it("throws for wrong schemaVersion", async () => {
-    const badSpec = { ...validSpec, schemaVersion: 2 };
+    const badSpec = { ...validSpec, schemaVersion: 3 };
     expect(writeSidecarSpec(tempDir, badSpec)).rejects.toThrow(SidecarSpecError);
   });
 
@@ -141,6 +147,32 @@ describe("sidecar-spec persistence", () => {
     await removeSidecarSpec(tempDir);
   });
 
+  // #171 Phase 2A-2: v1 → v2 migration adds CAS identity fields with defaults
+  it("migrates v1 spec to v2 with default CAS fields", async () => {
+    // Write a v1 spec directly (simulating pre-2A-2 data)
+    const v1Content = JSON.stringify({
+      schemaVersion: 1,
+      enabled: true,
+      serviceName: "weixin-sidecar",
+      envFile: ".env.weixin",
+      port: 8787,
+      composeProject: "clawbay-user1",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    }, null, 2);
+    await Bun.write(join(tempDir, "sidecar-spec.json"), v1Content);
+
+    // readSidecarSpec should migrate to v2
+    const read = await readSidecarSpec(tempDir);
+    expect(read).not.toBeNull();
+    expect(read!.schemaVersion).toBe(2);
+    expect(read!.enabled).toBe(true);
+    expect(read!.managedInstanceId).toBe("");
+    expect(read!.bindingId).toBe("");
+    expect(read!.operationId).toBe("");
+    expect(read!.targetAttachmentVersion).toBe(0);
+    expect(read!.desiredAttachmentState).toBe("detached");
+  });
+
   it("spec with externalNetwork round-trips correctly", async () => {
     const spec: SidecarSpec = {
       ...validSpec,
@@ -170,7 +202,7 @@ describe("sidecar-spec persistence", () => {
     // Final state should be one of the 5, and must be valid
     const read = await readSidecarSpec(tempDir);
     expect(read).not.toBeNull();
-    expect(read!.schemaVersion).toBe(1);
+    expect(read!.schemaVersion).toBe(2);
     expect(read!.serviceName).toBe("weixin-sidecar");
   });
 });
@@ -242,12 +274,18 @@ describe("upInstance behavioral — sidecar spec integration", () => {
     // Write sidecar spec
     const instDir = join(tmpProjectDir, "instances", userId);
     await _writeSpec2(instDir, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       enabled: true,
       serviceName: "weixin-sidecar",
       envFile: ".env.weixin",
       port: 8787,
       composeProject: `${projectName}-${userId}`,
+      managedInstanceId: "instance-1",
+      bindingId: "binding-1",
+      operationId: "op-1",
+      targetAttachmentVersion: 1,
+      targetConfigVersion: 1,
+      desiredAttachmentState: "attached",
       updatedAt: new Date().toISOString(),
     });
 
@@ -328,12 +366,18 @@ describe("upInstance behavioral — sidecar spec integration", () => {
   it("enabled spec + missing rotation inputs → throws, no compose commands", async () => {
     const instDir = join(tmpProjectDir, "instances", userId);
     await _writeSpec2(instDir, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       enabled: true,
       serviceName: "weixin-sidecar",
       envFile: ".env.weixin",
       port: 8787,
       composeProject: `${projectName}-${userId}`,
+      managedInstanceId: "instance-1",
+      bindingId: "binding-1",
+      operationId: "op-1",
+      targetAttachmentVersion: 1,
+      targetConfigVersion: 1,
+      desiredAttachmentState: "attached",
       updatedAt: new Date().toISOString(),
     });
 
@@ -358,12 +402,18 @@ describe("upInstance behavioral — sidecar spec integration", () => {
   it("lifecycle cannot override canonical spec — upInstance only accepts rotation creds", async () => {
     const instDir = join(tmpProjectDir, "instances", userId);
     await _writeSpec2(instDir, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       enabled: true,
       serviceName: "weixin-sidecar",
       envFile: ".env.weixin",
       port: 8787,
       composeProject: `${projectName}-${userId}`,
+      managedInstanceId: "instance-1",
+      bindingId: "binding-1",
+      operationId: "op-1",
+      targetAttachmentVersion: 1,
+      targetConfigVersion: 1,
+      desiredAttachmentState: "attached",
       updatedAt: new Date().toISOString(),
     });
 
@@ -406,12 +456,18 @@ describe("upInstance behavioral — sidecar spec integration", () => {
   it("rotate fetch failure → throws, no compose start/up command", async () => {
     const instDir = join(tmpProjectDir, "instances", userId);
     await _writeSpec2(instDir, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       enabled: true,
       serviceName: "weixin-sidecar",
       envFile: ".env.weixin",
       port: 8787,
       composeProject: `${projectName}-${userId}`,
+      managedInstanceId: "instance-1",
+      bindingId: "binding-1",
+      operationId: "op-1",
+      targetAttachmentVersion: 1,
+      targetConfigVersion: 1,
+      desiredAttachmentState: "attached",
       updatedAt: new Date().toISOString(),
     });
 

@@ -744,13 +744,19 @@ export async function spawn(options: {
     // If sidecar is explicitly disabled, remove any stale spec to prevent resurrection.
     if (enableWeixinSidecar) {
       await writeSidecarSpec(instDir, {
-        schemaVersion: 1,
+        schemaVersion: 2,
         enabled: true,
         serviceName: "weixin-sidecar",
         envFile: ".env.weixin",
         port: 8787,
         externalNetwork,
         composeProject: `${projectName}-${userId}`,
+        managedInstanceId: typeof options.managedInstanceId === "string" ? options.managedInstanceId : "",
+        bindingId: "",
+        operationId: "",
+        targetAttachmentVersion: 0,
+        targetConfigVersion: 0,
+        desiredAttachmentState: "attached",
         updatedAt: new Date().toISOString(),
       });
     } else {

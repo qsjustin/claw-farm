@@ -21,7 +21,7 @@ import { chmod, rename, unlink, writeFile, open } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 
 const SPEC_FILENAME = "sidecar-spec.json";
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 export interface SidecarSpec {
   /** Schema version for forward compatibility */
@@ -38,6 +38,34 @@ export interface SidecarSpec {
   externalNetwork?: string;
   /** Compose project name (Docker-safe) */
   composeProject: string;
+  /**
+   * #171 Phase 2A-2: ClawBay SRI (Service Runtime Instance) ID.
+   * Used for CAS identity verification — fail-closed if mismatch.
+   */
+  managedInstanceId: string;
+  /**
+   * #171 Phase 2A-2: Binding ID from ClawBay CAS.
+   * Used for stale replay detection.
+   */
+  bindingId: string;
+  /**
+   * #171 Phase 2A-2: Last applied operation ID.
+   * Used for idempotency — same operationId = same result (no-op).
+   */
+  operationId: string;
+  /**
+   * #171 Phase 2A-2: Target attachment version for CAS.
+   * Reject older-version operations (fail-closed).
+   */
+  targetAttachmentVersion: number;
+  /**
+   * #171 Phase 2A-2: Target config version for CAS.
+   */
+  targetConfigVersion: number;
+  /**
+   * #171 Phase 2A-2: Desired attachment state ("attached" | "detached").
+   */
+  desiredAttachmentState: "attached" | "detached";
   /** Created/updated timestamp (ISO 8601) */
   updatedAt: string;
 }
@@ -64,12 +92,22 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
   }
   const obj = data as Record<string, unknown>;
 
-  // Schema version must be exactly 1
-  if (obj.schemaVersion !== SCHEMA_VERSION) {
+  // Schema version: accept v1 (migratable) or v2 (current)
+  if (obj.schemaVersion !== 1 && obj.schemaVersion !== SCHEMA_VERSION) {
     throw new SidecarSpecError(
-      `sidecar spec schemaVersion must be ${SCHEMA_VERSION}, got ${JSON.stringify(obj.schemaVersion)}`,
+      `sidecar spec schemaVersion must be 1 or ${SCHEMA_VERSION}, got ${JSON.stringify(obj.schemaVersion)}`,
       "spec-invalid",
     );
+  }
+  // Migrate v1 to v2 in-place (add required fields with defaults)
+  if (obj.schemaVersion === 1) {
+    obj.schemaVersion = SCHEMA_VERSION;
+    obj.managedInstanceId = "";
+    obj.bindingId = "";
+    obj.operationId = "";
+    obj.targetAttachmentVersion = 0;
+    obj.targetConfigVersion = 0;
+    obj.desiredAttachmentState = "detached";
   }
 
   if (typeof obj.enabled !== "boolean") {
@@ -129,8 +167,46 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
     );
   }
 
+  // Validate v2 required fields
+  if (typeof obj.managedInstanceId !== "string" || (obj.managedInstanceId.length > 0 && !/^[a-zA-Z0-9_-]+$/.test(obj.managedInstanceId))) {
+    throw new SidecarSpecError(
+      `sidecar spec 'managedInstanceId' must be a valid identifier, got ${JSON.stringify(obj.managedInstanceId)}`,
+      "spec-invalid",
+    );
+  }
+  if (typeof obj.bindingId !== "string" || (obj.bindingId.length > 0 && !/^[a-zA-Z0-9_-]+$/.test(obj.bindingId))) {
+    throw new SidecarSpecError(
+      `sidecar spec 'bindingId' must be a valid identifier, got ${JSON.stringify(obj.bindingId)}`,
+      "spec-invalid",
+    );
+  }
+  if (typeof obj.operationId !== "string" || (obj.operationId.length > 0 && !/^[a-zA-Z0-9_-]+$/.test(obj.operationId))) {
+    throw new SidecarSpecError(
+      `sidecar spec 'operationId' must be a valid identifier, got ${JSON.stringify(obj.operationId)}`,
+      "spec-invalid",
+    );
+  }
+  if (typeof obj.targetAttachmentVersion !== "number" || obj.targetAttachmentVersion < 0) {
+    throw new SidecarSpecError(
+      `sidecar spec 'targetAttachmentVersion' must be a non-negative number, got ${JSON.stringify(obj.targetAttachmentVersion)}`,
+      "spec-invalid",
+    );
+  }
+  if (typeof obj.targetConfigVersion !== "number" || obj.targetConfigVersion < 0) {
+    throw new SidecarSpecError(
+      `sidecar spec 'targetConfigVersion' must be a non-negative number, got ${JSON.stringify(obj.targetConfigVersion)}`,
+      "spec-invalid",
+    );
+  }
+  if (obj.desiredAttachmentState !== "attached" && obj.desiredAttachmentState !== "detached") {
+    throw new SidecarSpecError(
+      `sidecar spec 'desiredAttachmentState' must be "attached" or "detached", got ${JSON.stringify(obj.desiredAttachmentState)}`,
+      "spec-invalid",
+    );
+  }
+
   // Reject unknown fields
-  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "composeProject", "updatedAt"]);
+  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "composeProject", "managedInstanceId", "bindingId", "operationId", "targetAttachmentVersion", "targetConfigVersion", "desiredAttachmentState", "updatedAt"]);
   for (const key of Object.keys(obj)) {
     if (!allowed.has(key)) {
       throw new SidecarSpecError(

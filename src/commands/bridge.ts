@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { mkdir, rm } from "node:fs/promises";
 import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose } from "../lib/api.ts";
 import { runComposeService } from "../lib/compose.ts";
-import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec } from "../lib/sidecar-spec.ts";
+import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, type SidecarSpec } from "../lib/sidecar-spec.ts";
 import { resolveSidecarAttachPoint, ensureSidecarAttachPoint } from "../lib/sidecar-attach.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { exportCommand } from "./export.ts";
@@ -946,20 +946,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   // Derive instDir from registry (caller must not pass this)
   const instDir = instanceDir(context.resolved.entry.path, userId);
 
-  // Read existing sidecar spec (may be absent for first attach)
-  const spec = await readSidecarSpec(instDir);
-
-  // Stale replay guard: if already attached, fail-closed
-  if (spec && spec.enabled) {
-    return bridgeFailure({
-      action: "sidecar.attach",
-      message: "Sidecar is already attached",
-      errorCode: "runtime-conflict",
-      project: context.resolved.name, userId,
-    });
-  }
-
-  // Ensure attach point directories exist
+  // Ensure attach point directories exist (needed for idempotent response)
   const attachPoint = resolveSidecarAttachPoint({
     workspaceRoot: context.layout.workspaceRoot,
     runtimeWorkspaceSlug: userId,
@@ -968,15 +955,65 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   });
   await ensureSidecarAttachPoint(attachPoint);
 
+  // Read existing sidecar spec (may be absent for first attach)
+  const spec = await readSidecarSpec(instDir);
+
+  // #171 Phase 2A-2: Idempotency — same operation already applied
+  if (spec && spec.operationId === operationId) {
+    return bridgeSuccess({
+      action: "sidecar.attach",
+      message: `Sidecar already attached by operation ${operationId}`,
+      metadata: {
+        sidecarCode: "weixin-auth-sidecar",
+        serviceName: "weixin-sidecar",
+        bindingId: spec.bindingId,
+        operationId: spec.operationId,
+        expectedAttachmentVersion: spec.targetAttachmentVersion - 1,
+        expectedConfigVersion: spec.targetConfigVersion,
+        appliedTargetVersion: spec.targetAttachmentVersion,
+        attachPointPath: attachPoint.configDir,
+        healthCheck: "idempotent",
+        idempotent: true,
+      },
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // #171 Phase 2A-2: Stale replay guard — reject older-version operations
+  if (spec && spec.targetAttachmentVersion > (expectedAttachmentVersion ?? 0) + 1) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${(expectedAttachmentVersion ?? 0) + 1}`,
+      errorCode: "runtime-conflict",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Identity mismatch guard
+  if (spec && spec.bindingId && spec.bindingId !== bindingId) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Binding identity mismatch: spec=${spec.bindingId}, request=${bindingId}`,
+      errorCode: "runtime-conflict",
+      project: context.resolved.name, userId,
+    });
+  }
+
   // Write versioned enabled spec BEFORE compose so rollback is possible
   const composeProject = `${context.resolved.name}-${userId}`;
-  const newSpec = {
-    schemaVersion: 1,
+  const newSpec: SidecarSpec = {
+    schemaVersion: 2,
     enabled: true,
     serviceName: "weixin-sidecar",
     envFile: ".env.weixin",
     port: 8787,
     composeProject,
+    managedInstanceId: asString(payload.managedInstanceId) ?? "",
+    bindingId,
+    operationId,
+    targetAttachmentVersion: (expectedAttachmentVersion ?? 0) + 1,
+    targetConfigVersion: expectedConfigVersion ?? 0,
+    desiredAttachmentState: "attached",
     updatedAt: new Date().toISOString(),
   };
   await writeSidecarSpec(instDir, newSpec);
@@ -1079,21 +1116,50 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
   // Read existing sidecar spec
   const spec = await readSidecarSpec(instDir);
 
-  // Stale replay guard: if already detached, fail-closed
-  if (spec && !spec.enabled) {
-    return bridgeFailure({
-      action: "sidecar.detach",
-      message: "Sidecar is already detached",
-      errorCode: "runtime-conflict",
-      project: context.resolved.name, userId,
-    });
-  }
-
   if (!spec) {
     return bridgeFailure({
       action: "sidecar.detach",
       message: "No sidecar spec found — nothing to detach",
       errorCode: "runtime-missing",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // #171 Phase 2A-2: Idempotency — same operation already applied
+  if (spec && spec.operationId === operationId) {
+    return bridgeSuccess({
+      action: "sidecar.detach",
+      message: `Sidecar already detached by operation ${operationId}`,
+      metadata: {
+        sidecarCode: "weixin-auth-sidecar",
+        serviceName: "weixin-sidecar",
+        bindingId: spec.bindingId,
+        operationId: spec.operationId,
+        expectedAttachmentVersion: spec.targetAttachmentVersion - 1,
+        expectedConfigVersion: spec.targetConfigVersion,
+        appliedTargetVersion: spec.targetAttachmentVersion,
+        idempotent: true,
+      },
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // #171 Phase 2A-2: Stale replay guard
+  if (spec && spec.targetAttachmentVersion > (expectedAttachmentVersion ?? 0) + 1) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${(expectedAttachmentVersion ?? 0) + 1}`,
+      errorCode: "runtime-conflict",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Identity mismatch guard
+  if (spec && spec.bindingId && spec.bindingId !== bindingId) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: `Binding identity mismatch: spec=${spec.bindingId}, request=${bindingId}`,
+      errorCode: "runtime-conflict",
       project: context.resolved.name, userId,
     });
   }
@@ -1125,13 +1191,19 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
   }
 
   // Step 2: Write disabled spec + rebuild compose (atomic after successful removal)
-  const newSpec = {
-    schemaVersion: 1,
+  const newSpec: SidecarSpec = {
+    schemaVersion: 2,
     enabled: false,
     serviceName: "weixin-sidecar",
     envFile: ".env.weixin",
     port: 8787,
     composeProject,
+    managedInstanceId: asString(payload.managedInstanceId) ?? "",
+    bindingId,
+    operationId,
+    targetAttachmentVersion: (expectedAttachmentVersion ?? 0) + 1,
+    targetConfigVersion: expectedConfigVersion ?? 0,
+    desiredAttachmentState: "detached",
     updatedAt: new Date().toISOString(),
   };
   await writeSidecarSpec(instDir, newSpec);
