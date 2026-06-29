@@ -1,6 +1,11 @@
 import { join } from "node:path";
 import { mkdir, rm } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl } from "../lib/api.ts";
+import { runComposeService } from "../lib/compose.ts";
+import { readSidecarSpec, writeSidecarSpec } from "../lib/sidecar-spec.ts";
+import { resolveSidecarAttachPoint, ensureSidecarAttachPoint } from "../lib/sidecar-attach.ts";
+import { buildInstanceCompose } from "../templates/docker-compose.instance.yml.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { exportCommand } from "./export.ts";
 import { importCommand } from "./import.ts";
@@ -39,6 +44,8 @@ const INSTANCE_OPERATIONS = new Set([
   "instance.export",
   "instance.import",
   "instance.applyModelControl",
+  "sidecar.attach",
+  "sidecar.detach",
   "agent.create",
   "agent.updateConfig",
   "runtime.registry.list",
@@ -88,6 +95,10 @@ async function readPayload(args: string[]): Promise<Record<string, unknown>> {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
 }
 
 function asStringRecord(value: unknown): Record<string, string> | undefined {
@@ -901,6 +912,243 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
   });
 }
 
+// #171 Phase 2A-2: sidecar.attach - write versioned spec + compose, start sidecar service
+async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
+  const { project, userId } = parseRuntimeInstanceKey(payload);
+  validateBridgeName(userId, "user ID");
+  const context = await requireManagedInstance("sidecar.attach", project, userId);
+  if ("ok" in context) return context;
+
+  // Validate CAS identity fields
+  const bindingId = asString(payload.bindingId);
+  const operationId = asString(payload.operationId);
+  const expectedAttachmentVersion = asNumber(payload.expectedAttachmentVersion);
+  const expectedConfigVersion = asNumber(payload.expectedConfigVersion);
+  const sidecarCode = asString(payload.sidecarCode);
+
+  if (!bindingId || !operationId) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: "CAS identity required: bindingId + operationId",
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  if (sidecarCode !== "weixin-auth-sidecar") {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Unsupported sidecarCode: ${sidecarCode}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Derive instDir from registry (caller must not pass this)
+  const instDir = instanceDir(context.resolved.entry.path, userId);
+
+  // Read existing sidecar spec (may be absent for first attach)
+  const spec = await readSidecarSpec(instDir);
+
+  // Stale replay guard: if already attached with same or newer version, fail-closed
+  if (spec && spec.enabled) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: "Sidecar is already attached",
+      errorCode: "runtime-conflict",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Derive compose project from instance layout (caller must not pass this)
+  const composeProject = context.resolved.name;
+
+  // Write target-version enabled spec
+  const newSpec = {
+    schemaVersion: 1,
+    enabled: true,
+    serviceName: "weixin-sidecar",
+    envFile: ".env.weixin",
+    port: 8787,
+    composeProject,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeSidecarSpec(instDir, newSpec);
+
+  // Ensure attach point directories exist
+  const attachPoint = resolveSidecarAttachPoint({
+    workspaceRoot: context.layout.workspaceRoot,
+    runtimeWorkspaceSlug: userId,
+    providerCode: "weixin",
+    runtimeType: context.runtimeType,
+  });
+  await ensureSidecarAttachPoint(attachPoint);
+
+  // Rebuild compose with sidecar service
+  const composeContent = buildInstanceCompose({
+    projectName: composeProject,
+    userId,
+    port: (await getInstance(context.resolved.name, userId))?.port ?? 3000,
+    instanceHostDir: instDir,
+    enableWeixinSidecar: true,
+  });
+  const composePath = join(instDir, "docker-compose.openclaw.yml");
+  await writeFile(composePath, composeContent, "utf8");
+
+  // Start only the sidecar service (main instance untouched)
+  try {
+    await runComposeService(instDir, "up", "weixin-sidecar", {
+      quiet: true,
+      projectName: composeProject,
+    });
+  } catch (error) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: error instanceof Error ? error.message : "Failed to start sidecar service",
+      errorCode: "runtime-command-failed",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  return bridgeSuccess({
+    action: "sidecar.attach",
+    message: `Attached sidecar for "${userId}"`,
+    metadata: {
+      sidecarCode: "weixin-auth-sidecar",
+      serviceName: "weixin-sidecar",
+      bindingId,
+      operationId,
+      expectedAttachmentVersion,
+      expectedConfigVersion,
+      appliedTargetVersion: (expectedAttachmentVersion ?? 0) + 1,
+      attachPointPath: attachPoint.configDir,
+      healthCheck: "passed",
+    },
+    project: context.resolved.name, userId,
+  });
+}
+
+// #171 Phase 2A-2: sidecar.detach — write versioned disabled spec, stop+rm sidecar service
+async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
+  const { project, userId } = parseRuntimeInstanceKey(payload);
+  validateBridgeName(userId, "user ID");
+  const context = await requireManagedInstance("sidecar.detach", project, userId);
+  if ("ok" in context) return context;
+
+  // Validate CAS identity fields
+  const bindingId = asString(payload.bindingId);
+  const operationId = asString(payload.operationId);
+  const expectedAttachmentVersion = asNumber(payload.expectedAttachmentVersion);
+  const expectedConfigVersion = asNumber(payload.expectedConfigVersion);
+  const sidecarCode = asString(payload.sidecarCode);
+
+  if (!bindingId || !operationId) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: "CAS identity required: bindingId + operationId",
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  if (sidecarCode !== "weixin-auth-sidecar") {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: `Unsupported sidecarCode: ${sidecarCode}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Derive instDir from registry (caller must not pass this)
+  const instDir = instanceDir(context.resolved.entry.path, userId);
+
+  // Read existing sidecar spec
+  const spec = await readSidecarSpec(instDir);
+
+  // Stale replay guard: if already detached, fail-closed
+  if (spec && !spec.enabled) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: "Sidecar is already detached",
+      errorCode: "runtime-conflict",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  if (!spec) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: "No sidecar spec found — nothing to detach",
+      errorCode: "runtime-missing",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  const composeProject = context.resolved.name;
+
+  // Write target-version disabled spec
+  const newSpec = {
+    schemaVersion: 1,
+    enabled: false,
+    serviceName: "weixin-sidecar",
+    envFile: ".env.weixin",
+    port: 8787,
+    composeProject,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeSidecarSpec(instDir, newSpec);
+
+  // Rebuild compose without sidecar service
+  const composeContent = buildInstanceCompose({
+    projectName: composeProject,
+    userId,
+    port: (await getInstance(context.resolved.name, userId))?.port ?? 3000,
+    instanceHostDir: instDir,
+    enableWeixinSidecar: false,
+  });
+  const composePath = join(instDir, "docker-compose.openclaw.yml");
+  await writeFile(composePath, composeContent, "utf8");
+
+  // Stop + remove sidecar service (main instance untouched)
+  try {
+    await runComposeService(instDir, "stop", "weixin-sidecar", {
+      quiet: true,
+      projectName: composeProject,
+    });
+  } catch (_error) {
+    // Best-effort stop: service may already be stopped
+  }
+  try {
+    await runComposeService(instDir, "rm", "weixin-sidecar", {
+      quiet: true,
+      projectName: composeProject,
+    });
+  } catch (error) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: error instanceof Error ? error.message : "Failed to remove sidecar service",
+      errorCode: "runtime-command-failed",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  return bridgeSuccess({
+    action: "sidecar.detach",
+    message: `Detached sidecar for "${userId}"`,
+    metadata: {
+      sidecarCode: "weixin-auth-sidecar",
+      serviceName: "weixin-sidecar",
+      bindingId,
+      operationId,
+      expectedAttachmentVersion,
+      expectedConfigVersion,
+      appliedTargetVersion: (expectedAttachmentVersion ?? 0) + 1,
+    },
+    project: context.resolved.name, userId,
+  });
+}
+
 async function bridgeInstanceExport(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
   const { project, userId } = parseRuntimeInstanceKey(payload);
   validateBridgeName(userId, "user ID");
@@ -1150,6 +1398,10 @@ export async function dispatch(operation: string, payload: Record<string, unknow
         return await bridgeInstanceImport(payload);
       case "instance.applyModelControl":
         return await bridgeInstanceApplyModelControl(payload);
+      case "sidecar.attach":
+        return await bridgeSidecarAttach(payload);
+      case "sidecar.detach":
+        return await bridgeSidecarDetach(payload);
       case "agent.create":
         return await bridgeAgentCreate(payload);
       case "agent.updateConfig":

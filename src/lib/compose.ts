@@ -119,6 +119,72 @@ export async function runCompose(
 }
 
 /**
+ * Run a docker compose command targeting a specific service.
+ * #171 Phase 2A-2: Used for sidecar attach/detach — start/stop/rm a single
+ * service without affecting the main instance containers.
+ *
+ * @param projectDir - Instance directory containing the compose file
+ * @param action - "up" (create+start), "stop", or "rm" (stop+remove)
+ * @param serviceName - Target service name (e.g. "weixin-sidecar")
+ * @param options - Compose options (projectName, quiet, etc.)
+ */
+export async function runComposeService(
+  projectDir: string,
+  action: "up" | "stop" | "rm",
+  serviceName: string,
+  options?: ComposeOptions,
+): Promise<void> {
+  const composePath = options?.composePath ?? join(projectDir, COMPOSE_FILENAME);
+  const cwd = options?.composePath ? dirname(composePath) : projectDir;
+  const quiet = options?.quiet ?? false;
+
+  const args = [...await dockerComposeCommand(), "-f", composePath];
+
+  // Auto-load override file if it exists
+  const overridePath = composePath.replace(".yml", ".override.yml");
+  if (await fileExists(overridePath)) {
+    args.push("-f", overridePath);
+  }
+
+  if (options?.projectName) {
+    args.push("-p", options.projectName);
+  }
+
+  if (action === "up") {
+    args.push("up", "-d", serviceName);
+  } else if (action === "stop") {
+    args.push("stop", serviceName);
+  } else {
+    args.push("rm", "-f", serviceName);
+  }
+
+  const proc = Bun.spawn(args, {
+    cwd,
+    stdout: quiet ? "pipe" : "inherit",
+    stderr: quiet ? "pipe" : "inherit",
+  });
+  if (quiet) {
+    const stdoutText = new Response(proc.stdout).text();
+    const stderrText = new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    const [stdout, stderr] = await Promise.all([stdoutText, stderrText]);
+    if (exitCode !== 0) {
+      const detail = stderr.trim() || stdout.trim();
+      throw new Error(
+        detail
+          ? `docker compose ${action} ${serviceName} failed with exit code ${exitCode}: ${detail}`
+          : `docker compose ${action} ${serviceName} failed with exit code ${exitCode}`,
+      );
+    }
+  } else {
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      throw new Error(`docker compose ${action} ${serviceName} failed with exit code ${exitCode}`);
+    }
+  }
+}
+
+/**
  * Connect a running container to a Docker network.
  * Used for shared proxy mode: each instance network gets the api-proxy attached.
  */
