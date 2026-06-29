@@ -274,10 +274,10 @@ function safeBridgeContext(project?: string, userId?: string): { project?: strin
 async function resolveBridgeContext(project: string, userId: string) {
   const resolved = await resolveProjectName(project);
   const config = await readProjectConfig(resolved.entry.path);
-  const { runtimeType, runtime } = resolveRuntimeConfig(config, resolved.entry);
+  const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, resolved.entry);
   const layout = resolveWorkspaceLayout(resolved.entry.path, userId, runtimeType);
   const instance = await getInstance(resolved.name, userId);
-  return { resolved, runtimeType, runtime, layout, instance };
+  return { resolved, runtimeType, runtime, proxyMode, layout, instance };
 }
 
 async function requireManagedInstance(
@@ -289,6 +289,7 @@ async function requireManagedInstance(
       resolved: Awaited<ReturnType<typeof resolveProjectName>>;
       runtimeType: Awaited<ReturnType<typeof resolveBridgeContext>>["runtimeType"];
       runtime: Awaited<ReturnType<typeof resolveBridgeContext>>["runtime"];
+      proxyMode: Awaited<ReturnType<typeof resolveBridgeContext>>["proxyMode"];
       layout: Awaited<ReturnType<typeof resolveBridgeContext>>["layout"];
     }
   | BridgeFailure
@@ -968,7 +969,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   await ensureSidecarAttachPoint(attachPoint);
 
   // Write versioned enabled spec BEFORE compose so rollback is possible
-  const composeProject = context.resolved.name;
+  const composeProject = `${context.resolved.name}-${userId}`;
   const newSpec = {
     schemaVersion: 1,
     enabled: true,
@@ -991,7 +992,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       instDir,
       runtimeType: context.runtimeType,
       runtime: context.runtime,
-      proxyMode: context.runtime.defaultProxyMode,
+      proxyMode: context.proxyMode,
       enableWeixinSidecar: true,
     });
   } catch (error) {
@@ -1097,7 +1098,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
-  const composeProject = context.resolved.name;
+  const composeProject = `${context.resolved.name}-${userId}`;
 
   // Step 1: Stop + remove sidecar service using EXISTING compose (which has the service)
   // Do this BEFORE rewriting compose so docker can find the service definition.
@@ -1145,7 +1146,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       instDir,
       runtimeType: context.runtimeType,
       runtime: context.runtime,
-      proxyMode: context.runtime.defaultProxyMode,
+      proxyMode: context.proxyMode,
       enableWeixinSidecar: false,
     });
   } catch (error) {
