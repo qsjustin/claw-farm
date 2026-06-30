@@ -13,6 +13,7 @@ import {
   writeSidecarSpec,
   readSidecarSpec,
   removeSidecarSpec,
+  migrateSidecarSpec,
   isSidecarEnabled,
   SidecarSpecError,
   type SidecarSpec,
@@ -147,8 +148,8 @@ describe("sidecar-spec persistence", () => {
     await removeSidecarSpec(tempDir);
   });
 
-  // #171 Phase 2A-2: v1 → v2 migration adds CAS identity fields with defaults
-  it("migrates v1 spec to v2 with default CAS fields", async () => {
+  // #171 Phase 2A-2: v1 → v2 migration must be explicit with ClawBay identity
+  it("migrateSidecarSpec migrates v1 to v2 with provided identity", async () => {
     // Write a v1 spec directly (simulating pre-2A-2 data)
     const v1Content = JSON.stringify({
       schemaVersion: 1,
@@ -161,16 +162,46 @@ describe("sidecar-spec persistence", () => {
     }, null, 2);
     await Bun.write(join(tempDir, "sidecar-spec.json"), v1Content);
 
-    // readSidecarSpec should migrate to v2
+    // v1 spec should throw spec-invalid on read
+    await expect(readSidecarSpec(tempDir)).rejects.toMatchObject({ code: "spec-invalid" });
+
+    // Migrate with ClawBay request identity
+    const migrated = await migrateSidecarSpec(tempDir, {
+      managedInstanceId: "instance-1",
+      bindingId: "binding-1",
+      operationId: "op-1",
+      targetAttachmentVersion: 1,
+      targetConfigVersion: 1,
+      desiredAttachmentState: "attached",
+    });
+    expect(migrated).toBe(true);
+
+    // Now it should read as v2
     const read = await readSidecarSpec(tempDir);
     expect(read).not.toBeNull();
     expect(read!.schemaVersion).toBe(2);
     expect(read!.enabled).toBe(true);
-    expect(read!.managedInstanceId).toBe("");
-    expect(read!.bindingId).toBe("");
-    expect(read!.operationId).toBe("");
-    expect(read!.targetAttachmentVersion).toBe(0);
-    expect(read!.desiredAttachmentState).toBe("detached");
+    expect(read!.managedInstanceId).toBe("instance-1");
+    expect(read!.bindingId).toBe("binding-1");
+    expect(read!.operationId).toBe("op-1");
+    expect(read!.targetAttachmentVersion).toBe(1);
+    expect(read!.desiredAttachmentState).toBe("attached");
+  });
+
+  it("migrateSidecarSpec returns false for already-v2 spec", async () => {
+    await writeSidecarSpec(tempDir, { ...validSpec });
+    const migrated = await migrateSidecarSpec(tempDir, {
+      managedInstanceId: "instance-other",
+      bindingId: "binding-other",
+      operationId: "op-other",
+      targetAttachmentVersion: 99,
+      targetConfigVersion: 99,
+      desiredAttachmentState: "attached",
+    });
+    expect(migrated).toBe(false);
+    // Verify spec was NOT overwritten
+    const read = await readSidecarSpec(tempDir);
+    expect(read!.managedInstanceId).toBe(validSpec.managedInstanceId);
   });
 
   it("spec with externalNetwork round-trips correctly", async () => {

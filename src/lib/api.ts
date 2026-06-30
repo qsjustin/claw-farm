@@ -366,7 +366,7 @@ function validateEnvEntry(key: string, value: string): string {
   return `${key}=${value}`;
 }
 
-async function resolveInstance(project: string, userId: string) {
+export async function resolveInstance(project: string, userId: string) {
   validateName(userId, "user ID");
   const { name: projectName, entry } = await resolveProjectName(project);
   const projectDir = entry.path;

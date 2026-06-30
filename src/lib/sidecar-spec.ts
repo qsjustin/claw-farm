@@ -92,22 +92,13 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
   }
   const obj = data as Record<string, unknown>;
 
-  // Schema version: accept v1 (migratable) or v2 (current)
-  if (obj.schemaVersion !== 1 && obj.schemaVersion !== SCHEMA_VERSION) {
+  // Schema version: only accept current v2
+  // v1 is no longer valid — use migrateSidecarSpec() for explicit backfill
+  if (obj.schemaVersion !== SCHEMA_VERSION) {
     throw new SidecarSpecError(
-      `sidecar spec schemaVersion must be 1 or ${SCHEMA_VERSION}, got ${JSON.stringify(obj.schemaVersion)}`,
+      `sidecar spec schemaVersion must be ${SCHEMA_VERSION}, got ${JSON.stringify(obj.schemaVersion)}`,
       "spec-invalid",
     );
-  }
-  // Migrate v1 to v2 in-place (add required fields with defaults)
-  if (obj.schemaVersion === 1) {
-    obj.schemaVersion = SCHEMA_VERSION;
-    obj.managedInstanceId = "";
-    obj.bindingId = "";
-    obj.operationId = "";
-    obj.targetAttachmentVersion = 0;
-    obj.targetConfigVersion = 0;
-    obj.desiredAttachmentState = "detached";
   }
 
   if (typeof obj.enabled !== "boolean") {
@@ -276,6 +267,73 @@ export async function readSidecarSpec(
   }
   validateSpec(data);
   return data;
+}
+
+/**
+ * #171 Phase 2A-2: Migrate a v1 spec file to v2 using ClawBay request identity.
+ * This is the ONLY valid migration path — identity must come from the caller,
+ * not from empty defaults.
+ *
+ * Throws if spec is corrupted or missing.
+ * Returns true if a migration was performed, false if spec was already v2.
+ */
+export async function migrateSidecarSpec(
+  instDir: string,
+  identity: {
+    managedInstanceId: string;
+    bindingId: string;
+    operationId: string;
+    targetAttachmentVersion: number;
+    targetConfigVersion: number;
+    desiredAttachmentState: "attached" | "detached";
+  },
+): Promise<boolean> {
+  const specPath = join(instDir, SPEC_FILENAME);
+  const file = Bun.file(specPath);
+  if (!(await file.exists())) {
+    return false; // No spec to migrate
+  }
+  const text = await file.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new SidecarSpecError(
+      "sidecar-spec.json contains invalid JSON",
+      "spec-corrupted",
+    );
+  }
+  if (typeof data !== "object" || data === null) {
+    throw new SidecarSpecError("sidecar spec is not an object", "spec-invalid");
+  }
+  const obj = data as Record<string, unknown>;
+  if (obj.schemaVersion === SCHEMA_VERSION) {
+    return false; // Already v2
+  }
+  if (obj.schemaVersion !== 1) {
+    throw new SidecarSpecError(
+      `Cannot migrate spec: unsupported schemaVersion ${JSON.stringify(obj.schemaVersion)}`,
+      "spec-invalid",
+    );
+  }
+  // Write v2 spec with ClawBay-provided identity
+  const migrated: SidecarSpec = {
+    schemaVersion: SCHEMA_VERSION,
+    enabled: typeof obj.enabled === "boolean" ? obj.enabled : false,
+    serviceName: "weixin-sidecar",
+    envFile: ".env.weixin",
+    port: 8787,
+    composeProject: typeof obj.composeProject === "string" ? obj.composeProject : "",
+    managedInstanceId: identity.managedInstanceId,
+    bindingId: identity.bindingId,
+    operationId: identity.operationId,
+    targetAttachmentVersion: identity.targetAttachmentVersion,
+    targetConfigVersion: identity.targetConfigVersion,
+    desiredAttachmentState: identity.desiredAttachmentState,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeSidecarSpec(instDir, migrated);
+  return true;
 }
 
 /**

@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import { mkdir, rm } from "node:fs/promises";
-import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose } from "../lib/api.ts";
+import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose, resolveInstance } from "../lib/api.ts";
 import { runComposeService } from "../lib/compose.ts";
-import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, type SidecarSpec } from "../lib/sidecar-spec.ts";
+import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, migrateSidecarSpec, type SidecarSpec, type SidecarSpecError } from "../lib/sidecar-spec.ts";
 import { resolveSidecarAttachPoint, ensureSidecarAttachPoint } from "../lib/sidecar-attach.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { exportCommand } from "./export.ts";
@@ -955,8 +955,26 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   });
   await ensureSidecarAttachPoint(attachPoint);
 
-  // Read existing sidecar spec (may be absent for first attach)
-  const spec = await readSidecarSpec(instDir);
+  // Read existing sidecar spec, migrating v1 to v2 if needed
+  let spec: SidecarSpec | null = null;
+  try {
+    spec = await readSidecarSpec(instDir);
+  } catch (error) {
+    if (error instanceof SidecarSpecError && error.code === "spec-invalid") {
+      // v1 spec detected — migrate with ClawBay request identity
+      await migrateSidecarSpec(instDir, {
+        managedInstanceId: asString(payload.managedInstanceId) ?? "",
+        bindingId,
+        operationId,
+        targetAttachmentVersion: (expectedAttachmentVersion ?? 0) + 1,
+        targetConfigVersion: expectedConfigVersion ?? 0,
+        desiredAttachmentState: "attached",
+      });
+      spec = await readSidecarSpec(instDir);
+    } else {
+      throw error;
+    }
+  }
 
   // #171 Phase 2A-2: Idempotency — same operation already applied
   if (spec && spec.operationId === operationId) {
@@ -1023,7 +1041,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   const instance = await getInstance(context.resolved.name, userId);
   try {
     await writeInstanceCompose({
-      projectName: composeProject,
+      projectName: context.resolved.name,
       userId,
       port: instance?.port ?? 3000,
       instDir,
@@ -1044,6 +1062,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   }
 
   // Start only the sidecar service (main instance untouched)
+  // Use composeProject (${project}-${user}) for docker compose -p flag
   try {
     await runComposeService(instDir, "up", "weixin-sidecar", {
       quiet: true,
@@ -1113,8 +1132,26 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
   // Derive instDir from registry (caller must not pass this)
   const instDir = instanceDir(context.resolved.entry.path, userId);
 
-  // Read existing sidecar spec
-  const spec = await readSidecarSpec(instDir);
+  // Read existing sidecar spec, migrating v1 to v2 if needed
+  let spec: SidecarSpec | null = null;
+  try {
+    spec = await readSidecarSpec(instDir);
+  } catch (error) {
+    if (error instanceof SidecarSpecError && error.code === "spec-invalid") {
+      // v1 spec detected — migrate with ClawBay request identity
+      await migrateSidecarSpec(instDir, {
+        managedInstanceId: asString(payload.managedInstanceId) ?? "",
+        bindingId,
+        operationId,
+        targetAttachmentVersion: (expectedAttachmentVersion ?? 0) + 1,
+        targetConfigVersion: expectedConfigVersion ?? 0,
+        desiredAttachmentState: "detached",
+      });
+      spec = await readSidecarSpec(instDir);
+    } else {
+      throw error;
+    }
+  }
 
   if (!spec) {
     return bridgeFailure({
@@ -1212,7 +1249,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
   const instance = await getInstance(context.resolved.name, userId);
   try {
     await writeInstanceCompose({
-      projectName: composeProject,
+      projectName: context.resolved.name,
       userId,
       port: instance?.port ?? 3000,
       instDir,
