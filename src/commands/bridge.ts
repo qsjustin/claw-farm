@@ -1113,6 +1113,29 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
+  // #171 Phase 2A-2: Health probe — verify sidecar is actually running
+  const healthUrl = `http://localhost:8787/healthz`;
+  let healthOk = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) });
+      if (resp.ok) { healthOk = true; break; }
+    } catch { /* retry */ }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  if (!healthOk) {
+    // Rollback: stop sidecar + remove spec
+    await runComposeService(instDir, "stop", "weixin-sidecar", { quiet: true, projectName: composeProject }).catch(() => {});
+    await runComposeService(instDir, "rm", "weixin-sidecar", { quiet: true, projectName: composeProject }).catch(() => {});
+    await removeSidecarSpec(instDir).catch(() => {});
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: "Sidecar health check failed after compose up",
+      errorCode: "runtime-command-failed",
+      project: context.resolved.name, userId,
+    });
+  }
+
   return bridgeSuccess({
     action: "sidecar.attach",
     message: `Attached sidecar for "${userId}"`,
@@ -1269,15 +1292,24 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
 
   const composeProject = `${context.resolved.name}-${userId}`;
 
-  // Step 1: Stop + remove sidecar service using EXISTING compose (which has the service)
-  // Do this BEFORE rewriting compose so docker can find the service definition.
+  // Step 1: Revoke sidecar token via HTTP before stopping
+  const revokeUrl = `http://localhost:8787/internal/weixin/sessions/revoke`;
+  try {
+    await fetch(revokeUrl, {
+      method: "POST",
+      signal: AbortSignal.timeout(3000),
+    }).catch(() => {}); // Best-effort revoke
+  } catch { /* revoke may not be available */ }
+
+  // Step 2: Stop + remove sidecar service using EXISTING compose
+  const stopErrors: string[] = [];
   try {
     await runComposeService(instDir, "stop", "weixin-sidecar", {
       quiet: true,
       projectName: composeProject,
     });
-  } catch (_error) {
-    // Best-effort stop: service may already be stopped
+  } catch (error) {
+    stopErrors.push(error instanceof Error ? error.message : String(error));
   }
   try {
     await runComposeService(instDir, "rm", "weixin-sidecar", {
@@ -1285,9 +1317,14 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       projectName: composeProject,
     });
   } catch (error) {
+    stopErrors.push(error instanceof Error ? error.message : String(error));
+  }
+
+  // Only fail if both stop and rm fail (one failing is acceptable — service may already be stopped)
+  if (stopErrors.length >= 2) {
     return bridgeFailure({
       action: "sidecar.detach",
-      message: error instanceof Error ? error.message : "Failed to remove sidecar service",
+      message: `Failed to stop/remove sidecar: ${stopErrors.join("; ")}`,
       errorCode: "runtime-command-failed",
       project: context.resolved.name, userId,
     });
@@ -1325,9 +1362,15 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       enableWeixinSidecar: false,
     });
   } catch (error) {
-    // Note: sidecar is already stopped/removed, so this is a degraded state
-    // (service gone but compose not updated). Log but don't fail the operation.
-    console.error(`[sidecar.detach] Failed to rewrite compose: ${error instanceof Error ? error.message : error}`);
+    // Compose rewrite failed but sidecar is already stopped/removed.
+    // This is a degraded state: compose file still has sidecar, but service is gone.
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: `Sidecar stopped but compose rewrite failed: ${error instanceof Error ? error.message : error}`,
+      errorCode: "runtime-command-failed",
+      retryable: true,
+      project: context.resolved.name, userId,
+    });
   }
 
   return bridgeSuccess({
