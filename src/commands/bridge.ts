@@ -1030,16 +1030,19 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
 
   // #171 Phase 2A-2: Stale replay guard — reject same-or-older-version operations
   if (spec && spec.targetAttachmentVersion >= eatv! + 1) {
-    return bridgeFailure({
-      action: "sidecar.attach",
-      message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${eatv! + 1}`,
-      errorCode: "runtime-conflict",
-      project: context.resolved.name, userId,
-    });
+    // Allow if spec was just migrated (operationId starts with "legacy-")
+    if (!spec.operationId.startsWith("legacy-")) {
+      return bridgeFailure({
+        action: "sidecar.attach",
+        message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${eatv! + 1}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
   }
 
-  // Identity mismatch guard
-  if (spec && spec.bindingId && spec.bindingId !== bindingId) {
+  // Identity mismatch guard (skip for legacy-migrated specs)
+  if (spec && spec.operationId && !spec.operationId.startsWith("legacy-") && spec.bindingId !== bindingId) {
     return bridgeFailure({
       action: "sidecar.attach",
       message: `Binding identity mismatch: spec=${spec.bindingId}, request=${bindingId}`,
@@ -1244,16 +1247,18 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
 
   // #171 Phase 2A-2: Stale replay guard — reject same-or-older-version operations
   if (spec && spec.targetAttachmentVersion >= detv! + 1) {
-    return bridgeFailure({
-      action: "sidecar.detach",
-      message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${detv! + 1}`,
-      errorCode: "runtime-conflict",
-      project: context.resolved.name, userId,
-    });
+    if (!spec.operationId.startsWith("legacy-")) {
+      return bridgeFailure({
+        action: "sidecar.detach",
+        message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${detv! + 1}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
   }
 
-  // Identity mismatch guard
-  if (spec && spec.bindingId && spec.bindingId !== bindingId) {
+  // Identity mismatch guard (skip for legacy-migrated specs)
+  if (spec && spec.operationId && !spec.operationId.startsWith("legacy-") && spec.bindingId !== bindingId) {
     return bridgeFailure({
       action: "sidecar.detach",
       message: `Binding identity mismatch: spec=${spec.bindingId}, request=${bindingId}`,
