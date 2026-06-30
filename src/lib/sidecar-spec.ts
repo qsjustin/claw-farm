@@ -159,33 +159,35 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
   }
 
   // Validate v2 required fields
-  if (typeof obj.managedInstanceId !== "string" || (obj.managedInstanceId.length > 0 && !/^[a-zA-Z0-9_-]+$/.test(obj.managedInstanceId))) {
+  // identity fields: non-empty, valid identifier pattern
+  if (typeof obj.managedInstanceId !== "string" || !obj.managedInstanceId || !/^[a-zA-Z0-9_-]+$/.test(obj.managedInstanceId)) {
     throw new SidecarSpecError(
-      `sidecar spec 'managedInstanceId' must be a valid identifier, got ${JSON.stringify(obj.managedInstanceId)}`,
+      `sidecar spec 'managedInstanceId' must be a non-empty valid identifier, got ${JSON.stringify(obj.managedInstanceId)}`,
       "spec-invalid",
     );
   }
-  if (typeof obj.bindingId !== "string" || (obj.bindingId.length > 0 && !/^[a-zA-Z0-9_-]+$/.test(obj.bindingId))) {
+  if (typeof obj.bindingId !== "string" || !obj.bindingId || !/^[a-zA-Z0-9_-]+$/.test(obj.bindingId)) {
     throw new SidecarSpecError(
-      `sidecar spec 'bindingId' must be a valid identifier, got ${JSON.stringify(obj.bindingId)}`,
+      `sidecar spec 'bindingId' must be a non-empty valid identifier, got ${JSON.stringify(obj.bindingId)}`,
       "spec-invalid",
     );
   }
-  if (typeof obj.operationId !== "string" || (obj.operationId.length > 0 && !/^[a-zA-Z0-9_-]+$/.test(obj.operationId))) {
+  if (typeof obj.operationId !== "string" || !obj.operationId || !/^[a-zA-Z0-9_-]+$/.test(obj.operationId)) {
     throw new SidecarSpecError(
-      `sidecar spec 'operationId' must be a valid identifier, got ${JSON.stringify(obj.operationId)}`,
+      `sidecar spec 'operationId' must be a non-empty valid identifier, got ${JSON.stringify(obj.operationId)}`,
       "spec-invalid",
     );
   }
-  if (typeof obj.targetAttachmentVersion !== "number" || obj.targetAttachmentVersion < 0) {
+  // versions: safe non-negative integers
+  if (typeof obj.targetAttachmentVersion !== "number" || !Number.isSafeInteger(obj.targetAttachmentVersion) || obj.targetAttachmentVersion < 0) {
     throw new SidecarSpecError(
-      `sidecar spec 'targetAttachmentVersion' must be a non-negative number, got ${JSON.stringify(obj.targetAttachmentVersion)}`,
+      `sidecar spec 'targetAttachmentVersion' must be a safe non-negative integer, got ${JSON.stringify(obj.targetAttachmentVersion)}`,
       "spec-invalid",
     );
   }
-  if (typeof obj.targetConfigVersion !== "number" || obj.targetConfigVersion < 0) {
+  if (typeof obj.targetConfigVersion !== "number" || !Number.isSafeInteger(obj.targetConfigVersion) || obj.targetConfigVersion < 0) {
     throw new SidecarSpecError(
-      `sidecar spec 'targetConfigVersion' must be a non-negative number, got ${JSON.stringify(obj.targetConfigVersion)}`,
+      `sidecar spec 'targetConfigVersion' must be a safe non-negative integer, got ${JSON.stringify(obj.targetConfigVersion)}`,
       "spec-invalid",
     );
   }
@@ -219,6 +221,18 @@ export async function writeSidecarSpec(
   spec: SidecarSpec,
 ): Promise<void> {
   validateSpec(spec);
+  await writeSidecarSpecRaw(instDir, spec);
+}
+
+/**
+ * Write a sidecar spec WITHOUT validation.
+ * Used for initial creation during spawn() where identity fields are not yet known.
+ * The bridge handler will migrate/overwrite with full identity on first attach/detach.
+ */
+export async function writeSidecarSpecRaw(
+  instDir: string,
+  spec: SidecarSpec,
+): Promise<void> {
   const specPath = join(instDir, SPEC_FILENAME);
   // Random unique temp file for concurrency safety
   const tmpPath = join(instDir, `${SPEC_FILENAME}.${randomBytes(8).toString("hex")}.tmp`);

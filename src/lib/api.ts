@@ -28,7 +28,7 @@ import {
 import { fileExists } from "./fs-utils.ts";
 import { ensureInstanceDirs, instanceDir, templateDir } from "./instance.ts";
 import {
-  writeSidecarSpec,
+  writeSidecarSpecRaw,
   readSidecarSpec,
   removeSidecarSpec,
 } from "./sidecar-spec.ts";
@@ -743,7 +743,9 @@ export async function spawn(options: {
     // (start, restart, model apply, rebuild) know to include the sidecar.
     // If sidecar is explicitly disabled, remove any stale spec to prevent resurrection.
     if (enableWeixinSidecar) {
-      await writeSidecarSpec(instDir, {
+      // #171: Use raw write — no validation during spawn (identity not yet known).
+      // Bridge handler will overwrite with full identity on first attach/detach.
+      await writeSidecarSpecRaw(instDir, {
         schemaVersion: 2,
         enabled: true,
         serviceName: "weixin-sidecar",

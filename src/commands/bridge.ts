@@ -982,13 +982,15 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     spec = await readSidecarSpec(instDir);
   } catch (error) {
     if (error instanceof SidecarSpecError && error.code === "spec-invalid") {
-      // v1 spec detected — migrate with ClawBay request identity
+      // v1 spec detected — migrate with synthetic legacy identity
+      // Use a synthetic operationId so it doesn't match any real request
+      const legacyOpId = `legacy-v1-migration-${Date.now()}`;
       await migrateSidecarSpec(instDir, {
-        managedInstanceId: asString(payload.managedInstanceId) ?? "",
-        bindingId,
-        operationId,
-        targetAttachmentVersion: eatv! + 1,
-        targetConfigVersion: ecgv!,
+        managedInstanceId: asString(payload.managedInstanceId) ?? "migrated",
+        bindingId: "legacy-binding",
+        operationId: legacyOpId,
+        targetAttachmentVersion: 0,
+        targetConfigVersion: 0,
         desiredAttachmentState: "attached",
       });
       spec = await readSidecarSpec(instDir);
@@ -998,7 +1000,15 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   }
 
   // #171 Phase 2A-2: Idempotency — same operation already applied
-  if (spec && spec.operationId === operationId) {
+  if (
+    spec && spec.operationId !== "" &&
+    spec.operationId === operationId &&
+    spec.bindingId === bindingId &&
+    spec.managedInstanceId === (asString(payload.managedInstanceId) ?? "") &&
+    spec.desiredAttachmentState === "attached" &&
+    spec.targetAttachmentVersion === eatv! + 1 &&
+    spec.targetConfigVersion === ecgv!
+  ) {
     return bridgeSuccess({
       action: "sidecar.attach",
       message: `Sidecar already attached by operation ${operationId}`,
@@ -1018,8 +1028,8 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
-  // #171 Phase 2A-2: Stale replay guard — reject older-version operations
-  if (spec && spec.targetAttachmentVersion > eatv! + 1) {
+  // #171 Phase 2A-2: Stale replay guard — reject same-or-older-version operations
+  if (spec && spec.targetAttachmentVersion >= eatv! + 1) {
     return bridgeFailure({
       action: "sidecar.attach",
       message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${eatv! + 1}`,
@@ -1180,13 +1190,14 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     spec = await readSidecarSpec(instDir);
   } catch (error) {
     if (error instanceof SidecarSpecError && error.code === "spec-invalid") {
-      // v1 spec detected — migrate with ClawBay request identity
+      // v1 spec detected — migrate with synthetic legacy identity
+      const legacyOpId = `legacy-v1-migration-${Date.now()}`;
       await migrateSidecarSpec(instDir, {
-        managedInstanceId: asString(payload.managedInstanceId) ?? "",
-        bindingId,
-        operationId,
-        targetAttachmentVersion: detv! + 1,
-        targetConfigVersion: decv!,
+        managedInstanceId: asString(payload.managedInstanceId) ?? "migrated",
+        bindingId: "legacy-binding",
+        operationId: legacyOpId,
+        targetAttachmentVersion: 0,
+        targetConfigVersion: 0,
         desiredAttachmentState: "detached",
       });
       spec = await readSidecarSpec(instDir);
@@ -1205,7 +1216,15 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
   }
 
   // #171 Phase 2A-2: Idempotency — same operation already applied
-  if (spec && spec.operationId === operationId) {
+  if (
+    spec && spec.operationId !== "" &&
+    spec.operationId === operationId &&
+    spec.bindingId === bindingId &&
+    spec.managedInstanceId === (asString(payload.managedInstanceId) ?? "") &&
+    spec.desiredAttachmentState === "detached" &&
+    spec.targetAttachmentVersion === detv! + 1 &&
+    spec.targetConfigVersion === decv!
+  ) {
     return bridgeSuccess({
       action: "sidecar.detach",
       message: `Sidecar already detached by operation ${operationId}`,
@@ -1223,8 +1242,8 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
-  // #171 Phase 2A-2: Stale replay guard
-  if (spec && spec.targetAttachmentVersion > detv! + 1) {
+  // #171 Phase 2A-2: Stale replay guard — reject same-or-older-version operations
+  if (spec && spec.targetAttachmentVersion >= detv! + 1) {
     return bridgeFailure({
       action: "sidecar.detach",
       message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${detv! + 1}`,
