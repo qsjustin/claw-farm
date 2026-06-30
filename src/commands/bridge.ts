@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { mkdir, rm } from "node:fs/promises";
 import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose, resolveInstance } from "../lib/api.ts";
 import { runComposeService } from "../lib/compose.ts";
-import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, migrateSidecarSpec, type SidecarSpec, type SidecarSpecError } from "../lib/sidecar-spec.ts";
+import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, migrateSidecarSpec, SidecarSpecError, type SidecarSpec } from "../lib/sidecar-spec.ts";
 import { resolveSidecarAttachPoint, ensureSidecarAttachPoint } from "../lib/sidecar-attach.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { exportCommand } from "./export.ts";
@@ -918,17 +918,18 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   const context = await requireManagedInstance("sidecar.attach", project, userId);
   if ("ok" in context) return context;
 
-  // Validate CAS identity fields
+  // Validate CAS identity fields — strict, no silent fallbacks
   const bindingId = asString(payload.bindingId);
   const operationId = asString(payload.operationId);
   const expectedAttachmentVersion = asNumber(payload.expectedAttachmentVersion);
   const expectedConfigVersion = asNumber(payload.expectedConfigVersion);
   const sidecarCode = asString(payload.sidecarCode);
+  const managedInstanceId = asString(payload.managedInstanceId);
 
-  if (!bindingId || !operationId) {
+  if (!bindingId || !operationId || !managedInstanceId) {
     return bridgeFailure({
       action: "sidecar.attach",
-      message: "CAS identity required: bindingId + operationId",
+      message: "CAS identity required: bindingId + operationId + managedInstanceId",
       errorCode: "invalid-payload",
       project: context.resolved.name, userId,
     });
@@ -938,6 +939,26 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     return bridgeFailure({
       action: "sidecar.attach",
       message: `Unsupported sidecarCode: ${sidecarCode}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Versions must be safe non-negative integers
+  const eatv = expectedAttachmentVersion;
+  const ecgv = expectedConfigVersion;
+  if (!Number.isSafeInteger(eatv) || eatv! < 0) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Invalid expectedAttachmentVersion: ${payload.expectedAttachmentVersion}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+  if (!Number.isSafeInteger(ecgv) || ecgv! < 0) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Invalid expectedConfigVersion: ${payload.expectedConfigVersion}`,
       errorCode: "invalid-payload",
       project: context.resolved.name, userId,
     });
@@ -966,8 +987,8 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
         managedInstanceId: asString(payload.managedInstanceId) ?? "",
         bindingId,
         operationId,
-        targetAttachmentVersion: (expectedAttachmentVersion ?? 0) + 1,
-        targetConfigVersion: expectedConfigVersion ?? 0,
+        targetAttachmentVersion: eatv! + 1,
+        targetConfigVersion: ecgv!,
         desiredAttachmentState: "attached",
       });
       spec = await readSidecarSpec(instDir);
@@ -998,10 +1019,10 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   }
 
   // #171 Phase 2A-2: Stale replay guard — reject older-version operations
-  if (spec && spec.targetAttachmentVersion > (expectedAttachmentVersion ?? 0) + 1) {
+  if (spec && spec.targetAttachmentVersion > eatv! + 1) {
     return bridgeFailure({
       action: "sidecar.attach",
-      message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${(expectedAttachmentVersion ?? 0) + 1}`,
+      message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${eatv! + 1}`,
       errorCode: "runtime-conflict",
       project: context.resolved.name, userId,
     });
@@ -1029,8 +1050,8 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     managedInstanceId: asString(payload.managedInstanceId) ?? "",
     bindingId,
     operationId,
-    targetAttachmentVersion: (expectedAttachmentVersion ?? 0) + 1,
-    targetConfigVersion: expectedConfigVersion ?? 0,
+    targetAttachmentVersion: eatv! + 1,
+    targetConfigVersion: ecgv!,
     desiredAttachmentState: "attached",
     updatedAt: new Date().toISOString(),
   };
@@ -1089,7 +1110,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       operationId,
       expectedAttachmentVersion,
       expectedConfigVersion,
-      appliedTargetVersion: (expectedAttachmentVersion ?? 0) + 1,
+      appliedTargetVersion: eatv! + 1,
       attachPointPath: attachPoint.configDir,
       healthCheck: "passed",
     },
@@ -1104,17 +1125,18 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
   const context = await requireManagedInstance("sidecar.detach", project, userId);
   if ("ok" in context) return context;
 
-  // Validate CAS identity fields
+  // Validate CAS identity fields — strict, no silent fallbacks
   const bindingId = asString(payload.bindingId);
   const operationId = asString(payload.operationId);
   const expectedAttachmentVersion = asNumber(payload.expectedAttachmentVersion);
   const expectedConfigVersion = asNumber(payload.expectedConfigVersion);
   const sidecarCode = asString(payload.sidecarCode);
+  const managedInstanceId = asString(payload.managedInstanceId);
 
-  if (!bindingId || !operationId) {
+  if (!bindingId || !operationId || !managedInstanceId) {
     return bridgeFailure({
       action: "sidecar.detach",
-      message: "CAS identity required: bindingId + operationId",
+      message: "CAS identity required: bindingId + operationId + managedInstanceId",
       errorCode: "invalid-payload",
       project: context.resolved.name, userId,
     });
@@ -1124,6 +1146,26 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     return bridgeFailure({
       action: "sidecar.detach",
       message: `Unsupported sidecarCode: ${sidecarCode}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Versions must be safe non-negative integers
+  const detv = expectedAttachmentVersion;
+  const decv = expectedConfigVersion;
+  if (!Number.isSafeInteger(detv) || detv! < 0) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: `Invalid expectedAttachmentVersion: ${payload.expectedAttachmentVersion}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+  if (!Number.isSafeInteger(decv) || decv! < 0) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: `Invalid expectedConfigVersion: ${payload.expectedConfigVersion}`,
       errorCode: "invalid-payload",
       project: context.resolved.name, userId,
     });
@@ -1143,8 +1185,8 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         managedInstanceId: asString(payload.managedInstanceId) ?? "",
         bindingId,
         operationId,
-        targetAttachmentVersion: (expectedAttachmentVersion ?? 0) + 1,
-        targetConfigVersion: expectedConfigVersion ?? 0,
+        targetAttachmentVersion: detv! + 1,
+        targetConfigVersion: decv!,
         desiredAttachmentState: "detached",
       });
       spec = await readSidecarSpec(instDir);
@@ -1182,10 +1224,10 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
   }
 
   // #171 Phase 2A-2: Stale replay guard
-  if (spec && spec.targetAttachmentVersion > (expectedAttachmentVersion ?? 0) + 1) {
+  if (spec && spec.targetAttachmentVersion > detv! + 1) {
     return bridgeFailure({
       action: "sidecar.detach",
-      message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${(expectedAttachmentVersion ?? 0) + 1}`,
+      message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${detv! + 1}`,
       errorCode: "runtime-conflict",
       project: context.resolved.name, userId,
     });
@@ -1238,8 +1280,8 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     managedInstanceId: asString(payload.managedInstanceId) ?? "",
     bindingId,
     operationId,
-    targetAttachmentVersion: (expectedAttachmentVersion ?? 0) + 1,
-    targetConfigVersion: expectedConfigVersion ?? 0,
+    targetAttachmentVersion: detv! + 1,
+    targetConfigVersion: decv!,
     desiredAttachmentState: "detached",
     updatedAt: new Date().toISOString(),
   };
@@ -1274,7 +1316,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       operationId,
       expectedAttachmentVersion,
       expectedConfigVersion,
-      appliedTargetVersion: (expectedAttachmentVersion ?? 0) + 1,
+      appliedTargetVersion: detv! + 1,
     },
     project: context.resolved.name, userId,
   });
