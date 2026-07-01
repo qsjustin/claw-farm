@@ -16,7 +16,6 @@ export const ROLLBACK_ERROR_CODES = [
   "compose-restore-failed",
   "spec-restore-failed",
   "workload-restore-failed",
-  "revoke-failed",
 ] as const;
 
 export type RollbackErrorCode = typeof ROLLBACK_ERROR_CODES[number];
