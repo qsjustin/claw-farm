@@ -347,4 +347,58 @@ describe("executeWorkloadTransaction", () => {
     const compose = await readFile(join(tempDir, "docker-compose.openclaw.yml"), "utf8");
     expect(compose).toBe(mainCompose);
   });
+
+  it("throws on Docker daemon error during snapshot", async () => {
+    // Mock: docker inspect returns permission/daemon error
+    Bun.spawn = (() => ({
+      exited: Promise.resolve(1),
+      stdout: new Blob([""]).stream(),
+      stderr: new Blob(["permission denied"]).stream(),
+    })) as unknown as typeof Bun.spawn;
+
+    await expect(snapshotWorkload(tempDir, "test-project-user"))
+      .rejects.toThrow("docker inspect failed");
+  });
+
+  it("throws when detach rm fails and inspect shows container still exists", async () => {
+    let rmFailed = false;
+    Bun.spawn = ((args: string[]) => {
+      const cmd = args.join(" ");
+      if (cmd.includes("docker inspect")) {
+        const isHealth = args.some(a => a.includes("Health"));
+        if (isHealth) {
+          return {
+            exited: Promise.resolve(0),
+            stdout: new Blob(["healthy"]).stream(),
+            stderr: new Blob([""]).stream(),
+          } as unknown as ReturnType<typeof Bun.spawn>;
+        }
+        // Container still exists after rm
+        return {
+          exited: Promise.resolve(0),
+          stdout: new Blob(["true"]).stream(),
+          stderr: new Blob([""]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }
+      if (cmd.includes("compose rm")) rmFailed = true;
+      return {
+        exited: Promise.resolve(1),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob(["rm failed"]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as unknown as typeof Bun.spawn;
+
+    const result = await executeWorkloadTransaction(
+      tempDir,
+      "test-project-user",
+      "weixin-sidecar",
+      { newSpec: validSpec, serviceName: "weixin-sidecar", composeProject: "test-project-user" },
+      async () => {
+        throw new Error("rm failed");
+      },
+    );
+
+    expect(result.committed).toBe(false);
+    expect(result.error).toContain("rm failed");
+  });
 });
