@@ -108,6 +108,8 @@ function basePayload(overrides: Record<string, unknown> = {}) {
     operationId: "op-1",
     expectedAttachmentVersion: 0,
     expectedConfigVersion: 1,
+    clawBayApiUrl: "http://localhost:3001",
+    clawBayAdminToken: "test-admin-token",
     ...overrides,
   };
 }
@@ -136,8 +138,15 @@ describe("sidecar.attach dispatch", () => {
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
 
-    // Also mock globalThis.fetch
-    globalThis.fetch = (() => {
+    // Mock globalThis.fetch for provision/revoke API
+    globalThis.fetch = ((url: string | URL | Request, _init?: RequestInit) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("weixin-binding-provision")) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })) as Promise<Response>;
+      }
       return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
     }) as unknown as typeof fetch;
   });
@@ -320,7 +329,14 @@ describe("sidecar.detach dispatch", () => {
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
-    globalThis.fetch = (() => {
+    globalThis.fetch = ((url: string | URL | Request) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("weixin-binding-provision")) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })) as Promise<Response>;
+      }
       return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
     }) as unknown as typeof fetch;
   });
@@ -409,7 +425,14 @@ describe("sidecar.attach v1 migration", () => {
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
-    globalThis.fetch = (() => {
+    globalThis.fetch = ((url: string | URL | Request) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("weixin-binding-provision")) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })) as Promise<Response>;
+      }
       return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
     }) as unknown as typeof fetch;
   });
@@ -469,7 +492,14 @@ describe("sidecar.detach v1 migration", () => {
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
-    globalThis.fetch = (() => {
+    globalThis.fetch = ((url: string | URL | Request) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("weixin-binding-provision")) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })) as Promise<Response>;
+      }
       return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
     }) as unknown as typeof fetch;
   });
