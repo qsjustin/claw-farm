@@ -1117,6 +1117,10 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       message: txResult.error ?? "Transaction failed",
       errorCode: "runtime-command-failed",
       retryable: txResult.rollbackErrors.length === 0,
+      metadata: {
+        rollbackErrors: txResult.rollbackErrors.length > 0 ? txResult.rollbackErrors : undefined,
+        didRollback: txResult.didRollback,
+      },
       project: context.resolved.name, userId,
     });
   }
@@ -1337,13 +1341,22 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
           { stdout: "pipe", stderr: "pipe" },
         );
         const exitCode = await inspectProc.exited;
+        const stderr = await new Response(inspectProc.stderr).text();
         if (exitCode === 0) {
           // Container still exists — rm didn't work
           throw new Error(`Sidecar container ${containerName} still exists after rm`);
         }
+        // Non-zero: only accept Docker's exact No such object/container as "gone"
+        if (!stderr.includes("No such object") && !stderr.includes("No such container")) {
+          throw new Error(`Docker inspect failed after rm: ${stderr.trim()}`);
+        }
+        // Container genuinely gone — continue
       } catch (err) {
-        if (err instanceof Error && err.message.includes("still exists")) throw err;
-        // Other errors (docker not found, etc.) — OK, container is gone
+        if (err instanceof Error && (err.message.includes("still exists") || err.message.includes("Docker inspect failed"))) {
+          throw err;
+        }
+        // Docker CLI not found or other non-Docker error — fail closed
+        throw new Error(`Cannot verify sidecar absence: ${err instanceof Error ? err.message : err}`);
       }
 
       // Side effect 3: Rewrite compose without sidecar
@@ -1376,6 +1389,10 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       message: txResult.error ?? "Transaction failed",
       errorCode: "runtime-command-failed",
       retryable: false,
+      metadata: {
+        rollbackErrors: txResult.rollbackErrors.length > 0 ? txResult.rollbackErrors : undefined,
+        didRollback: txResult.didRollback,
+      },
       project: context.resolved.name, userId,
     });
   }

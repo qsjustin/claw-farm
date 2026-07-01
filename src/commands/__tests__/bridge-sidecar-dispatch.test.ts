@@ -271,7 +271,7 @@ describe("sidecar.attach dispatch", () => {
         return {
           exited: Promise.resolve(1),
           stdout: new Blob([""]).stream(),
-          stderr: new Blob(["Error: no such container"]).stream(),
+          stderr: new Blob(["No such container"]).stream(),
         } as unknown as ReturnType<typeof Bun.spawn>;
       }
       return {
@@ -311,7 +311,7 @@ describe("sidecar.detach dispatch", () => {
         return {
           exited: Promise.resolve(1),
           stdout: new Blob([""]).stream(),
-          stderr: new Blob(["no such container"]).stream(),
+          stderr: new Blob(["No such container"]).stream(),
         } as unknown as ReturnType<typeof Bun.spawn>;
       }
       return {
@@ -460,7 +460,7 @@ describe("sidecar.detach v1 migration", () => {
         return {
           exited: Promise.resolve(1),
           stdout: new Blob([args.some(a => a.includes("Health")) ? "healthy" : "true"]).stream(),
-          stderr: new Blob(["no such container"]).stream(),
+          stderr: new Blob(["No such container"]).stream(),
         } as unknown as ReturnType<typeof Bun.spawn>;
       }
       return {

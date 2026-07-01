@@ -77,7 +77,7 @@ describe("snapshotWorkload", () => {
         return {
           exited: Promise.resolve(1),
           stdout: new Blob([""]).stream(),
-          stderr: new Blob(["no such container"]).stream(),
+          stderr: new Blob(["No such container"]).stream(),
         } as unknown as ReturnType<typeof Bun.spawn>;
       }
       return {
@@ -121,8 +121,8 @@ describe("checkContainerHealth", () => {
     Bun.spawn = (() => ({
       exited: Promise.resolve(1),
       stdout: new Blob([""]).stream(),
-      stderr: new Blob(["Error: no such container"]).stream(),
-    })) as typeof Bun.spawn;
+      stderr: new Blob(["No such container"]).stream(),
+    })) as unknown as typeof Bun.spawn;
 
     const result = await checkContainerHealth("test-project-user");
     expect(result).toBe(false);

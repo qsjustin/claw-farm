@@ -118,12 +118,11 @@ async function isServiceRunning(composeProject: string): Promise<boolean> {
   if (exitCode === 0) {
     return stdout.trim() === "true";
   }
-  // Non-zero exit: only allow "no-such-container" pattern; reject other errors
-  if (stderr.includes("No such object") || stderr.includes("no such container") ||
-      stderr.includes("Error: No such container") || stderr.includes("not found")) {
+  // Non-zero exit: only allow Docker's exact "No such object" or "No such container" as absent;
+  // Other errors (daemon, permission, I/O) → fail-closed
+  if (stderr.includes("No such object") || stderr.includes("No such container")) {
     return false; // container genuinely doesn't exist
   }
-  // Docker daemon error, permission error, etc. — fail-closed
   throw new Error(`docker inspect failed: exit ${exitCode}: ${stderr.trim() || stdout.trim()}`);
 }
 
@@ -220,7 +219,7 @@ async function restorePrevious(
   if (snapshot.wasRunning) {
     try {
       const { runComposeService } = await import("./compose.ts");
-      await runComposeService(instDir, "start", "weixin-sidecar", {
+      await runComposeService(instDir, "up", "weixin-sidecar", {
         quiet: true,
         projectName: composeProject,
       });
