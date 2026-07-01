@@ -1099,41 +1099,16 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       composeProject,
     },
     async () => {
-      // Side effect 1: Write compose with sidecar enabled
-      await writeInstanceCompose({
-        projectName: context.resolved.name,
-        userId,
-        port: instance?.port ?? 3000,
-        instDir,
-        runtimeType: context.runtimeType,
-        runtime: context.runtime,
-        proxyMode: context.proxyMode,
-        enableWeixinSidecar: true,
-      });
-
-      // Side effect 2: Compose up sidecar
-      await runComposeService(instDir, "up", serviceName, {
-        quiet: true,
-        projectName: composeProject,
-      });
-
-      // Side effect 3: Health check (Docker inspect .State.Health.Status === "healthy")
-      let healthOk = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        healthOk = await checkContainerHealth(composeProject);
-        if (healthOk) break;
-        await new Promise(r => setTimeout(r, 500));
-      }
-      if (!healthOk) {
-        throw new Error("Sidecar health check failed after compose up");
-      }
-    },
-    // #171 Phase 2A-2: Provision token after successful commit
-    async () => {
+      // #171 Phase 2A-2: Credential validation — fail-closed before any mutations
       const clawBayApiUrl = asString(payload.clawBayApiUrl);
       const clawBayAdminToken = asString(payload.clawBayAdminToken);
-      if (!clawBayApiUrl || !clawBayAdminToken) return;
+      const managedInstanceId = asString(payload.managedInstanceId) ?? "";
 
+      if (!clawBayApiUrl || !clawBayAdminToken) {
+        throw new Error("Provision credentials required: clawBayApiUrl + clawBayAdminToken. Refusing to start sidecar without token provision.");
+      }
+
+      // Side effect 1: Provision token BEFORE compose (creates env/token)
       const envFile = join(instDir, ".env.weixin");
       const sidecarContainer = `${composeProject}-weixin`;
       const provisionResponse = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision`, {
@@ -1144,7 +1119,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
         },
         body: JSON.stringify({
           spec: {
-            serviceRuntimeInstanceId: asString(payload.managedInstanceId),
+            serviceRuntimeInstanceId: managedInstanceId,
             userId,
             sidecarCode: "weixin-auth-sidecar",
             ttlSeconds: 3600,
@@ -1159,7 +1134,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
             readinessTimeoutMs: 30_000,
             readinessIntervalMs: 2_000,
           },
-          skipRestart: false,
+          skipRestart: true,
         }),
       });
       if (!provisionResponse.ok) {
@@ -1168,6 +1143,35 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       const provisionResult = (await provisionResponse.json()) as { ok: boolean; error?: { message?: string } };
       if (!provisionResult.ok) {
         throw new Error(`Provision failed: ${provisionResult.error?.message ?? "unknown"}`);
+      }
+
+      // Side effect 2: Write compose with sidecar enabled
+      await writeInstanceCompose({
+        projectName: context.resolved.name,
+        userId,
+        port: instance?.port ?? 3000,
+        instDir,
+        runtimeType: context.runtimeType,
+        runtime: context.runtime,
+        proxyMode: context.proxyMode,
+        enableWeixinSidecar: true,
+      });
+
+      // Side effect 3: Compose up sidecar
+      await runComposeService(instDir, "up", serviceName, {
+        quiet: true,
+        projectName: composeProject,
+      });
+
+      // Side effect 4: Health check
+      let healthOk = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        healthOk = await checkContainerHealth(composeProject);
+        if (healthOk) break;
+        await new Promise(r => setTimeout(r, 500));
+      }
+      if (!healthOk) {
+        throw new Error("Sidecar health check failed after compose up");
       }
     },
   );
@@ -1181,6 +1185,21 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       metadata: {
         rollbackErrorCodes: txResult.rollbackErrorCodes.length > 0 ? txResult.rollbackErrorCodes : undefined,
         didRollback: txResult.didRollback,
+      },
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // #171 Phase 2A-2: Post-commit degraded state (provision failure)
+  if (txResult.error) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Sidecar attached but provision failed: ${txResult.error}`,
+      errorCode: "runtime-command-failed",
+      retryable: true,
+      metadata: {
+        provisionFailed: true,
+        provisionError: txResult.error,
       },
       project: context.resolved.name, userId,
     });
@@ -1386,6 +1405,15 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       composeProject,
     },
     async () => {
+      // #171 Phase 2A-2: Credential validation — fail-closed before any mutations
+      const clawBayApiUrl = asString(payload.clawBayApiUrl);
+      const clawBayAdminToken = asString(payload.clawBayAdminToken);
+      const managedInstanceId = asString(payload.managedInstanceId) ?? "";
+
+      if (!clawBayApiUrl || !clawBayAdminToken) {
+        throw new Error("Revoke credentials required: clawBayApiUrl + clawBayAdminToken. Refusing to detach without token revoke.");
+      }
+
       // Side effect 1: Stop sidecar service
       const stopErrors: string[] = [];
       try {
@@ -1452,9 +1480,9 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     },
     // Post-commit: revoke token via ClawBay authenticated API
     async () => {
-      const clawBayApiUrl = asString(payload.clawBayApiUrl);
-      const clawBayAdminToken = asString(payload.clawBayAdminToken);
-      if (!clawBayApiUrl || !clawBayAdminToken) return;
+      const clawBayApiUrl = asString(payload.clawBayApiUrl)!;
+      const clawBayAdminToken = asString(payload.clawBayAdminToken)!;
+      const managedInstanceId = asString(payload.managedInstanceId)!;
 
       const resp = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
         method: "POST",
@@ -1463,7 +1491,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
           "x-claw-bay-admin-token": clawBayAdminToken,
         },
         body: JSON.stringify({
-          serviceRuntimeInstanceId: asString(payload.managedInstanceId),
+          serviceRuntimeInstanceId: managedInstanceId,
           sidecarCode: "weixin-auth-sidecar",
         }),
         signal: AbortSignal.timeout(30_000),
