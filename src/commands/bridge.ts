@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
+import { mkdir, rm, readFile, writeFile, unlink } from "node:fs/promises";
 import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose, resolveInstance } from "../lib/api.ts";
 import { runComposeService } from "../lib/compose.ts";
 import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, migrateSidecarSpec, SidecarSpecError, type SidecarSpec } from "../lib/sidecar-spec.ts";
@@ -1108,70 +1108,102 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
         throw new Error("Provision credentials required: clawBayApiUrl + clawBayAdminToken. Refusing to start sidecar without token provision.");
       }
 
-      // Side effect 1: Provision token BEFORE compose (creates env/token)
+      // Save .env.weixin state for rollback if provision creates/rotates it
       const envFile = join(instDir, ".env.weixin");
+      const previousEnv = await readFile(envFile, "utf8").catch(() => null);
       const sidecarContainer = `${composeProject}-weixin`;
-      const provisionResponse = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-claw-bay-admin-token": clawBayAdminToken,
-        },
-        body: JSON.stringify({
-          spec: {
-            serviceRuntimeInstanceId: managedInstanceId,
-            userId,
-            sidecarCode: "weixin-auth-sidecar",
-            ttlSeconds: 3600,
-            consumer: {
-              type: "compose-service",
-              composeFile: join(instDir, "docker-compose.openclaw.yml"),
-              serviceName: "weixin-sidecar",
-              envFile,
-              composeProject,
-            },
-            healthUrl: `http://${sidecarContainer}:8787/healthz`,
-            readinessTimeoutMs: 30_000,
-            readinessIntervalMs: 2_000,
+      let provisionSucceeded = false;
+
+      try {
+        // Side effect 1: Provision token BEFORE compose (creates env/token)
+        const provisionResponse = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-claw-bay-admin-token": clawBayAdminToken,
           },
-          skipRestart: true,
-        }),
-      });
-      if (!provisionResponse.ok) {
-        throw new Error(`Provision failed: HTTP ${provisionResponse.status}`);
-      }
-      const provisionResult = (await provisionResponse.json()) as { ok: boolean; error?: { message?: string } };
-      if (!provisionResult.ok) {
-        throw new Error(`Provision failed: ${provisionResult.error?.message ?? "unknown"}`);
-      }
+          body: JSON.stringify({
+            spec: {
+              serviceRuntimeInstanceId: managedInstanceId,
+              userId,
+              sidecarCode: "weixin-auth-sidecar",
+              ttlSeconds: 3600,
+              consumer: {
+                type: "compose-service",
+                composeFile: join(instDir, "docker-compose.openclaw.yml"),
+                serviceName: "weixin-sidecar",
+                envFile,
+                composeProject,
+              },
+              healthUrl: `http://${sidecarContainer}:8787/healthz`,
+              readinessTimeoutMs: 30_000,
+              readinessIntervalMs: 2_000,
+            },
+            skipRestart: true,
+          }),
+        });
+        if (!provisionResponse.ok) {
+          throw new Error(`Provision failed: HTTP ${provisionResponse.status}`);
+        }
+        const provisionResult = (await provisionResponse.json()) as { ok: boolean; error?: { message?: string } };
+        if (!provisionResult.ok) {
+          throw new Error(`Provision failed: ${provisionResult.error?.message ?? "unknown"}`);
+        }
+        provisionSucceeded = true;
 
-      // Side effect 2: Write compose with sidecar enabled
-      await writeInstanceCompose({
-        projectName: context.resolved.name,
-        userId,
-        port: instance?.port ?? 3000,
-        instDir,
-        runtimeType: context.runtimeType,
-        runtime: context.runtime,
-        proxyMode: context.proxyMode,
-        enableWeixinSidecar: true,
-      });
+        // Side effect 2: Write compose with sidecar enabled
+        await writeInstanceCompose({
+          projectName: context.resolved.name,
+          userId,
+          port: instance?.port ?? 3000,
+          instDir,
+          runtimeType: context.runtimeType,
+          runtime: context.runtime,
+          proxyMode: context.proxyMode,
+          enableWeixinSidecar: true,
+        });
 
-      // Side effect 3: Compose up sidecar
-      await runComposeService(instDir, "up", serviceName, {
-        quiet: true,
-        projectName: composeProject,
-      });
+        // Side effect 3: Compose up sidecar
+        await runComposeService(instDir, "up", serviceName, {
+          quiet: true,
+          projectName: composeProject,
+        });
 
-      // Side effect 4: Health check
-      let healthOk = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        healthOk = await checkContainerHealth(composeProject);
-        if (healthOk) break;
-        await new Promise(r => setTimeout(r, 500));
-      }
-      if (!healthOk) {
-        throw new Error("Sidecar health check failed after compose up");
+        // Side effect 4: Health check
+        let healthOk = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          healthOk = await checkContainerHealth(composeProject);
+          if (healthOk) break;
+          await new Promise(r => setTimeout(r, 500));
+        }
+        if (!healthOk) {
+          throw new Error("Sidecar health check failed after compose up");
+        }
+      } catch (error) {
+        // Rollback: revoke token + restore .env.weixin if provision succeeded
+        if (provisionSucceeded) {
+          try {
+            await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-claw-bay-admin-token": clawBayAdminToken,
+              },
+              body: JSON.stringify({
+                serviceRuntimeInstanceId: managedInstanceId,
+                sidecarCode: "weixin-auth-sidecar",
+              }),
+              signal: AbortSignal.timeout(10_000),
+            });
+          } catch { /* best-effort revoke */ }
+          // Restore .env.weixin
+          if (previousEnv !== null) {
+            await writeFile(envFile, previousEnv, "utf8").catch(() => {});
+          } else {
+            await unlink(envFile).catch(() => {});
+          }
+        }
+        throw error; // Re-throw to trigger transaction rollback
       }
     },
   );
@@ -1185,21 +1217,6 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       metadata: {
         rollbackErrorCodes: txResult.rollbackErrorCodes.length > 0 ? txResult.rollbackErrorCodes : undefined,
         didRollback: txResult.didRollback,
-      },
-      project: context.resolved.name, userId,
-    });
-  }
-
-  // #171 Phase 2A-2: Post-commit degraded state (provision failure)
-  if (txResult.error) {
-    return bridgeFailure({
-      action: "sidecar.attach",
-      message: `Sidecar attached but provision failed: ${txResult.error}`,
-      errorCode: "runtime-command-failed",
-      retryable: true,
-      metadata: {
-        provisionFailed: true,
-        provisionError: txResult.error,
       },
       project: context.resolved.name, userId,
     });
