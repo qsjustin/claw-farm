@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose, resolveInstance } from "../lib/api.ts";
 import { runComposeService } from "../lib/compose.ts";
 import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, migrateSidecarSpec, SidecarSpecError, type SidecarSpec } from "../lib/sidecar-spec.ts";
@@ -912,6 +912,28 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
 }
 
 // #171 Phase 2A-2: sidecar.attach - write versioned spec + compose, start sidecar service
+// #171 Phase 2A-2: Health check via Docker inspect (works in test without networking)
+async function checkSidecarHealth(composeProject: string): Promise<boolean> {
+  const containerName = `${composeProject}-weixin`;
+  const proc = Bun.spawn(["docker", "inspect", "--format", "{{.State.Running}}", containerName], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) return false;
+  const output = await new Response(proc.stdout).text();
+  return output.trim() === "true";
+}
+
+// #171 Phase 2A-2: Read compose file for rollback
+async function readComposeFile(instDir: string): Promise<string | null> {
+  try {
+    return await readFile(join(instDir, "docker-compose.openclaw.yml"), "utf8");
+  } catch {
+    return null;
+  }
+}
+
 async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
   const { project, userId } = parseRuntimeInstanceKey(payload);
   validateBridgeName(userId, "user ID");
@@ -1051,8 +1073,84 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
-  // Write versioned enabled spec BEFORE compose so rollback is possible
+  // #171 Phase 2A-2: Commit mode — save previous state, side effects first, spec only on success
   const composeProject = `${context.resolved.name}-${userId}`;
+  const instance = await getInstance(context.resolved.name, userId);
+  const previousCompose = await readComposeFile(instDir);
+  const previousSpec = spec ? JSON.stringify(spec) : null;
+
+  // Side effect 1: Write compose file with sidecar enabled
+  try {
+    await writeInstanceCompose({
+      projectName: context.resolved.name,
+      userId,
+      port: instance?.port ?? 3000,
+      instDir,
+      runtimeType: context.runtimeType,
+      runtime: context.runtime,
+      proxyMode: context.proxyMode,
+      enableWeixinSidecar: true,
+    });
+  } catch (error) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: error instanceof Error ? error.message : "Failed to write sidecar compose",
+      errorCode: "runtime-command-failed",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Side effect 2: Compose up sidecar
+  try {
+    await runComposeService(instDir, "up", "weixin-sidecar", {
+      quiet: true,
+      projectName: composeProject,
+    });
+  } catch (error) {
+    // Rollback compose
+    if (previousCompose !== null) {
+      await writeFile(join(instDir, "docker-compose.openclaw.yml"), previousCompose, "utf8").catch(() => {});
+    } else {
+      await rm(join(instDir, "docker-compose.openclaw.yml"), { force: true }).catch(() => {});
+    }
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: error instanceof Error ? error.message : "Failed to start sidecar service",
+      errorCode: "runtime-command-failed",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Side effect 3: Health check via Docker inspect
+  let healthOk = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    healthOk = await checkSidecarHealth(composeProject);
+    if (healthOk) break;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  if (!healthOk) {
+    // Rollback: stop sidecar + restore compose + restore spec
+    await runComposeService(instDir, "stop", "weixin-sidecar", { quiet: true, projectName: composeProject }).catch(() => {});
+    await runComposeService(instDir, "rm", "weixin-sidecar", { quiet: true, projectName: composeProject }).catch(() => {});
+    if (previousCompose !== null) {
+      await writeFile(join(instDir, "docker-compose.openclaw.yml"), previousCompose, "utf8").catch(() => {});
+    } else {
+      await rm(join(instDir, "docker-compose.openclaw.yml"), { force: true }).catch(() => {});
+    }
+    if (previousSpec) {
+      await writeFile(join(instDir, "sidecar-spec.json"), previousSpec, "utf8").catch(() => {});
+    } else {
+      await rm(join(instDir, "sidecar-spec.json"), { force: true }).catch(() => {});
+    }
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: "Sidecar health check failed after compose up",
+      errorCode: "runtime-command-failed",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // COMMIT: Write spec only after all side effects succeed
   const newSpec: SidecarSpec = {
     schemaVersion: 2,
     enabled: true,
@@ -1069,72 +1167,6 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     updatedAt: new Date().toISOString(),
   };
   await writeSidecarSpec(instDir, newSpec);
-
-  // Rebuild compose with sidecar using canonical writeInstanceCompose
-  // (handles OpenClaw/Hermes runtime templates correctly)
-  const instance = await getInstance(context.resolved.name, userId);
-  try {
-    await writeInstanceCompose({
-      projectName: context.resolved.name,
-      userId,
-      port: instance?.port ?? 3000,
-      instDir,
-      runtimeType: context.runtimeType,
-      runtime: context.runtime,
-      proxyMode: context.proxyMode,
-      enableWeixinSidecar: true,
-    });
-  } catch (error) {
-    // Rollback spec on compose failure
-    await removeSidecarSpec(instDir).catch(() => {});
-    return bridgeFailure({
-      action: "sidecar.attach",
-      message: error instanceof Error ? error.message : "Failed to write sidecar compose",
-      errorCode: "runtime-command-failed",
-      project: context.resolved.name, userId,
-    });
-  }
-
-  // Start only the sidecar service (main instance untouched)
-  // Use composeProject (${project}-${user}) for docker compose -p flag
-  try {
-    await runComposeService(instDir, "up", "weixin-sidecar", {
-      quiet: true,
-      projectName: composeProject,
-    });
-  } catch (error) {
-    // Rollback spec on start failure
-    await removeSidecarSpec(instDir).catch(() => {});
-    return bridgeFailure({
-      action: "sidecar.attach",
-      message: error instanceof Error ? error.message : "Failed to start sidecar service",
-      errorCode: "runtime-command-failed",
-      project: context.resolved.name, userId,
-    });
-  }
-
-  // #171 Phase 2A-2: Health probe — verify sidecar is actually running
-  const healthUrl = `http://localhost:8787/healthz`;
-  let healthOk = false;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) });
-      if (resp.ok) { healthOk = true; break; }
-    } catch { /* retry */ }
-    await new Promise(r => setTimeout(r, 1000));
-  }
-  if (!healthOk) {
-    // Rollback: stop sidecar + remove spec
-    await runComposeService(instDir, "stop", "weixin-sidecar", { quiet: true, projectName: composeProject }).catch(() => {});
-    await runComposeService(instDir, "rm", "weixin-sidecar", { quiet: true, projectName: composeProject }).catch(() => {});
-    await removeSidecarSpec(instDir).catch(() => {});
-    return bridgeFailure({
-      action: "sidecar.attach",
-      message: "Sidecar health check failed after compose up",
-      errorCode: "runtime-command-failed",
-      project: context.resolved.name, userId,
-    });
-  }
 
   return bridgeSuccess({
     action: "sidecar.attach",

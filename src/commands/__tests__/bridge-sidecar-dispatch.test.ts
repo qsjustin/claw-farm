@@ -119,18 +119,22 @@ describe("sidecar.attach dispatch", () => {
   beforeEach(() => {
     origSpawn = Bun.spawn;
     origFetch = globalThis.fetch;
-    // Mock compose commands to succeed
-    Bun.spawn = ((_args: string[], _opts?: { cwd?: string }) => {
+    // Mock compose + docker inspect commands
+    Bun.spawn = ((args: string[], _opts?: { cwd?: string }) => {
+      const cmd = args.join(" ");
+      if (cmd.includes("docker inspect")) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: new Blob(["true"]).stream(),
+          stderr: new Blob([""]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }
       return {
         exited: Promise.resolve(0),
         stdout: new Blob([""]).stream(),
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
-    // Mock fetch for health check
-    globalThis.fetch = ((_url: string | URL | Request) => {
-      return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
-    }) as typeof fetch;
   });
 
   afterEach(() => {
@@ -255,11 +259,22 @@ describe("sidecar.attach dispatch", () => {
   });
 
   it("rolls back spec when health check fails", { timeout: 15000 }, async () => {
-    // Override fetch to always fail (sidecar not responding)
-    globalThis.fetch = (() => {
-      console.log("MOCK fetch called!");
-      return Promise.reject(new Error("connection refused")) as Promise<Response>;
-    }) as typeof fetch;
+    // Override docker inspect to report container not running
+    Bun.spawn = ((args: string[]) => {
+      const cmd = args.join(" ");
+      if (cmd.includes("docker inspect")) {
+        return {
+          exited: Promise.resolve(1),
+          stdout: new Blob([""]).stream(),
+          stderr: new Blob(["Error: no such container"]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([""]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as typeof Bun.spawn;
 
     const result = await dispatch("sidecar.attach", basePayload());
     expect(result.ok).toBe(false);
@@ -367,14 +382,22 @@ describe("sidecar.attach v1 migration", () => {
   beforeEach(() => {
     origSpawn = Bun.spawn;
     origFetch = globalThis.fetch;
-    Bun.spawn = ((_args: string[], _opts?: { cwd?: string }) => {
+    Bun.spawn = ((args: string[], _opts?: { cwd?: string }) => {
+      const cmd = args.join(" ");
+      if (cmd.includes("docker inspect")) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: new Blob(["true"]).stream(),
+          stderr: new Blob([""]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }
       return {
         exited: Promise.resolve(0),
         stdout: new Blob([""]).stream(),
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
-    globalThis.fetch = ((_url: string | URL | Request) => {
+    globalThis.fetch = (() => {
       return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
     }) as typeof fetch;
   });
@@ -419,14 +442,22 @@ describe("sidecar.detach v1 migration", () => {
   beforeEach(() => {
     origSpawn = Bun.spawn;
     origFetch = globalThis.fetch;
-    Bun.spawn = ((_args: string[], _opts?: { cwd?: string }) => {
+    Bun.spawn = ((args: string[], _opts?: { cwd?: string }) => {
+      const cmd = args.join(" ");
+      if (cmd.includes("docker inspect")) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: new Blob(["true"]).stream(),
+          stderr: new Blob([""]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }
       return {
         exited: Promise.resolve(0),
         stdout: new Blob([""]).stream(),
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
-    globalThis.fetch = ((_url: string | URL | Request) => {
+    globalThis.fetch = (() => {
       return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
     }) as typeof fetch;
   });
