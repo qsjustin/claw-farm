@@ -125,7 +125,7 @@ describe("sidecar.attach dispatch", () => {
       if (cmd.includes("docker inspect")) {
         return {
           exited: Promise.resolve(0),
-          stdout: new Blob(["true"]).stream(),
+          stdout: new Blob([args.some(a => a.includes("Health")) ? "healthy" : "true"]).stream(),
           stderr: new Blob([""]).stream(),
         } as unknown as ReturnType<typeof Bun.spawn>;
       }
@@ -135,6 +135,11 @@ describe("sidecar.attach dispatch", () => {
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
+
+    // Also mock globalThis.fetch
+    globalThis.fetch = (() => {
+      return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
+    }) as unknown as typeof fetch;
   });
 
   afterEach(() => {
@@ -144,7 +149,7 @@ describe("sidecar.attach dispatch", () => {
 
   it("attaches when no spec exists (first attach)", async () => {
     const result = await dispatch("sidecar.attach", basePayload());
-    if (!result.ok) { console.log("FAIL:", result); }
+    if (!result.ok) { console.log("FAIL first-attach:", JSON.stringify(result)); }
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.action).toBe("sidecar.attach");
@@ -308,9 +313,9 @@ describe("sidecar.detach dispatch", () => {
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
-    globalThis.fetch = ((_url: string | URL | Request) => {
+    globalThis.fetch = (() => {
       return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
   });
 
   afterEach(() => {
@@ -387,7 +392,7 @@ describe("sidecar.attach v1 migration", () => {
       if (cmd.includes("docker inspect")) {
         return {
           exited: Promise.resolve(0),
-          stdout: new Blob(["true"]).stream(),
+          stdout: new Blob([args.some(a => a.includes("Health")) ? "healthy" : "true"]).stream(),
           stderr: new Blob([""]).stream(),
         } as unknown as ReturnType<typeof Bun.spawn>;
       }
@@ -399,7 +404,7 @@ describe("sidecar.attach v1 migration", () => {
     }) as typeof Bun.spawn;
     globalThis.fetch = (() => {
       return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
   });
 
   afterEach(() => {
@@ -447,7 +452,7 @@ describe("sidecar.detach v1 migration", () => {
       if (cmd.includes("docker inspect")) {
         return {
           exited: Promise.resolve(0),
-          stdout: new Blob(["true"]).stream(),
+          stdout: new Blob([args.some(a => a.includes("Health")) ? "healthy" : "true"]).stream(),
           stderr: new Blob([""]).stream(),
         } as unknown as ReturnType<typeof Bun.spawn>;
       }
@@ -459,7 +464,7 @@ describe("sidecar.detach v1 migration", () => {
     }) as typeof Bun.spawn;
     globalThis.fetch = (() => {
       return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
   });
 
   afterEach(() => {
