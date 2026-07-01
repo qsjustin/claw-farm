@@ -107,18 +107,24 @@ export async function snapshotWorkload(
  */
 async function isServiceRunning(composeProject: string): Promise<boolean> {
   const containerName = `${composeProject}-weixin`;
-  try {
-    const proc = Bun.spawn(
-      ["docker", "inspect", "--format", "{{.State.Running}}", containerName],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    const exitCode = await proc.exited;
-    if (exitCode !== 0) return false;
-    const output = await new Response(proc.stdout).text();
-    return output.trim() === "true";
-  } catch {
-    return false;
+  const proc = Bun.spawn(
+    ["docker", "inspect", "--format", "{{.State.Running}}", containerName],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const exitCode = await proc.exited;
+  const stderr = await new Response(proc.stderr).text();
+  const stdout = await new Response(proc.stdout).text();
+
+  if (exitCode === 0) {
+    return stdout.trim() === "true";
   }
+  // Non-zero exit: only allow "no-such-container" pattern; reject other errors
+  if (stderr.includes("No such object") || stderr.includes("no such container") ||
+      stderr.includes("Error: No such container") || stderr.includes("not found")) {
+    return false; // container genuinely doesn't exist
+  }
+  // Docker daemon error, permission error, etc. — fail-closed
+  throw new Error(`docker inspect failed: exit ${exitCode}: ${stderr.trim() || stdout.trim()}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -210,19 +216,14 @@ async function restorePrevious(
     }
   }
 
-  // Restart previous workload if it was running
+  // Restart previous workload if it was running (service-scoped, not full instance)
   if (snapshot.wasRunning) {
     try {
       const { runComposeService } = await import("./compose.ts");
-      const proc = Bun.spawn(
-        ["docker", "compose", "-f", composePath, "-p", composeProject, "up", "-d"],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      const exitCode = await proc.exited;
-      if (exitCode !== 0) {
-        const stderr = await new Response(proc.stderr).text();
-        errors.push(`workload restart failed: exit ${exitCode}: ${stderr.trim()}`);
-      }
+      await runComposeService(instDir, "start", "weixin-sidecar", {
+        quiet: true,
+        projectName: composeProject,
+      });
     } catch (err) {
       errors.push(`workload restart error: ${err instanceof Error ? err.message : err}`);
     }

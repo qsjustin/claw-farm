@@ -1324,9 +1324,26 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         stopErrors.push(error instanceof Error ? error.message : String(error));
       }
 
-      // If BOTH stop and rm fail, sidecar is still running — hard error
+      // If stop+rm both failed, sidecar is still running — hard error
       if (stopErrors.length >= 2) {
         throw new Error(`Failed to stop and remove sidecar: ${stopErrors.join("; ")}`);
+      }
+
+      // Verify target absent: inspect container after rm
+      const containerName = `${composeProject}-weixin`;
+      try {
+        const inspectProc = Bun.spawn(
+          ["docker", "inspect", containerName],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        const exitCode = await inspectProc.exited;
+        if (exitCode === 0) {
+          // Container still exists — rm didn't work
+          throw new Error(`Sidecar container ${containerName} still exists after rm`);
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("still exists")) throw err;
+        // Other errors (docker not found, etc.) — OK, container is gone
       }
 
       // Side effect 3: Rewrite compose without sidecar
@@ -1343,12 +1360,13 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     },
     // Post-commit: revoke token (best-effort, irreversible)
     async () => {
-      try {
-        await fetch(`http://localhost:8787/internal/weixin/sessions/revoke`, {
-          method: "POST",
-          signal: AbortSignal.timeout(3000),
-        }).catch(() => {});
-      } catch { /* revoke may not be available */ }
+      const resp = await fetch(`http://localhost:8787/internal/weixin/sessions/revoke`, {
+        method: "POST",
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!resp.ok) {
+        throw new Error(`revoke returned HTTP ${resp.status}`);
+      }
     },
   );
 

@@ -306,7 +306,14 @@ describe("sidecar.detach dispatch", () => {
   beforeEach(() => {
     origSpawn = Bun.spawn;
     origFetch = globalThis.fetch;
-    Bun.spawn = ((_args: string[], _opts?: { cwd?: string }) => {
+    Bun.spawn = ((args: string[], _opts?: { cwd?: string }) => {
+      if (args.join(" ").includes("docker inspect")) {
+        return {
+          exited: Promise.resolve(1),
+          stdout: new Blob([""]).stream(),
+          stderr: new Blob(["no such container"]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }
       return {
         exited: Promise.resolve(0),
         stdout: new Blob([""]).stream(),
@@ -451,9 +458,9 @@ describe("sidecar.detach v1 migration", () => {
       const cmd = args.join(" ");
       if (cmd.includes("docker inspect")) {
         return {
-          exited: Promise.resolve(0),
+          exited: Promise.resolve(1),
           stdout: new Blob([args.some(a => a.includes("Health")) ? "healthy" : "true"]).stream(),
-          stderr: new Blob([""]).stream(),
+          stderr: new Blob(["no such container"]).stream(),
         } as unknown as ReturnType<typeof Bun.spawn>;
       }
       return {
