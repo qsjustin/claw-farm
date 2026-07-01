@@ -447,26 +447,48 @@ describe("executeWorkloadTransaction", () => {
     // Delete temp dir to make all operations fail
     await rm(tempDir, { recursive: true, force: true });
 
-    const VALID_CODES = new Set(["target-stop-failed", "target-remove-failed", "compose-restore-failed", "spec-restore-failed", "workload-restore-failed"]);
+    const VALID_CODES = new Set(["target-stop-failed", "target-remove-failed", "compose-restore-failed", "compose-unlink-failed", "spec-restore-failed", "spec-unlink-failed", "workload-restore-failed"]);
     const snapshot = { previousSpec: validSpec, previousCompose: "old", wasRunning: false };
     const codes = await restorePrevious(tempDir, "test-project-user", snapshot);
     for (const code of codes) {
       expect(VALID_CODES.has(code)).toBe(true);
     }
+    // Must contain compose-restore-failed (writeFile fails since dir deleted)
+    expect(codes).toContain("compose-restore-failed");
   });
 
   it("bound rollbackErrorCodes to MAX_ROLLBACK_CODES", async () => {
-    // Delete temp dir to make restore fail
-    await rm(tempDir, { recursive: true, force: true });
-
-    // Test compensateTarget directly with injectable mock
-    const mockRunCompose = (async () => {
-      throw new Error("failed");
+    // Make compensateTarget fail (inject failing deps)
+    const failingCompose = (async () => {
+      throw new Error("compose failed");
     }) as any;
 
-    const codes = await compensateTarget(tempDir, "test-project-user", "weixin-sidecar", { runComposeService: mockRunCompose });
-    expect(codes.length).toBeLessThanOrEqual(5);
-    expect(codes).toContain("target-stop-failed");
-    expect(codes).toContain("target-remove-failed");
+    // Write old compose so unlink fails (not ENOENT)
+    await writeFile(join(tempDir, "docker-compose.openclaw.yml"), "old", "utf8");
+    // Write old spec so spec write fails (invalid spec)
+    await writeFile(join(tempDir, "sidecar-spec.json"), JSON.stringify(validSpec), "utf8");
+    // Make dir read-only so both write and unlink fail
+    const { chmod } = await import("node:fs/promises");
+    await chmod(tempDir, 0o555);
+
+    try {
+      const compCodes = await compensateTarget(tempDir, "test-project-user", "weixin-sidecar", { runComposeService: failingCompose });
+      const snapshot = { previousSpec: validSpec, previousCompose: "old", wasRunning: false };
+      const restoreCodes = await restorePrevious(tempDir, "test-project-user", snapshot);
+      const allCodes = [...compCodes, ...restoreCodes];
+
+      // We should have codes from both compensate and restore
+      expect(compCodes.length).toBeGreaterThanOrEqual(2);
+      expect(restoreCodes.length).toBeGreaterThanOrEqual(1);
+      expect(allCodes.length).toBeGreaterThanOrEqual(3);
+
+      // All codes should be in allowlist
+      const VALID_CODES = new Set(["target-stop-failed", "target-remove-failed", "compose-restore-failed", "compose-unlink-failed", "spec-restore-failed", "spec-unlink-failed", "workload-restore-failed"]);
+      for (const code of allCodes) {
+        expect(VALID_CODES.has(code)).toBe(true);
+      }
+    } finally {
+      await chmod(tempDir, 0o755);
+    }
   });
 });

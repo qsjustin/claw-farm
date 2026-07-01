@@ -195,7 +195,7 @@ export async function restorePrevious(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code !== "ENOENT") {
-        codes.push("compose-restore-failed");
+        codes.push("compose-unlink-failed");
       }
     }
   }
@@ -213,7 +213,7 @@ export async function restorePrevious(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code !== "ENOENT") {
-        codes.push("spec-restore-failed");
+        codes.push("spec-unlink-failed");
       }
     }
   }

@@ -14,7 +14,9 @@ export const ROLLBACK_ERROR_CODES = [
   "target-stop-failed",
   "target-remove-failed",
   "compose-restore-failed",
+  "compose-unlink-failed",
   "spec-restore-failed",
+  "spec-unlink-failed",
   "workload-restore-failed",
 ] as const;
 
