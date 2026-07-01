@@ -263,7 +263,7 @@ describe("sidecar.attach dispatch", () => {
     }
   });
 
-  it("rolls back spec when health check fails", { timeout: 15000 }, async () => {
+  it("rolls back spec when health check fails", async () => {
     // Override docker inspect to report container not running
     Bun.spawn = ((args: string[]) => {
       const cmd = args.join(" ");

@@ -1052,23 +1052,10 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
-  // #171 Phase 2A-2: Transaction mode — snapshot, side effects, commit/rollback
   const composeProject = `${context.resolved.name}-${userId}`;
   const instance = await getInstance(context.resolved.name, userId);
   const serviceName = "weixin-sidecar";
 
-  // Build new compose content (sidecar enabled)
-  const newComposeContent = await new Promise<string>((resolve, reject) => {
-    // writeInstanceCompose writes to file; we need the content for commit mode
-    // Use a temporary approach: write, read, then rollback on failure
-    // Actually, writeInstanceCompose writes the file directly.
-    // For commit mode, we save the previous compose, write the new one,
-    // and restore on failure.
-    reject(new Error("placeholder"));
-  }).catch(() => ""); // This is replaced below
-
-  // Actually, the simplest approach: use writeInstanceCompose for side effect,
-  // then commit the spec. The transaction helper handles the rest.
   const txResult = await executeWorkloadTransaction(
     instDir,
     composeProject,
@@ -1113,10 +1100,10 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
 
       // Side effect 3: Health check (Docker inspect .State.Health.Status === "healthy")
       let healthOk = false;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        healthOk = await checkContainerHealth(composeProject, serviceName);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        healthOk = await checkContainerHealth(composeProject);
         if (healthOk) break;
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 500));
       }
       if (!healthOk) {
         throw new Error("Sidecar health check failed after compose up");
@@ -1127,7 +1114,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   if (!txResult.committed) {
     return bridgeFailure({
       action: "sidecar.attach",
-      message: txResult.sideEffectError ?? "Transaction failed",
+      message: txResult.error ?? "Transaction failed",
       errorCode: "runtime-command-failed",
       retryable: txResult.rollbackErrors.length === 0,
       project: context.resolved.name, userId,
@@ -1316,30 +1303,30 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       composeProject,
     },
     async () => {
-      // Side effect 1: Revoke sidecar token (best-effort)
-      try {
-        await fetch(`http://localhost:8787/internal/weixin/sessions/revoke`, {
-          method: "POST",
-          signal: AbortSignal.timeout(3000),
-        }).catch(() => {});
-      } catch { /* revoke may not be available */ }
-
-      // Side effect 2: Stop + remove sidecar service
+      // Side effect 1: Stop sidecar service
+      const stopErrors: string[] = [];
       try {
         await runComposeService(instDir, "stop", serviceName, {
           quiet: true,
           projectName: composeProject,
         });
       } catch (error) {
-        // Best-effort stop: service may already be stopped
+        stopErrors.push(error instanceof Error ? error.message : String(error));
       }
+
+      // Side effect 2: Remove sidecar service
       try {
         await runComposeService(instDir, "rm", serviceName, {
           quiet: true,
           projectName: composeProject,
         });
       } catch (error) {
-        // Best-effort rm: service may not exist
+        stopErrors.push(error instanceof Error ? error.message : String(error));
+      }
+
+      // If BOTH stop and rm fail, sidecar is still running — hard error
+      if (stopErrors.length >= 2) {
+        throw new Error(`Failed to stop and remove sidecar: ${stopErrors.join("; ")}`);
       }
 
       // Side effect 3: Rewrite compose without sidecar
@@ -1354,12 +1341,21 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         enableWeixinSidecar: false,
       });
     },
+    // Post-commit: revoke token (best-effort, irreversible)
+    async () => {
+      try {
+        await fetch(`http://localhost:8787/internal/weixin/sessions/revoke`, {
+          method: "POST",
+          signal: AbortSignal.timeout(3000),
+        }).catch(() => {});
+      } catch { /* revoke may not be available */ }
+    },
   );
 
   if (!txResult.committed) {
     return bridgeFailure({
       action: "sidecar.detach",
-      message: txResult.sideEffectError ?? "Transaction failed",
+      message: txResult.error ?? "Transaction failed",
       errorCode: "runtime-command-failed",
       retryable: false,
       project: context.resolved.name, userId,
@@ -1368,7 +1364,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
 
   return bridgeSuccess({
     action: "sidecar.detach",
-    message: `Detached sidecar for "${userId}"`,
+    message: txResult.error ? `Detached sidecar for "${userId}" (revoke degraded: ${txResult.error})` : `Detached sidecar for "${userId}"`,
     metadata: {
       sidecarCode: "weixin-auth-sidecar",
       serviceName: "weixin-sidecar",
