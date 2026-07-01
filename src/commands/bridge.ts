@@ -1043,13 +1043,32 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   }
 
   // Identity mismatch guard (skip for legacy-migrated specs)
-  if (spec && spec.operationId && !spec.operationId.startsWith("legacy-") && spec.bindingId !== bindingId) {
-    return bridgeFailure({
-      action: "sidecar.attach",
-      message: `Binding identity mismatch: spec=${spec.bindingId}, request=${bindingId}`,
-      errorCode: "runtime-conflict",
-      project: context.resolved.name, userId,
-    });
+  if (spec && spec.operationId && !spec.operationId.startsWith("legacy-")) {
+    if (spec.bindingId !== bindingId) {
+      return bridgeFailure({
+        action: "sidecar.attach",
+        message: `Binding identity mismatch: spec=${spec.bindingId}, request=${bindingId}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+    if (spec.managedInstanceId !== (asString(payload.managedInstanceId) ?? "")) {
+      return bridgeFailure({
+        action: "sidecar.attach",
+        message: `ManagedInstance identity mismatch: spec=${spec.managedInstanceId}, request=${asString(payload.managedInstanceId)}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+    // Config version continuity: spec.targetConfigVersion must match incoming expectedConfigVersion
+    if (spec.targetConfigVersion !== ecgv!) {
+      return bridgeFailure({
+        action: "sidecar.attach",
+        message: `Config version mismatch: spec=${spec.targetConfigVersion}, expected=${ecgv!}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
   }
 
   const composeProject = `${context.resolved.name}-${userId}`;
@@ -1107,6 +1126,48 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       }
       if (!healthOk) {
         throw new Error("Sidecar health check failed after compose up");
+      }
+    },
+    // #171 Phase 2A-2: Provision token after successful commit
+    async () => {
+      const clawBayApiUrl = asString(payload.clawBayApiUrl);
+      const clawBayAdminToken = asString(payload.clawBayAdminToken);
+      if (!clawBayApiUrl || !clawBayAdminToken) return;
+
+      const envFile = join(instDir, ".env.weixin");
+      const sidecarContainer = `${composeProject}-weixin`;
+      const provisionResponse = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-claw-bay-admin-token": clawBayAdminToken,
+        },
+        body: JSON.stringify({
+          spec: {
+            serviceRuntimeInstanceId: asString(payload.managedInstanceId),
+            userId,
+            sidecarCode: "weixin-auth-sidecar",
+            ttlSeconds: 3600,
+            consumer: {
+              type: "compose-service",
+              composeFile: join(instDir, "docker-compose.openclaw.yml"),
+              serviceName: "weixin-sidecar",
+              envFile,
+              composeProject,
+            },
+            healthUrl: `http://${sidecarContainer}:8787/healthz`,
+            readinessTimeoutMs: 30_000,
+            readinessIntervalMs: 2_000,
+          },
+          skipRestart: false,
+        }),
+      });
+      if (!provisionResponse.ok) {
+        throw new Error(`Provision failed: HTTP ${provisionResponse.status}`);
+      }
+      const provisionResult = (await provisionResponse.json()) as { ok: boolean; error?: { message?: string } };
+      if (!provisionResult.ok) {
+        throw new Error(`Provision failed: ${provisionResult.error?.message ?? "unknown"}`);
       }
     },
   );
@@ -1270,13 +1331,31 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
   }
 
   // Identity mismatch guard (skip for legacy-migrated specs)
-  if (spec && spec.operationId && !spec.operationId.startsWith("legacy-") && spec.bindingId !== bindingId) {
-    return bridgeFailure({
-      action: "sidecar.detach",
-      message: `Binding identity mismatch: spec=${spec.bindingId}, request=${bindingId}`,
-      errorCode: "runtime-conflict",
-      project: context.resolved.name, userId,
-    });
+  if (spec && spec.operationId && !spec.operationId.startsWith("legacy-")) {
+    if (spec.bindingId !== bindingId) {
+      return bridgeFailure({
+        action: "sidecar.detach",
+        message: `Binding identity mismatch: spec=${spec.bindingId}, request=${bindingId}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+    if (spec.managedInstanceId !== (asString(payload.managedInstanceId) ?? "")) {
+      return bridgeFailure({
+        action: "sidecar.detach",
+        message: `ManagedInstance identity mismatch: spec=${spec.managedInstanceId}, request=${asString(payload.managedInstanceId)}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+    if (spec.targetConfigVersion !== decv!) {
+      return bridgeFailure({
+        action: "sidecar.detach",
+        message: `Config version mismatch: spec=${spec.targetConfigVersion}, expected=${decv!}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
   }
 
   const composeProject = `${context.resolved.name}-${userId}`;
@@ -1371,14 +1450,27 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         enableWeixinSidecar: false,
       });
     },
-    // Post-commit: revoke token (best-effort, irreversible)
+    // Post-commit: revoke token via ClawBay authenticated API
     async () => {
-      const resp = await fetch(`http://localhost:8787/internal/weixin/sessions/revoke`, {
+      const clawBayApiUrl = asString(payload.clawBayApiUrl);
+      const clawBayAdminToken = asString(payload.clawBayAdminToken);
+      if (!clawBayApiUrl || !clawBayAdminToken) return;
+
+      const resp = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
         method: "POST",
-        signal: AbortSignal.timeout(3000),
+        headers: {
+          "Content-Type": "application/json",
+          "x-claw-bay-admin-token": clawBayAdminToken,
+        },
+        body: JSON.stringify({
+          serviceRuntimeInstanceId: asString(payload.managedInstanceId),
+          sidecarCode: "weixin-auth-sidecar",
+        }),
+        signal: AbortSignal.timeout(30_000),
       });
       if (!resp.ok) {
-        throw new Error(`revoke returned HTTP ${resp.status}`);
+        const errorBody = await resp.json().catch(() => ({})) as { error?: { message?: string } };
+        throw new Error(`Revoke failed: HTTP ${resp.status} ${errorBody.error?.message ?? ""}`);
       }
     },
   );
