@@ -136,16 +136,17 @@ async function isServiceRunning(composeProject: string): Promise<boolean> {
  * Stop and remove the sidecar service (compensation for new workload).
  * Best-effort: logs errors but doesn't throw.
  */
-async function compensateTarget(
+export async function compensateTarget(
   instDir: string,
   composeProject: string,
   serviceName: string,
+  deps?: { runComposeService?: typeof import("./compose.ts").runComposeService },
 ): Promise<RollbackErrorCode[]> {
   const codes: RollbackErrorCode[] = [];
-  const { runComposeService } = await import("./compose.ts");
+  const runCompose = deps?.runComposeService ?? (await import("./compose.ts")).runComposeService;
 
   try {
-    await runComposeService(instDir, "stop", serviceName, {
+    await runCompose(instDir, "stop", serviceName, {
       quiet: true,
       projectName: composeProject,
     });
@@ -154,7 +155,7 @@ async function compensateTarget(
   }
 
   try {
-    await runComposeService(instDir, "rm", serviceName, {
+    await runCompose(instDir, "rm", serviceName, {
       quiet: true,
       projectName: composeProject,
     });
@@ -172,7 +173,7 @@ async function compensateTarget(
 /**
  * Restore previous compose and spec files, and restart sidecar if it was running.
  */
-async function restorePrevious(
+export async function restorePrevious(
   instDir: string,
   composeProject: string,
   snapshot: WorkloadSnapshot,

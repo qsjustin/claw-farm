@@ -14,6 +14,8 @@ import {
   executeWorkloadTransaction,
   snapshotWorkload,
   checkContainerHealth,
+  compensateTarget,
+  restorePrevious,
 } from "../../lib/workload-tx.ts";
 import { writeSidecarSpec, readSidecarSpec, type SidecarSpec } from "../../lib/sidecar-spec.ts";
 
@@ -402,71 +404,69 @@ describe("executeWorkloadTransaction", () => {
     expect(result.error).toContain("rm failed");
   });
 
-  it("returns compose-restore-failed when compose restore fails", async () => {
+  it("compensateTarget returns target-stop-failed when stop fails", async () => {
+    const mockRunCompose = (async (_dir: string, action: string) => {
+      if (action === "stop") throw new Error("stop failed");
+    }) as any;
+    const codes = await compensateTarget(tempDir, "test-project-user", "weixin-sidecar", { runComposeService: mockRunCompose });
+    expect(codes).toContain("target-stop-failed");
+    expect(codes).not.toContain("target-remove-failed");
+  });
+
+  it("compensateTarget returns target-remove-failed when rm fails", async () => {
+    const mockRunCompose = (async (_dir: string, action: string) => {
+      if (action === "rm") throw new Error("rm failed");
+    }) as any;
+    const codes = await compensateTarget(tempDir, "test-project-user", "weixin-sidecar", { runComposeService: mockRunCompose });
+    expect(codes).toContain("target-remove-failed");
+    expect(codes).not.toContain("target-stop-failed");
+  });
+
+  it("compensateTarget returns both codes when stop and rm fail", async () => {
+    const mockRunCompose = (async () => {
+      throw new Error("both failed");
+    }) as any;
+    const codes = await compensateTarget(tempDir, "test-project-user", "weixin-sidecar", { runComposeService: mockRunCompose });
+    expect(codes).toContain("target-stop-failed");
+    expect(codes).toContain("target-remove-failed");
+  });
+
+  it("restorePrevious returns compose-restore-failed when compose write fails", async () => {
     // Write old compose
     await writeFile(join(tempDir, "docker-compose.openclaw.yml"), "old", "utf8");
 
-    // Override restorePrevious to simulate compose failure
-    const origRestore = (await import("../../lib/workload-tx.ts")).restorePrevious;
-    // We can't easily mock restorePrevious, but we can verify the code mapping
-    // by checking that a side effect failure + rollback returns codes
-    const result = await executeWorkloadTransaction(
-      tempDir,
-      "test-project-user",
-      "weixin-sidecar",
-      { newSpec: validSpec, serviceName: "weixin-sidecar", composeProject: "test-project-user" },
-      async () => {
-        throw new Error("side effect failed");
-      },
-    );
+    // Delete the temp dir so writeFile fails
+    await rm(tempDir, { recursive: true, force: true });
 
-    expect(result.committed).toBe(false);
-    expect(result.didRollback).toBe(true);
-    // rollbackErrorCodes should contain valid codes from the allowlist
+    const snapshot = { previousSpec: null, previousCompose: "old", wasRunning: false };
+    const codes = await restorePrevious(tempDir, "test-project-user", snapshot);
+    expect(codes).toContain("compose-restore-failed");
+  });
+
+  it("restorePrevious returns all-allowlisted codes on multiple failures", async () => {
+    // Delete temp dir to make all operations fail
+    await rm(tempDir, { recursive: true, force: true });
+
     const VALID_CODES = new Set(["target-stop-failed", "target-remove-failed", "compose-restore-failed", "spec-restore-failed", "workload-restore-failed"]);
-    for (const code of result.rollbackErrorCodes) {
+    const snapshot = { previousSpec: validSpec, previousCompose: "old", wasRunning: false };
+    const codes = await restorePrevious(tempDir, "test-project-user", snapshot);
+    for (const code of codes) {
       expect(VALID_CODES.has(code)).toBe(true);
     }
   });
 
-  it("returns target-remove-failed when rm fails in side effects", async () => {
-    const result = await executeWorkloadTransaction(
-      tempDir,
-      "test-project-user",
-      "weixin-sidecar",
-      { newSpec: validSpec, serviceName: "weixin-sidecar", composeProject: "test-project-user" },
-      async () => {
-        // Simulate rm failure in side effects
-        throw new Error("docker rm failed");
-      },
-    );
-
-    expect(result.committed).toBe(false);
-    // rollbackErrorCodes should be bounded (MAX_ROLLBACK_CODES = 5)
-    expect(result.rollbackErrorCodes.length).toBeLessThanOrEqual(5);
-  });
-
   it("bound rollbackErrorCodes to MAX_ROLLBACK_CODES", async () => {
-    // Write old compose and make dir read-only to trigger multiple failures
-    await writeFile(join(tempDir, "docker-compose.openclaw.yml"), "old", "utf8");
-    const { chmod } = await import("node:fs/promises");
-    await chmod(tempDir, 0o555);
+    // Delete temp dir to make restore fail
+    await rm(tempDir, { recursive: true, force: true });
 
-    try {
-      const result = await executeWorkloadTransaction(
-        tempDir,
-        "test-project-user",
-        "weixin-sidecar",
-        { newSpec: validSpec, serviceName: "weixin-sidecar", composeProject: "test-project-user" },
-        async () => {
-          throw new Error("side effect failed");
-        },
-      );
+    // Test compensateTarget directly with injectable mock
+    const mockRunCompose = (async () => {
+      throw new Error("failed");
+    }) as any;
 
-      expect(result.committed).toBe(false);
-      expect(result.rollbackErrorCodes.length).toBeLessThanOrEqual(5);
-    } finally {
-      await chmod(tempDir, 0o755);
-    }
+    const codes = await compensateTarget(tempDir, "test-project-user", "weixin-sidecar", { runComposeService: mockRunCompose });
+    expect(codes.length).toBeLessThanOrEqual(5);
+    expect(codes).toContain("target-stop-failed");
+    expect(codes).toContain("target-remove-failed");
   });
 });
