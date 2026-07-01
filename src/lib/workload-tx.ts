@@ -22,6 +22,8 @@ import {
   SidecarSpecError,
   type SidecarSpec,
 } from "./sidecar-spec.ts";
+import type { RollbackErrorCode } from "./workload-tx-types.ts";
+import { MAX_ROLLBACK_CODES } from "./workload-tx-types.ts";
 
 const COMPOSE_FILE = "docker-compose.openclaw.yml";
 
@@ -45,8 +47,8 @@ export interface TransactionResult {
   committed: boolean;
   /** Side effect or commit error message */
   error?: string;
-  /** Any non-fatal restore errors during rollback */
-  rollbackErrors: string[];
+  /** Allowlisted rollback error codes */
+  rollbackErrorCodes: RollbackErrorCode[];
   /** Whether rollback was needed at all */
   didRollback: boolean;
 }
@@ -138,8 +140,8 @@ async function compensateTarget(
   instDir: string,
   composeProject: string,
   serviceName: string,
-): Promise<string[]> {
-  const errors: string[] = [];
+): Promise<RollbackErrorCode[]> {
+  const codes: RollbackErrorCode[] = [];
   const { runComposeService } = await import("./compose.ts");
 
   try {
@@ -147,8 +149,8 @@ async function compensateTarget(
       quiet: true,
       projectName: composeProject,
     });
-  } catch (err) {
-    errors.push(`stop failed: ${err instanceof Error ? err.message : err}`);
+  } catch {
+    codes.push("target-stop-failed");
   }
 
   try {
@@ -156,11 +158,11 @@ async function compensateTarget(
       quiet: true,
       projectName: composeProject,
     });
-  } catch (err) {
-    errors.push(`rm failed: ${err instanceof Error ? err.message : err}`);
+  } catch {
+    codes.push("target-remove-failed");
   }
 
-  return errors;
+  return codes.slice(0, MAX_ROLLBACK_CODES);
 }
 
 // ---------------------------------------------------------------------------
@@ -174,8 +176,8 @@ async function restorePrevious(
   instDir: string,
   composeProject: string,
   snapshot: WorkloadSnapshot,
-): Promise<string[]> {
-  const errors: string[] = [];
+): Promise<RollbackErrorCode[]> {
+  const codes: RollbackErrorCode[] = [];
   const composePath = join(instDir, COMPOSE_FILE);
   const specPath = join(instDir, "sidecar-spec.json");
 
@@ -184,7 +186,7 @@ async function restorePrevious(
     try {
       await writeFile(composePath, snapshot.previousCompose, "utf8");
     } catch (err) {
-      errors.push(`compose restore failed: ${err instanceof Error ? err.message : err}`);
+      codes.push("compose-restore-failed");
     }
   } else {
     try {
@@ -192,7 +194,7 @@ async function restorePrevious(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code !== "ENOENT") {
-        errors.push(`compose unlink failed: ${err instanceof Error ? err.message : err}`);
+        codes.push("compose-restore-failed");
       }
     }
   }
@@ -202,7 +204,7 @@ async function restorePrevious(
     try {
       await writeSidecarSpec(instDir, snapshot.previousSpec);
     } catch (err) {
-      errors.push(`spec restore failed: ${err instanceof Error ? err.message : err}`);
+      codes.push("spec-restore-failed");
     }
   } else {
     try {
@@ -210,7 +212,7 @@ async function restorePrevious(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code !== "ENOENT") {
-        errors.push(`spec unlink failed: ${err instanceof Error ? err.message : err}`);
+        codes.push("spec-restore-failed");
       }
     }
   }
@@ -224,11 +226,11 @@ async function restorePrevious(
         projectName: composeProject,
       });
     } catch (err) {
-      errors.push(`workload restart error: ${err instanceof Error ? err.message : err}`);
+      codes.push("workload-restore-failed");
     }
   }
 
-  return errors;
+  return codes.slice(0, MAX_ROLLBACK_CODES);
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +298,7 @@ export async function executeWorkloadTransaction(
     return {
       committed: false,
       error: error instanceof Error ? error.message : String(error),
-      rollbackErrors: [...compensateErrors, ...restoreErrors],
+      rollbackErrorCodes: [...compensateErrors, ...restoreErrors].slice(0, MAX_ROLLBACK_CODES),
       didRollback: true,
     };
   }
@@ -311,7 +313,7 @@ export async function executeWorkloadTransaction(
     return {
       committed: false,
       error: `spec commit failed: ${error instanceof Error ? error.message : error}`,
-      rollbackErrors: [...compensateErrors, ...restoreErrors],
+      rollbackErrorCodes: [...compensateErrors, ...restoreErrors].slice(0, MAX_ROLLBACK_CODES),
       didRollback: true,
     };
   }
@@ -329,7 +331,7 @@ export async function executeWorkloadTransaction(
   return {
     committed: true,
     error: compensateError,
-    rollbackErrors: [],
+    rollbackErrorCodes: [],
     didRollback: false,
   };
 }

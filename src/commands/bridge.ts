@@ -1116,9 +1116,9 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       action: "sidecar.attach",
       message: txResult.error ?? "Transaction failed",
       errorCode: "runtime-command-failed",
-      retryable: txResult.rollbackErrors.length === 0,
+      retryable: txResult.rollbackErrorCodes.length === 0,
       metadata: {
-        rollbackErrors: txResult.rollbackErrors.length > 0 ? txResult.rollbackErrors : undefined,
+        rollbackErrorCodes: txResult.rollbackErrorCodes.length > 0 ? txResult.rollbackErrorCodes : undefined,
         didRollback: txResult.didRollback,
       },
       project: context.resolved.name, userId,
@@ -1390,7 +1390,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       errorCode: "runtime-command-failed",
       retryable: false,
       metadata: {
-        rollbackErrors: txResult.rollbackErrors.length > 0 ? txResult.rollbackErrors : undefined,
+        rollbackErrorCodes: txResult.rollbackErrorCodes.length > 0 ? txResult.rollbackErrorCodes : undefined,
         didRollback: txResult.didRollback,
       },
       project: context.resolved.name, userId,
