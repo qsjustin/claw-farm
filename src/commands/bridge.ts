@@ -1109,8 +1109,17 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       }
 
       // Save .env.weixin state for rollback if provision creates/rotates it
+      // Fail-closed: only ENOENT means "absent" (pre-attach state). Other read errors
+      // (EACCES, I/O) must abort BEFORE provision to avoid corrupting env state.
       const envFile = join(instDir, ".env.weixin");
-      const previousEnv = await readFile(envFile, "utf8").catch(() => null);
+      const envRead = await readFile(envFile, "utf8").then(
+        (content) => ({ ok: true as const, content }),
+        (err: NodeJS.ErrnoException) => {
+          if (err.code === "ENOENT") return { ok: true as const, content: null };
+          throw err;
+        },
+      );
+      const previousEnv = envRead.content;
       const sidecarContainer = `${composeProject}-weixin`;
       let provisionSucceeded = false;
 
@@ -1182,8 +1191,10 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       } catch (error) {
         // Rollback: revoke token + restore .env.weixin if provision succeeded
         if (provisionSucceeded) {
+          // Revoke token — check response, record typed rollback code on failure
+          let revokeOk = false;
           try {
-            await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
+            const revokeResp = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
@@ -1195,12 +1206,37 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
               }),
               signal: AbortSignal.timeout(10_000),
             });
-          } catch { /* best-effort revoke */ }
+            if (revokeResp.ok) {
+              revokeOk = true;
+            } else {
+              const errorBody = await revokeResp.json().catch(() => ({})) as { error?: { message?: string } };
+              throw new Error(`Revoke returned HTTP ${revokeResp.status}: ${errorBody.error?.message ?? ""}`);
+            }
+          } catch (revokeErr) {
+            // Revoke failed — record typed degradation
+            const codes = (error as Error & { rollbackErrorCodes?: string[] })?.rollbackErrorCodes ?? [];
+            if (!codes.includes("revoke-failed")) {
+              (error as Error & { rollbackErrorCodes?: string[] }).rollbackErrorCodes = [
+                ...codes,
+                "revoke-failed",
+              ];
+            }
+          }
           // Restore .env.weixin
-          if (previousEnv !== null) {
-            await writeFile(envFile, previousEnv, "utf8").catch(() => {});
-          } else {
-            await unlink(envFile).catch(() => {});
+          try {
+            if (previousEnv !== null) {
+              await writeFile(envFile, previousEnv, "utf8");
+            } else {
+              await unlink(envFile);
+            }
+          } catch (restoreErr) {
+            const codes = (error as Error & { rollbackErrorCodes?: string[] })?.rollbackErrorCodes ?? [];
+            if (!codes.includes("env-restore-failed")) {
+              (error as Error & { rollbackErrorCodes?: string[] }).rollbackErrorCodes = [
+                ...codes,
+                "env-restore-failed",
+              ];
+            }
           }
         }
         throw error; // Re-throw to trigger transaction rollback

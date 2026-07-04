@@ -23,7 +23,7 @@ import {
   type SidecarSpec,
 } from "./sidecar-spec.ts";
 import type { RollbackErrorCode } from "./workload-tx-types.ts";
-import { MAX_ROLLBACK_CODES } from "./workload-tx-types.ts";
+import { MAX_ROLLBACK_CODES, ROLLBACK_ERROR_CODES } from "./workload-tx-types.ts";
 
 const COMPOSE_FILE = "docker-compose.openclaw.yml";
 
@@ -296,10 +296,15 @@ export async function executeWorkloadTransaction(
     // Side effect failed: compensate target + restore previous
     const compensateErrors = await compensateTarget(instDir, composeProject, serviceName);
     const restoreErrors = await restorePrevious(instDir, composeProject, snapshot);
+    // Merge with error-attached rollback codes (e.g., revoke-failed, env-restore-failed)
+    const VALID_CODES = new Set<string>(ROLLBACK_ERROR_CODES);
+    const attachedCodes = ((error as Error & { rollbackErrorCodes?: readonly string[] })?.rollbackErrorCodes ?? [])
+      .filter((c): c is RollbackErrorCode => VALID_CODES.has(c));
+    const allCodes = [...compensateErrors, ...restoreErrors, ...attachedCodes];
     return {
       committed: false,
       error: error instanceof Error ? error.message : String(error),
-      rollbackErrorCodes: [...compensateErrors, ...restoreErrors].slice(0, MAX_ROLLBACK_CODES),
+      rollbackErrorCodes: Array.from(new Set(allCodes)).slice(0, MAX_ROLLBACK_CODES),
       didRollback: true,
     };
   }

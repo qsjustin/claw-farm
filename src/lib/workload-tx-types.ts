@@ -18,6 +18,8 @@ export const ROLLBACK_ERROR_CODES = [
   "spec-restore-failed",
   "spec-unlink-failed",
   "workload-restore-failed",
+  "revoke-failed",
+  "env-restore-failed",
 ] as const;
 
 export type RollbackErrorCode = typeof ROLLBACK_ERROR_CODES[number];
