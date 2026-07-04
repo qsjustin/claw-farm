@@ -393,7 +393,6 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
   const managedInstanceId = asString(payload.managedInstanceId);
   const clawBayApiUrl = asString(payload.clawBayApiUrl);
   // Read admin token from env first (set by Bay adapter to avoid CLI argv exposure), fall back to payload
-  console.log("DEBUG farm env token:", !!process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN, "apiUrl:", !!process.env.CLAW_BAY_BRIDGE_CLAW_BAY_API_URL);
   const clawBayAdminToken = process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN;
 
   const resolved = await resolveProjectName(project);
@@ -1104,7 +1103,6 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       // #171 Phase 2A-2: Credential validation — fail-closed before any mutations
       const clawBayApiUrl = asString(payload.clawBayApiUrl);
       // Read admin token from env first (set by Bay adapter to avoid CLI argv exposure), fall back to payload
-  console.log("DEBUG farm detach env token:", !!process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN);
   const clawBayAdminToken = process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN;
       const managedInstanceId = asString(payload.managedInstanceId) ?? "";
 
@@ -1466,7 +1464,6 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       // #171 Phase 2A-2: Credential validation — fail-closed before any mutations.
       // Detach without ability to revoke token is not safe (orphan token risk).
       const clawBayApiUrl = asString(payload.clawBayApiUrl);
-  console.log("DEBUG detach env token:", !!process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN);
       // Read admin token from env first (set by Bay adapter to avoid CLI argv exposure), fall back to payload
   const clawBayAdminToken = process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN;
       if (!clawBayApiUrl || !clawBayAdminToken) {
