@@ -23,7 +23,7 @@ import {
   type SidecarSpec,
 } from "./sidecar-spec.ts";
 import type { RollbackErrorCode } from "./workload-tx-types.ts";
-import { MAX_ROLLBACK_CODES, ROLLBACK_ERROR_CODES } from "./workload-tx-types.ts";
+import { MAX_ROLLBACK_CODES, ROLLBACK_ERROR_CODES, CRITICAL_COMPENSATION_CODES } from "./workload-tx-types.ts";
 
 const COMPOSE_FILE = "docker-compose.openclaw.yml";
 
@@ -49,6 +49,8 @@ export interface TransactionResult {
   error?: string;
   /** Allowlisted rollback error codes */
   rollbackErrorCodes: RollbackErrorCode[];
+  /** Critical compensation codes that bypass the rollback limit */
+  criticalCompensationCodes?: readonly string[];
   /** Whether rollback was needed at all */
   didRollback: boolean;
 }
@@ -301,10 +303,14 @@ export async function executeWorkloadTransaction(
     const attachedCodes = ((error as Error & { rollbackErrorCodes?: readonly string[] })?.rollbackErrorCodes ?? [])
       .filter((c): c is RollbackErrorCode => VALID_CODES.has(c));
     const allCodes = [...compensateErrors, ...restoreErrors, ...attachedCodes];
+    // Separate critical compensation codes (token/env) from regular rollback
+    const criticalSet = new Set<string>(CRITICAL_COMPENSATION_CODES);
+    const criticalAttached = attachedCodes.filter((c) => criticalSet.has(c));
     return {
       committed: false,
       error: error instanceof Error ? error.message : String(error),
       rollbackErrorCodes: Array.from(new Set(allCodes)).slice(0, MAX_ROLLBACK_CODES),
+      criticalCompensationCodes: criticalAttached.length > 0 ? criticalAttached : undefined,
       didRollback: true,
     };
   }
@@ -326,11 +332,16 @@ export async function executeWorkloadTransaction(
 
   // 4. Post-commit compensation (e.g., revoke) — best-effort
   let compensateError: string | undefined;
+  let criticalAttached: string[] = [];
   if (compensateOnSuccess) {
     try {
       await compensateOnSuccess();
     } catch (error) {
       compensateError = error instanceof Error ? error.message : String(error);
+      // Extract critical compensation codes from error
+      const criticalSet = new Set<string>(CRITICAL_COMPENSATION_CODES);
+      const attached = (error as Error & { rollbackErrorCodes?: readonly string[] })?.rollbackErrorCodes ?? [];
+      criticalAttached = attached.filter((c) => criticalSet.has(c));
     }
   }
 
@@ -338,6 +349,7 @@ export async function executeWorkloadTransaction(
     committed: true,
     error: compensateError,
     rollbackErrorCodes: [],
+    criticalCompensationCodes: criticalAttached.length > 0 ? criticalAttached : undefined,
     didRollback: false,
   };
 }

@@ -1253,6 +1253,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       metadata: {
         rollbackErrorCodes: txResult.rollbackErrorCodes.length > 0 ? txResult.rollbackErrorCodes : undefined,
         didRollback: txResult.didRollback,
+        criticalCompensationCodes: txResult.criticalCompensationCodes,
       },
       project: context.resolved.name, userId,
     });
@@ -1458,14 +1459,9 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       composeProject,
     },
     async () => {
-      // #171 Phase 2A-2: Credential validation — fail-closed before any mutations
-      const clawBayApiUrl = asString(payload.clawBayApiUrl);
-      const clawBayAdminToken = asString(payload.clawBayAdminToken);
-      const managedInstanceId = asString(payload.managedInstanceId) ?? "";
-
-      if (!clawBayApiUrl || !clawBayAdminToken) {
-        throw new Error("Revoke credentials required: clawBayApiUrl + clawBayAdminToken. Refusing to detach without token revoke.");
-      }
+      // #171 Phase 2A-2: Side effects handle stop/rm/compose rewrite only.
+      // Credential validation is deferred to compensateOnSuccess (post-commit).
+      // This way missing credentials don't trigger full rollback — just revoke degraded.
 
       // Side effect 1: Stop sidecar service
       const stopErrors: string[] = [];
@@ -1533,25 +1529,39 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     },
     // Post-commit: revoke token via ClawBay authenticated API
     async () => {
-      const clawBayApiUrl = asString(payload.clawBayApiUrl)!;
-      const clawBayAdminToken = asString(payload.clawBayAdminToken)!;
-      const managedInstanceId = asString(payload.managedInstanceId)!;
+      const clawBayApiUrl = asString(payload.clawBayApiUrl);
+      const clawBayAdminToken = asString(payload.clawBayAdminToken);
+      const managedInstanceId = asString(payload.managedInstanceId);
 
-      const resp = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-claw-bay-admin-token": clawBayAdminToken,
-        },
-        body: JSON.stringify({
-          serviceRuntimeInstanceId: managedInstanceId,
-          sidecarCode: "weixin-auth-sidecar",
-        }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!resp.ok) {
-        const errorBody = await resp.json().catch(() => ({})) as { error?: { message?: string } };
-        throw new Error(`Revoke failed: HTTP ${resp.status} ${errorBody.error?.message ?? ""}`);
+      if (!clawBayApiUrl || !clawBayAdminToken) {
+        // Missing credentials — record as critical compensation code
+        const err = new Error("Revoke credentials missing");
+        (err as Error & { rollbackErrorCodes?: string[] }).rollbackErrorCodes = ["revoke-failed"];
+        throw err;
+      }
+
+      try {
+        const resp = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-claw-bay-admin-token": clawBayAdminToken,
+          },
+          body: JSON.stringify({
+            serviceRuntimeInstanceId: managedInstanceId,
+            sidecarCode: "weixin-auth-sidecar",
+          }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!resp.ok) {
+          const errorBody = await resp.json().catch(() => ({})) as { error?: { message?: string } };
+          throw new Error(`Revoke failed: HTTP ${resp.status} ${errorBody.error?.message ?? ""}`);
+        }
+      } catch (err) {
+        // Attach revoke-failed as critical compensation code
+        const e = err instanceof Error ? err : new Error(String(err));
+        (e as Error & { rollbackErrorCodes?: string[] }).rollbackErrorCodes = ["revoke-failed"];
+        throw e;
       }
     },
   );
@@ -1565,6 +1575,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       metadata: {
         rollbackErrorCodes: txResult.rollbackErrorCodes.length > 0 ? txResult.rollbackErrorCodes : undefined,
         didRollback: txResult.didRollback,
+        criticalCompensationCodes: txResult.criticalCompensationCodes,
       },
       project: context.resolved.name, userId,
     });
@@ -1581,6 +1592,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       expectedAttachmentVersion,
       expectedConfigVersion,
       appliedTargetVersion: detv! + 1,
+      criticalCompensationCodes: txResult.criticalCompensationCodes,
     },
     project: context.resolved.name, userId,
   });

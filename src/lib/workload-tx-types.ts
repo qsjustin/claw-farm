@@ -40,7 +40,19 @@ export interface WorkloadDegradedMetadata {
   didRollback: boolean;
   /** Allowlisted rollback error codes (max 5) */
   rollbackErrorCodes?: RollbackErrorCode[];
+  /** Critical compensation codes that bypass the 5-code limit (always visible) */
+  criticalCompensationCodes?: readonly string[];
 }
 
 /** Maximum number of rollback error codes to include in metadata */
 export const MAX_ROLLBACK_CODES = 5;
+
+/**
+ * Critical compensation codes that must always be visible.
+ * These cannot be truncated by the 5-code rollback limit because they
+ * indicate state that requires follow-up (token/env durability).
+ */
+export const CRITICAL_COMPENSATION_CODES: readonly string[] = [
+  "revoke-failed",
+  "env-restore-failed",
+] as const;
