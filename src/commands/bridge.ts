@@ -1459,9 +1459,13 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       composeProject,
     },
     async () => {
-      // #171 Phase 2A-2: Side effects handle stop/rm/compose rewrite only.
-      // Credential validation is deferred to compensateOnSuccess (post-commit).
-      // This way missing credentials don't trigger full rollback — just revoke degraded.
+      // #171 Phase 2A-2: Credential validation — fail-closed before any mutations.
+      // Detach without ability to revoke token is not safe (orphan token risk).
+      const clawBayApiUrl = asString(payload.clawBayApiUrl);
+      const clawBayAdminToken = asString(payload.clawBayAdminToken);
+      if (!clawBayApiUrl || !clawBayAdminToken) {
+        throw new Error("Revoke credentials required: clawBayApiUrl + clawBayAdminToken. Refusing to detach without token revoke.");
+      }
 
       // Side effect 1: Stop sidecar service
       const stopErrors: string[] = [];
@@ -1529,16 +1533,10 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     },
     // Post-commit: revoke token via ClawBay authenticated API
     async () => {
-      const clawBayApiUrl = asString(payload.clawBayApiUrl);
-      const clawBayAdminToken = asString(payload.clawBayAdminToken);
-      const managedInstanceId = asString(payload.managedInstanceId);
-
-      if (!clawBayApiUrl || !clawBayAdminToken) {
-        // Missing credentials — record as critical compensation code
-        const err = new Error("Revoke credentials missing");
-        (err as Error & { rollbackErrorCodes?: string[] }).rollbackErrorCodes = ["revoke-failed"];
-        throw err;
-      }
+      // Credentials are already validated in side effects (fail-closed before commit)
+      const clawBayApiUrl = asString(payload.clawBayApiUrl)!;
+      const clawBayAdminToken = asString(payload.clawBayAdminToken)!;
+      const managedInstanceId = asString(payload.managedInstanceId)!;
 
       try {
         const resp = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
