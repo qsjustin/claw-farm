@@ -393,7 +393,8 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
   const managedInstanceId = asString(payload.managedInstanceId);
   const clawBayApiUrl = asString(payload.clawBayApiUrl);
   // Read admin token from env first (set by Bay adapter to avoid CLI argv exposure), fall back to payload
-  const clawBayAdminToken = Bun.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN ?? asString(payload.clawBayAdminToken);
+  console.log("DEBUG farm env token:", !!process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN, "apiUrl:", !!process.env.CLAW_BAY_BRIDGE_CLAW_BAY_API_URL);
+  const clawBayAdminToken = process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN;
 
   const resolved = await resolveProjectName(project);
   const payloadGatewayAllowAllUsers = typeof payload.gatewayAllowAllUsers === "boolean"
@@ -464,7 +465,7 @@ async function bridgeInstanceStart(payload: Record<string, unknown>): Promise<Br
     quiet: true,
     managedInstanceId: asString(payload.managedInstanceId),
     clawBayApiUrl: asString(payload.clawBayApiUrl),
-    clawBayAdminToken: Bun.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
+    clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
   });
   return bridgeSuccess({
     action: "instance.start",
@@ -512,7 +513,7 @@ async function bridgeInstanceRestart(payload: Record<string, unknown>): Promise<
     quiet: true,
     managedInstanceId: asString(payload.managedInstanceId),
     clawBayApiUrl: asString(payload.clawBayApiUrl),
-    clawBayAdminToken: Bun.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
+    clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
   });
   return bridgeSuccess({
     action: "instance.restart",
@@ -569,7 +570,7 @@ async function bridgeInstanceDelete(payload: Record<string, unknown>): Promise<B
     // #159B: Pass weixin sidecar revocation config
     managedInstanceId: asString(payload.managedInstanceId),
     clawBayApiUrl: asString(payload.clawBayApiUrl),
-    clawBayAdminToken: Bun.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
+    clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
   });
   return bridgeSuccess({
     action: "instance.delete",
@@ -888,7 +889,7 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
       quiet: true,
       managedInstanceId: asString(payload.managedInstanceId),
       clawBayApiUrl: asString(payload.clawBayApiUrl),
-      clawBayAdminToken: Bun.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
+      clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
     });
     runtimeState = "running";
     restarted = true;
@@ -1103,7 +1104,8 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       // #171 Phase 2A-2: Credential validation — fail-closed before any mutations
       const clawBayApiUrl = asString(payload.clawBayApiUrl);
       // Read admin token from env first (set by Bay adapter to avoid CLI argv exposure), fall back to payload
-  const clawBayAdminToken = Bun.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN ?? asString(payload.clawBayAdminToken);
+  console.log("DEBUG farm detach env token:", !!process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN);
+  const clawBayAdminToken = process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN;
       const managedInstanceId = asString(payload.managedInstanceId) ?? "";
 
       if (!clawBayApiUrl || !clawBayAdminToken) {
@@ -1464,8 +1466,9 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       // #171 Phase 2A-2: Credential validation — fail-closed before any mutations.
       // Detach without ability to revoke token is not safe (orphan token risk).
       const clawBayApiUrl = asString(payload.clawBayApiUrl);
+  console.log("DEBUG detach env token:", !!process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN);
       // Read admin token from env first (set by Bay adapter to avoid CLI argv exposure), fall back to payload
-  const clawBayAdminToken = Bun.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN ?? asString(payload.clawBayAdminToken);
+  const clawBayAdminToken = process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN;
       if (!clawBayApiUrl || !clawBayAdminToken) {
         throw new Error("Revoke credentials required: clawBayApiUrl + clawBayAdminToken. Refusing to detach without token revoke.");
       }
@@ -1538,7 +1541,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     async () => {
       // Credentials are already validated in side effects (fail-closed before commit)
       const clawBayApiUrl = asString(payload.clawBayApiUrl)!;
-      const clawBayAdminToken = asString(payload.clawBayAdminToken)!;
+      const clawBayAdminToken = process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN!;
       const managedInstanceId = asString(payload.managedInstanceId)!;
 
       try {
