@@ -464,7 +464,7 @@ async function bridgeInstanceStart(payload: Record<string, unknown>): Promise<Br
     quiet: true,
     managedInstanceId: asString(payload.managedInstanceId),
     clawBayApiUrl: asString(payload.clawBayApiUrl),
-    clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
+    clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN ?? asString(payload.clawBayAdminToken),
   });
   return bridgeSuccess({
     action: "instance.start",
@@ -512,7 +512,7 @@ async function bridgeInstanceRestart(payload: Record<string, unknown>): Promise<
     quiet: true,
     managedInstanceId: asString(payload.managedInstanceId),
     clawBayApiUrl: asString(payload.clawBayApiUrl),
-    clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
+    clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN ?? asString(payload.clawBayAdminToken),
   });
   return bridgeSuccess({
     action: "instance.restart",
@@ -569,7 +569,7 @@ async function bridgeInstanceDelete(payload: Record<string, unknown>): Promise<B
     // #159B: Pass weixin sidecar revocation config
     managedInstanceId: asString(payload.managedInstanceId),
     clawBayApiUrl: asString(payload.clawBayApiUrl),
-    clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
+    clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN ?? asString(payload.clawBayAdminToken),
   });
   return bridgeSuccess({
     action: "instance.delete",
@@ -888,7 +888,7 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
       quiet: true,
       managedInstanceId: asString(payload.managedInstanceId),
       clawBayApiUrl: asString(payload.clawBayApiUrl),
-      clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN,
+      clawBayAdminToken: process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN ?? asString(payload.clawBayAdminToken),
     });
     runtimeState = "running";
     restarted = true;

@@ -46,6 +46,10 @@ beforeEach(async () => {
   instDir = join(projectDir, "instances", userId);
   registryDir = join(home, ".claw-farm");
 
+  // Set env vars for bridge handler (credentials via env, not payload)
+  process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN = "test-admin-token";
+  process.env.CLAW_BAY_BRIDGE_CLAW_BAY_API_URL = "http://localhost:3001";
+
   // Set registry dir for dispatch calls
   origRegistryDir = process.env.CLAW_FARM_REGISTRY_DIR;
   process.env.CLAW_FARM_REGISTRY_DIR = registryDir;
