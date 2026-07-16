@@ -167,6 +167,8 @@ describe("sidecar.attach dispatch", () => {
     if (result.ok) {
       expect(result.action).toBe("sidecar.attach");
       expect(result.metadata?.appliedTargetVersion).toBe(1);
+      // #171B Round 35: farm echoes appliedConfigVersion for Bay contract alignment
+      expect(result.metadata?.appliedConfigVersion).toBe(basePayload().expectedConfigVersion);
     }
 
     // Spec should be written with full identity
@@ -191,6 +193,9 @@ describe("sidecar.attach dispatch", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.metadata?.idempotent).toBe(true);
+      // #171B Round 35: idempotent success echoes both applied versions for Bay contract
+      expect(result.metadata?.appliedTargetVersion).toBe(1);
+      expect(result.metadata?.appliedConfigVersion).toBe(validSpec.targetConfigVersion);
     }
   });
 
@@ -367,6 +372,8 @@ describe("sidecar.detach dispatch", () => {
     if (result.ok) {
       expect(result.action).toBe("sidecar.detach");
       expect(result.metadata?.appliedTargetVersion).toBe(2);
+      // #171B Round 35: farm echoes appliedConfigVersion for Bay contract alignment
+      expect(result.metadata?.appliedConfigVersion).toBe(1);
     }
 
     // Spec should be updated with disabled state
@@ -395,6 +402,9 @@ describe("sidecar.detach dispatch", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.metadata?.idempotent).toBe(true);
+      // #171B Round 35: idempotent success echoes both applied versions for Bay contract
+      expect(result.metadata?.appliedTargetVersion).toBe(2);
+      expect(result.metadata?.appliedConfigVersion).toBe(1);
     }
   });
 

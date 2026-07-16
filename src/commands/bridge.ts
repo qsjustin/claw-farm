@@ -1022,6 +1022,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
         expectedAttachmentVersion: spec.targetAttachmentVersion - 1,
         expectedConfigVersion: spec.targetConfigVersion,
         appliedTargetVersion: spec.targetAttachmentVersion,
+        appliedConfigVersion: spec.targetConfigVersion,
         attachPointPath: attachPoint.configDir,
         healthCheck: "idempotent",
         idempotent: true,
@@ -1272,6 +1273,8 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       expectedAttachmentVersion,
       expectedConfigVersion,
       appliedTargetVersion: eatv! + 1,
+      // #171B Round 35: attach does not change config; echo expected unchanged
+      appliedConfigVersion: expectedConfigVersion,
       attachPointPath: attachPoint.configDir,
       healthCheck: "passed",
     },
@@ -1387,6 +1390,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         expectedAttachmentVersion: spec.targetAttachmentVersion - 1,
         expectedConfigVersion: spec.targetConfigVersion,
         appliedTargetVersion: spec.targetAttachmentVersion,
+        appliedConfigVersion: spec.targetConfigVersion,
         idempotent: true,
       },
       project: context.resolved.name, userId,
@@ -1593,6 +1597,8 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       expectedAttachmentVersion,
       expectedConfigVersion,
       appliedTargetVersion: detv! + 1,
+      // #171B Round 35: detach does not change config; echo expected unchanged
+      appliedConfigVersion: expectedConfigVersion,
       criticalCompensationCodes: txResult.criticalCompensationCodes,
     },
     project: context.resolved.name, userId,
