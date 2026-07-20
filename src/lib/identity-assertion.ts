@@ -141,15 +141,47 @@ export function generateBindingSecret(byteLength = 32): BindingSecret {
  * to a pinned-key model in #177-A implementation is a
  * configuration change, not a contract change.
  */
-const FARM_SIGNING_KEY_HEX =
-  process.env.FARM_SIGNING_KEY_HEX ??
-  // 32 bytes; deterministic for tests so verify works across
-  // processes. In production this env var is supplied from
-  // the secret store.
-  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/**
+ * The farm signing key. In production, this MUST be supplied
+ * from a controlled source (a private-key provider, a secret
+ * store) via the `FARM_SIGNING_KEY_HEX` env var. There is no
+ * production fallback: if the env var is missing or malformed
+ * in production, the farm signing primitive throws at module
+ * load time (fail-closed). The fallback below is gated on
+ * `NODE_ENV !== "production"` so a developer running the
+ * farm in a dev environment does not have to set up a secret
+ * store; tests set the env var explicitly via the `FARM_*`
+ * env vars in the test harness.
+ */
+const FARM_SIGNING_KEY_HEX = (() => {
+  const fromEnv = process.env.FARM_SIGNING_KEY_HEX;
+  if (fromEnv && fromEnv.length > 0) return fromEnv;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "FARM_SIGNING_KEY_HEX is required in production; refusing to " +
+        "start farm with an ephemeral / default signing key. " +
+        "Configure the private key in the secret store and set " +
+        "FARM_SIGNING_KEY_HEX (and FARM_KEY_ID) before starting the " +
+        "farm process."
+    );
+  }
+  // Dev / test fallback: 32 bytes; deterministic so verify
+  // works across processes in a test harness.
+  return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+})();
 
-const FARM_KEY_ID: KeyId =
-  process.env.FARM_KEY_ID ?? "farm-id-test-key-1";
+const FARM_KEY_ID: KeyId = (() => {
+  const fromEnv = process.env.FARM_KEY_ID;
+  if (fromEnv && fromEnv.length > 0) return fromEnv;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "FARM_KEY_ID is required in production; refusing to start " +
+        "farm with the default test key id. Set FARM_KEY_ID to " +
+        "the id of the repo-pinned farm signing key."
+    );
+  }
+  return "farm-id-test-key-1";
+})();
 
 let cachedKey: Buffer | null = null;
 function getKey(): Buffer {

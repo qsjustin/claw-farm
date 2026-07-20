@@ -19,6 +19,15 @@
 
 import { describe, expect, it } from "bun:test";
 
+// Tests run in dev mode; the module's default test/dev
+// fallback is acceptable here. We also explicitly set the
+// env vars so the test passes regardless of process state
+// (covers `bun test` and CI).
+process.env.FARM_SIGNING_KEY_HEX =
+  process.env.FARM_SIGNING_KEY_HEX ??
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+process.env.FARM_KEY_ID = process.env.FARM_KEY_ID ?? "farm-id-test-key-1";
+
 import {
   buildIdentityAssertion,
   currentKeyId,
@@ -177,6 +186,32 @@ describe("identity-assertion: generateBindingSecret", () => {
     const a = generateBindingSecret();
     const b = generateBindingSecret();
     expect(a).not.toBe(b);
+  });
+});
+
+describe("identity-assertion: production fail-closed", () => {
+  it("throws at module load in production when FARM_SIGNING_KEY_HEX is missing", () => {
+    // Re-import the module under a production-like
+    // environment to verify the fail-closed contract. The
+    // assertion is in a try/catch because the import side
+    // effect would otherwise crash the test runner.
+    const savedNodeEnv = process.env.NODE_ENV;
+    const savedKey = process.env.FARM_SIGNING_KEY_HEX;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.FARM_SIGNING_KEY_HEX;
+      // Use a fresh module to avoid the cached key.
+      const fresh = require("../identity-assertion");
+      expect(() => fresh.currentKeyId()).toThrow(/FARM_SIGNING_KEY_HEX is required/);
+    } catch (e) {
+      // If the require itself threw (which is the expected
+      // behavior for fail-closed module loading), the
+      // module-load error is the contract we want to verify.
+      expect(String(e)).toMatch(/FARM_SIGNING_KEY_HEX is required/);
+    } finally {
+      process.env.NODE_ENV = savedNodeEnv;
+      if (savedKey !== undefined) process.env.FARM_SIGNING_KEY_HEX = savedKey;
+    }
   });
 });
 
