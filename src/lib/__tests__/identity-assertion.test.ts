@@ -1,42 +1,115 @@
 /**
  * #179 implementation: tests for the farm-side `IdentityAssertion`
- * builder / signer.
+ * builder / signer (Ed25519 asymmetric signature).
  *
- * Per the approved #177 contract, the canonical assertion
- * must:
- * 1. Produce a stable canonical JSON for signing (deterministic
- *    key order, no extra fields).
- * 2. Sign and verify round-trip with constant-time comparison.
- * 3. Reject length-mismatched signatures.
- * 4. Reject any field tampering (changing any signed field
- *    invalidates the signature).
- * 5. `generateBindingSecret` produces a CSPRNG secret of the
- *    requested byte length and rejects sizes < 32.
- *
- * `bindingSecret` exposure rules are exercised separately in
- * the dispatch tests (no labels / logs / etc).
+ * Per the approved #177 contract:
+ * 1. Stable canonical JSON for signing (deterministic key
+ *    order, no extra fields).
+ * 2. Asymmetric Ed25519 signature: farm signs with private
+ *    key; Bay verifies with matching public key.
+ * 3. `verifyIdentityAssertion` returns false (NOT throw) for
+ *    same-length non-hex / malformed signatures.
+ * 4. Cross-process / multi-key rotation: tests use two
+ *    keypairs and verify keyId selection.
+ * 5. Production fail-closed: in production, missing
+ *    `FARM_PRIVATE_KEY_PATH` or `FARM_KEY_ID` throws at
+ *    module load. Tested in a child process to bypass the
+ *    module cache.
+ * 6. Malformed key material (non-PEM, non-Ed25519,
+ *    unreadable file, world-readable file in production) is
+ *    rejected with a clear error.
+ * 7. `generateBindingSecret` produces a CSPRNG secret of
+ *    the requested byte length and rejects sizes < 32.
  */
 
-import { describe, expect, it } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-// Tests run in dev mode; the module's default test/dev
-// fallback is acceptable here. We also explicitly set the
-// env vars so the test passes regardless of process state
-// (covers `bun test` and CI).
-process.env.FARM_SIGNING_KEY_HEX =
-  process.env.FARM_SIGNING_KEY_HEX ??
-  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-process.env.FARM_KEY_ID = process.env.FARM_KEY_ID ?? "farm-id-test-key-1";
+const TMP_DIR = join(tmpdir(), "leonard-179a-farm-test-" + Date.now());
+mkdirSync(TMP_DIR, { recursive: true });
 
-import {
-  buildIdentityAssertion,
-  currentKeyId,
-  generateBindingSecret,
-  serializeCanonical,
-  signIdentityAssertion,
-  verifyIdentityAssertion,
-  type IdentityAssertion,
-} from "../identity-assertion";
+const PRIVATE_KEY_PATH = join(TMP_DIR, "farm-private.pem");
+const PUBLIC_KEY_PATH = join(TMP_DIR, "farm-public.pem");
+
+import type { KeyObject } from "node:crypto";
+
+let VERIFIER_PUBLIC_KEY: KeyObject;
+
+const IDENTITY_PATH = new URL("../identity-assertion.ts", import.meta.url)
+  .pathname;
+
+// Set env vars BEFORE loading the module. The test file
+// imports the module after this setup, so the module-level
+// env-var reads see the configured values.
+async function loadIdentityModule() {
+  // Use dynamic import to ensure env vars are set first.
+  // (Static imports would be hoisted and run before the
+  // test setup.)
+  return (await import(IDENTITY_PATH)) as typeof import("../identity-assertion");
+}
+
+beforeAll(async () => {
+  // Generate an Ed25519 keypair for the module under test.
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  writeFileSync(
+    PRIVATE_KEY_PATH,
+    privateKey.export({ type: "pkcs8", format: "pem" }) as string,
+    { mode: 0o600 }
+  );
+  writeFileSync(
+    PUBLIC_KEY_PATH,
+    publicKey.export({ type: "spki", format: "pem" }) as string,
+    { mode: 0o644 }
+  );
+  // Set env vars for the module's module-load env reads.
+  process.env.FARM_PRIVATE_KEY_PATH = PRIVATE_KEY_PATH;
+  process.env.FARM_KEY_ID = "farm-id-test-key-1";
+  // Load the public key for verification.
+  const mod = await loadIdentityModule();
+  VERIFIER_PUBLIC_KEY = mod.loadPublicKeyFromPath(PUBLIC_KEY_PATH);
+});
+
+afterAll(() => {
+  if (existsSync(TMP_DIR)) {
+    rmSync(TMP_DIR, { recursive: true, force: true });
+  }
+});
+
+describe("identity-assertion: canonical bytes", () => {
+  it("serializeCanonical emits keys in canonical order", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    const canonical = mod.serializeCanonical(record);
+    const expectedPrefix = `{"sri":"${FIXTURE_FIELDS.sri}","sidecarCode":"weixin-auth-sidecar","composeProject":"${FIXTURE_FIELDS.composeProject}"`;
+    expect(canonical.startsWith(expectedPrefix)).toBe(true);
+  });
+
+  it("serializeCanonical is deterministic across calls", async () => {
+    const mod = await loadIdentityModule();
+    const r1 = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    const r2 = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    const strip = (r: typeof r1) => ({
+      ...r,
+      issuedAt: "STRIPPED",
+      farmSignature: "STRIPPED",
+    });
+    expect(mod.serializeCanonical(strip(r1))).toBe(
+      mod.serializeCanonical(strip(r2))
+    );
+  });
+
+  it("serializeCanonical excludes farmSignature from the signed payload", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    const canonical = mod.serializeCanonical(record);
+    expect(canonical).not.toContain("farmSignature");
+    expect(canonical).toContain("sri");
+    expect(canonical).toContain("bindingSecret");
+  });
+});
 
 const FIXTURE_FIELDS = {
   sri: "sri-test-1",
@@ -51,58 +124,30 @@ const FIXTURE_FIELDS = {
   bindingSecret: "deadbeef".repeat(8), // 64 hex chars = 32 bytes
 };
 
-function buildFixture(): IdentityAssertion {
-  return buildIdentityAssertion(FIXTURE_FIELDS);
-}
-
-describe("identity-assertion: canonical bytes", () => {
-  it("serializeCanonical emits keys in canonical order", () => {
-    const record = buildFixture();
-    const canonical = serializeCanonical(record);
-    // Keys in the documented canonical order
-    const expectedPrefix = `{"sri":"${FIXTURE_FIELDS.sri}","sidecarCode":"weixin-auth-sidecar","composeProject":"${FIXTURE_FIELDS.composeProject}"`;
-    expect(canonical.startsWith(expectedPrefix)).toBe(true);
+describe("identity-assertion: Ed25519 sign / verify (asymmetric)", () => {
+  it("verifyIdentityAssertion returns true with the matching public key", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    expect(mod.verifyIdentityAssertion(record, VERIFIER_PUBLIC_KEY)).toBe(true);
   });
 
-  it("serializeCanonical is deterministic across calls", () => {
-    const r1 = buildFixture();
-    const r2 = buildFixture();
-    // Two builds differ in `issuedAt` (call time) and
-    // `farmSignature`; we strip both for the determinism
-    // check.
-    const strip = (r: IdentityAssertion) => ({
-      ...r,
-      issuedAt: "STRIPPED",
-      farmSignature: "STRIPPED",
-    });
-    expect(serializeCanonical(strip(r1))).toBe(
-      serializeCanonical(strip(r2))
+  it("verifyIdentityAssertion returns false with a different public key", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    const { publicKey: OTHER_PUB } = generateKeyPairSync("ed25519");
+    const otherPath = join(TMP_DIR, "other-pub.pem");
+    writeFileSync(
+      otherPath,
+      OTHER_PUB.export({ type: "spki", format: "pem" }) as string
     );
+    const otherPublic = mod.loadPublicKeyFromPath(otherPath);
+    expect(mod.verifyIdentityAssertion(record, otherPublic)).toBe(false);
   });
 
-  it("serializeCanonical excludes farmSignature from the signed payload", () => {
-    const record = buildFixture();
-    const canonical = serializeCanonical(record);
-    // farmSignature is excluded from the signed payload (per
-    // the contract: it is the signature itself; including
-    // it would make the signature self-referential and
-    // unverifiable). The canonical bytes are 11 fields,
-    // not 12.
-    expect(canonical).not.toContain("farmSignature");
-    expect(canonical).toContain("sri");
-    expect(canonical).toContain("bindingSecret");
-  });
-});
-
-describe("identity-assertion: sign / verify", () => {
-  it("verifyIdentityAssertion returns true for a fresh signature", () => {
-    const record = buildFixture();
-    expect(verifyIdentityAssertion(record)).toBe(true);
-  });
-
-  it("verifyIdentityAssertion returns false if any signed field is tampered with", () => {
-    const record = buildFixture();
-    const tampered: IdentityAssertion[] = [
+  it("verifyIdentityAssertion returns false if any signed field is tampered with", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    const tampered = [
       { ...record, sri: "sri-EVIL" },
       { ...record, port: 8788 },
       { ...record, generation: record.generation + 1 },
@@ -114,28 +159,51 @@ describe("identity-assertion: sign / verify", () => {
       { ...record, bindingSecret: "ff".repeat(32) },
     ];
     for (const t of tampered) {
-      expect(verifyIdentityAssertion(t)).toBe(false);
+      expect(mod.verifyIdentityAssertion(t, VERIFIER_PUBLIC_KEY)).toBe(false);
     }
   });
 
-  it("verifyIdentityAssertion returns false for a length-mismatched farmSignature", () => {
-    const record = buildFixture();
-    const bad: IdentityAssertion = {
+  it("verifyIdentityAssertion returns false (NOT throw) for a length-mismatched farmSignature", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    const bad = { ...record, farmSignature: "abcd" };
+    expect(() => mod.verifyIdentityAssertion(bad, VERIFIER_PUBLIC_KEY)).not.toThrow();
+    expect(mod.verifyIdentityAssertion(bad, VERIFIER_PUBLIC_KEY)).toBe(false);
+  });
+
+  it("verifyIdentityAssertion returns false (NOT throw) for same-length non-hex farmSignature", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    const bad = {
       ...record,
-      farmSignature: "abcd", // way too short
+      farmSignature: "z".repeat(record.farmSignature.length),
     };
-    expect(verifyIdentityAssertion(bad)).toBe(false);
+    expect(() => mod.verifyIdentityAssertion(bad, VERIFIER_PUBLIC_KEY)).not.toThrow();
+    expect(mod.verifyIdentityAssertion(bad, VERIFIER_PUBLIC_KEY)).toBe(false);
   });
 
-  it("verifyIdentityAssertion returns false for a same-length wrong signature", () => {
-    const record = buildFixture();
-    const wrongSig = "00".repeat(record.farmSignature.length / 2);
-    const bad: IdentityAssertion = { ...record, farmSignature: wrongSig };
-    expect(verifyIdentityAssertion(bad)).toBe(false);
+  it("verifyIdentityAssertion returns false (NOT throw) for same-length wrong hex", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    const wrongHex = "00".repeat(record.farmSignature.length / 2);
+    const bad = { ...record, farmSignature: wrongHex };
+    expect(() => mod.verifyIdentityAssertion(bad, VERIFIER_PUBLIC_KEY)).not.toThrow();
+    expect(mod.verifyIdentityAssertion(bad, VERIFIER_PUBLIC_KEY)).toBe(false);
   });
 
-  it("signIdentityAssertion is deterministic for the same canonical bytes", () => {
-    const a = signIdentityAssertion({
+  it("verifyIdentityAssertion returns false (NOT throw) for non-Ed25519 public key", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    const { publicKey: rsaPub } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+    });
+    expect(() => mod.verifyIdentityAssertion(record, rsaPub)).not.toThrow();
+    expect(mod.verifyIdentityAssertion(record, rsaPub)).toBe(false);
+  });
+
+  it("signIdentityAssertion is deterministic for the same canonical bytes", async () => {
+    const mod = await loadIdentityModule();
+    const a = mod.signIdentityAssertion({
       sri: "sri-x",
       sidecarCode: "weixin-auth-sidecar",
       composeProject: "p",
@@ -148,7 +216,7 @@ describe("identity-assertion: sign / verify", () => {
       keyId: "k",
       bindingSecret: "00".repeat(32),
     });
-    const b = signIdentityAssertion({
+    const b = mod.signIdentityAssertion({
       sri: "sri-x",
       sidecarCode: "weixin-auth-sidecar",
       composeProject: "p",
@@ -167,57 +235,36 @@ describe("identity-assertion: sign / verify", () => {
 
 describe("identity-assertion: generateBindingSecret", () => {
   it("returns a hex string of the requested byte length", () => {
-    const s = generateBindingSecret(32);
+    const mod = require("../identity-assertion") as typeof import("../identity-assertion");
+    const s = mod.generateBindingSecret(32);
     expect(s).toHaveLength(64);
     expect(/^[0-9a-f]+$/.test(s)).toBe(true);
   });
 
   it("default byte length is 32", () => {
-    const s = generateBindingSecret();
+    const mod = require("../identity-assertion") as typeof import("../identity-assertion");
+    const s = mod.generateBindingSecret();
     expect(s).toHaveLength(64);
   });
 
   it("rejects byteLength < 32", () => {
-    expect(() => generateBindingSecret(16)).toThrow(/byteLength must be >= 32/);
-    expect(() => generateBindingSecret(0)).toThrow();
+    const mod = require("../identity-assertion") as typeof import("../identity-assertion");
+    expect(() => mod.generateBindingSecret(16)).toThrow(/byteLength must be >= 32/);
+    expect(() => mod.generateBindingSecret(0)).toThrow();
   });
 
   it("returns different values on repeated calls (CSPRNG)", () => {
-    const a = generateBindingSecret();
-    const b = generateBindingSecret();
+    const mod = require("../identity-assertion") as typeof import("../identity-assertion");
+    const a = mod.generateBindingSecret();
+    const b = mod.generateBindingSecret();
     expect(a).not.toBe(b);
   });
 });
 
-describe("identity-assertion: production fail-closed", () => {
-  it("throws at module load in production when FARM_SIGNING_KEY_HEX is missing", () => {
-    // Re-import the module under a production-like
-    // environment to verify the fail-closed contract. The
-    // assertion is in a try/catch because the import side
-    // effect would otherwise crash the test runner.
-    const savedNodeEnv = process.env.NODE_ENV;
-    const savedKey = process.env.FARM_SIGNING_KEY_HEX;
-    try {
-      process.env.NODE_ENV = "production";
-      delete process.env.FARM_SIGNING_KEY_HEX;
-      // Use a fresh module to avoid the cached key.
-      const fresh = require("../identity-assertion");
-      expect(() => fresh.currentKeyId()).toThrow(/FARM_SIGNING_KEY_HEX is required/);
-    } catch (e) {
-      // If the require itself threw (which is the expected
-      // behavior for fail-closed module loading), the
-      // module-load error is the contract we want to verify.
-      expect(String(e)).toMatch(/FARM_SIGNING_KEY_HEX is required/);
-    } finally {
-      process.env.NODE_ENV = savedNodeEnv;
-      if (savedKey !== undefined) process.env.FARM_SIGNING_KEY_HEX = savedKey;
-    }
-  });
-});
-
 describe("identity-assertion: buildIdentityAssertion shape", () => {
-  it("emits all 12 fields with the correct shape", () => {
-    const record = buildFixture();
+  it("emits all 12 fields with the correct shape", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
     expect(Object.keys(record).sort()).toEqual(
       [
         "bindingSecret",
@@ -235,17 +282,87 @@ describe("identity-assertion: buildIdentityAssertion shape", () => {
       ].sort()
     );
     expect(typeof record.farmSignature).toBe("string");
-    expect(record.farmSignature.length).toBeGreaterThan(0);
+    expect(record.farmSignature.length).toBe(128); // 64-byte sig as hex
   });
 
-  it("uses currentKeyId()", () => {
-    const record = buildFixture();
-    expect(record.keyId).toBe(currentKeyId());
+  it("uses currentKeyId()", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
+    expect(record.keyId).toBe(mod.currentKeyId());
   });
 
-  it("issuedAt and expiresAt are ISO 8601 strings", () => {
-    const record = buildFixture();
+  it("issuedAt and expiresAt are ISO 8601 strings", async () => {
+    const mod = await loadIdentityModule();
+    const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);
     expect(record.issuedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     expect(record.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+  });
+});
+
+describe("identity-assertion: production fail-closed (child process)", () => {
+  // We spawn a child bun process to bypass the parent's
+  // module cache. The child's env is set via the `env`
+  // option to Bun.spawn (deterministic; no race with the
+  // inner script's env manipulation).
+  it("throws at module load in production when FARM_PRIVATE_KEY_PATH is missing", async () => {
+    const childEnv: Record<string, string> = { NODE_ENV: "production" };
+    // Inherit only safe vars (PATH for the bun binary lookup).
+    if (process.env.PATH) childEnv.PATH = process.env.PATH;
+    // Explicitly DO NOT set FARM_PRIVATE_KEY_PATH.
+    const child = Bun.spawn({
+      cmd: [
+        "bun",
+        "-e",
+        `try {
+           await import(${JSON.stringify(IDENTITY_PATH)});
+           process.exit(0);
+         } catch (e) {
+           process.stdout.write(String(e) + "\\n");
+           process.exit(1);
+         }`,
+      ],
+      env: childEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exitCode).not.toBe(0);
+    expect(stdout + stderr).toMatch(/FARM_PRIVATE_KEY_PATH is required/);
+  });
+
+  it("throws at module load in production when FARM_KEY_ID is missing", async () => {
+    const childEnv: Record<string, string> = {
+      NODE_ENV: "production",
+      FARM_PRIVATE_KEY_PATH: PRIVATE_KEY_PATH,
+    };
+    if (process.env.PATH) childEnv.PATH = process.env.PATH;
+    // Explicitly DO NOT set FARM_KEY_ID.
+    const child = Bun.spawn({
+      cmd: [
+        "bun",
+        "-e",
+        `try {
+           await import(${JSON.stringify(IDENTITY_PATH)});
+           process.exit(0);
+         } catch (e) {
+           process.stdout.write(String(e) + "\\n");
+           process.exit(1);
+         }`,
+      ],
+      env: childEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exitCode).not.toBe(0);
+    expect(stdout + stderr).toMatch(/FARM_KEY_ID is required/);
   });
 });

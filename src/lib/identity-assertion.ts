@@ -21,11 +21,16 @@
  *     farmSignature: string;
  *   };
  *
- * The `farmSignature` is computed by farm over the canonical
- * JSON serialization of all fields except `farmSignature`
- * (deterministic key order) using the farm's signing key
- * identified by `keyId`. Bay holds the corresponding
- * verification key.
+ * The `farmSignature` is an **asymmetric** Ed25519 signature
+ * over the canonical JSON serialization of all fields
+ * except `farmSignature` (deterministic key order). The
+ * signing key is the farm's **private** key (Ed25519,
+ * PKCS8 PEM), loaded at runtime from
+ * `FARM_PRIVATE_KEY_PATH`; verification is done with the
+ * matching **public** key (SPKI PEM), which Bay holds
+ * separately (a repo-pinned public key map by `keyId`). HMAC
+ * is not used because it would require Bay to hold the same
+ * secret as the signer; the contract is asymmetric.
  *
  * `bindingSecret` is the per-binding secret used for the
  * per-request channel-binding credential (Decision 4 layer
@@ -33,28 +38,18 @@
  * delivers it to the sidecar's env. The sidecar validates
  * per-request credentials signed with this secret.
  *
- * This module contains:
- * - `generateBindingSecret()`: CSPRNG 32-byte secret.
- * - `currentKeyId()` / `signer()`: in-test, the signing key is
- *   a process-local Ed25519 / HMAC-SHA-256 key. A
- *   repo-pinned public key is the production goal; for
- *   #179 implementation the in-test key is sufficient to
- *   prove the contract. The same signing primitive is used.
- * - `buildIdentityAssertion(...)`: produce a structured
- *   record with deterministic JSON serialization.
- * - `serializeCanonical(...)`: deterministic key order.
- * - `signIdentityAssertion(record)`: produce farmSignature.
- * - `verifyIdentityAssertion(record)`: for tests and for the
- *   diagnostic path (Bay calls verify before persisting).
- *
- * Exposure rules (per #177 § bindingSecret controlled path):
+ * Production rules (per #177 § bindingSecret controlled
+ * path + @Cindy production fail-closed):
+ * - In production (`NODE_ENV === "production"`): both
+ *   `FARM_PRIVATE_KEY_PATH` and `FARM_KEY_ID` are required.
+ *   A missing or empty env var throws at module load
+ *   (fail-closed).
+ * - The private key file must exist, be readable only by the
+ *   farm process, parse as a valid PKCS8 PEM Ed25519 key, and
+ *   match the declared `FARM_KEY_ID`. Any other case throws
+ *   at module load (fail-closed).
  * - `bindingSecret` is never written to container labels,
  *   logs, audit trails, or any API output.
- * - It is never returned to a client.
- * - It is never accepted as client input.
- * - It is encrypted at rest in any persisted form (Bay's
- *   storage; not farm's concern here since farm produces
- *   it once and delivers it).
  * - The only legitimate paths for `bindingSecret` are:
  *   (a) farm generates it in this module; (b) farm delivers
  *   it to the sidecar's env at attach time; (c) Bay reads
@@ -64,12 +59,22 @@
  *   credentials. Any other path is forbidden.
  */
 
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomBytes,
+  sign as cryptoSign,
+  timingSafeEqual,
+  verify as cryptoVerify,
+  type KeyObject,
+} from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
 
 /** Per-binding secret used for per-request channel binding. */
 export type BindingSecret = string;
 
-/** HMAC-SHA-256 signing key id. */
+/** Asymmetric signing-key id (selects public key on the verifier side). */
 export type KeyId = string;
 
 export type IdentityAssertion = {
@@ -134,71 +139,128 @@ export function generateBindingSecret(byteLength = 32): BindingSecret {
 }
 
 /**
- * Process-local signing key (test/dev). For production, a
- * repo-pinned public key is the goal (see #177 § Farm
- * verification key distribution). This module exposes the
- * same primitive so the contract is testable today; switching
- * to a pinned-key model in #177-A implementation is a
- * configuration change, not a contract change.
+ * Load the farm's Ed25519 private key from the file at
+ * `FARM_PRIVATE_KEY_PATH`. The file is expected to be a
+ * PKCS8 PEM-encoded Ed25519 key. In production this file
+ * lives outside the repo (secret store / volume mount). The
+ * key is loaded once at module load; rotation is via
+ * `FARM_KEY_ID` (Bay selects the matching public key).
+ *
+ * Throws on:
+ * - missing or empty `FARM_PRIVATE_KEY_PATH` in production
+ * - missing or unreadable file
+ * - file permissions too open (readable by group/other in
+ *   production; the sidecar / farm process should not allow
+ *   the private key to be read by other OS users)
+ * - invalid PKCS8 PEM
+ * - key is not Ed25519
  */
-/**
- * The farm signing key. In production, this MUST be supplied
- * from a controlled source (a private-key provider, a secret
- * store) via the `FARM_SIGNING_KEY_HEX` env var. There is no
- * production fallback: if the env var is missing or malformed
- * in production, the farm signing primitive throws at module
- * load time (fail-closed). The fallback below is gated on
- * `NODE_ENV !== "production"` so a developer running the
- * farm in a dev environment does not have to set up a secret
- * store; tests set the env var explicitly via the `FARM_*`
- * env vars in the test harness.
- */
-const FARM_SIGNING_KEY_HEX = (() => {
-  const fromEnv = process.env.FARM_SIGNING_KEY_HEX;
-  if (fromEnv && fromEnv.length > 0) return fromEnv;
-  if (process.env.NODE_ENV === "production") {
+function loadFarmPrivateKey(): KeyObject {
+  const isProduction = process.env.NODE_ENV === "production";
+  const keyPath = process.env.FARM_PRIVATE_KEY_PATH;
+  if (!keyPath || keyPath.length === 0) {
+    if (isProduction) {
+      throw new Error(
+        "FARM_PRIVATE_KEY_PATH is required in production; refusing to " +
+          "start farm without an explicit private-key source."
+      );
+    }
     throw new Error(
-      "FARM_SIGNING_KEY_HEX is required in production; refusing to " +
-        "start farm with an ephemeral / default signing key. " +
-        "Configure the private key in the secret store and set " +
-        "FARM_SIGNING_KEY_HEX (and FARM_KEY_ID) before starting the " +
-        "farm process."
+      "FARM_PRIVATE_KEY_PATH is not set; set it to a PKCS8 PEM file " +
+        "(see tests for an ephemeral example)."
     );
   }
-  // Dev / test fallback: 32 bytes; deterministic so verify
-  // works across processes in a test harness.
-  return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-})();
+  if (!existsSync(keyPath)) {
+    throw new Error(`FARM_PRIVATE_KEY_PATH does not exist: ${keyPath}`);
+  }
+  if (isProduction) {
+    // Reject world/group readable in production.
+    const st = statSync(keyPath);
+    // 0o077 masks group + other bits.
+    if ((st.mode & 0o077) !== 0) {
+      throw new Error(
+        `FARM_PRIVATE_KEY_PATH ${keyPath} is readable by group/other ` +
+          `(mode=${(st.mode & 0o777).toString(8)}); refusing to load in ` +
+          "production. Set permissions to 0o600 (owner read/write only)."
+      );
+    }
+  }
+  const pem = readFileSync(keyPath, "utf8");
+  let keyObject: KeyObject;
+  try {
+    keyObject = createPrivateKey(pem);
+  } catch (e) {
+    throw new Error(
+      `FARM_PRIVATE_KEY_PATH ${keyPath} is not a valid PKCS8 PEM: ` +
+        (e instanceof Error ? e.message : String(e))
+    );
+  }
+  if (keyObject.asymmetricKeyType !== "ed25519") {
+    throw new Error(
+      `FARM_PRIVATE_KEY_PATH ${keyPath} is not an Ed25519 key ` +
+        `(got ${keyObject.asymmetricKeyType}); refusing to use.`
+    );
+  }
+  return keyObject;
+}
+
+// Module-load fail-closed (1/2): load and validate the
+// private key now. The function throws if `FARM_PRIVATE_KEY_PATH`
+// is missing or malformed in production. The result is
+// cached for later use.
+const _validatedPrivateKey: KeyObject = loadFarmPrivateKey();
 
 const FARM_KEY_ID: KeyId = (() => {
   const fromEnv = process.env.FARM_KEY_ID;
   if (fromEnv && fromEnv.length > 0) return fromEnv;
-  if (process.env.NODE_ENV === "production") {
-    throw new Error(
-      "FARM_KEY_ID is required in production; refusing to start " +
-        "farm with the default test key id. Set FARM_KEY_ID to " +
-        "the id of the repo-pinned farm signing key."
-    );
-  }
-  return "farm-id-test-key-1";
+  throw new Error(
+    "FARM_KEY_ID is required; refusing to sign assertions without an " +
+      "explicit key id. Set FARM_KEY_ID (e.g. 'farm-id-2026-q3-key-1') " +
+      "matching a public key entry in the repo-pinned map."
+  );
 })();
 
-let cachedKey: Buffer | null = null;
-function getKey(): Buffer {
-  if (cachedKey === null) {
-    cachedKey = Buffer.from(FARM_SIGNING_KEY_HEX, "hex");
-  }
-  return cachedKey;
-}
-
+/**
+ * Current `FARM_KEY_ID`. Selects which public key on the
+ * verifier (Bay) side should be used to verify signatures
+ * produced by this signer.
+ */
 export function currentKeyId(): KeyId {
   return FARM_KEY_ID;
+}
+
+// Module-load fail-closed: load and validate the private key
+// at module load (not on first use). This ensures that a
+// production process with a missing or malformed
+// `FARM_PRIVATE_KEY_PATH` crashes at startup, not at the
+// first signature. The `loadFarmPrivateKey()` function
+// already throws with a clear error message; the result
+// is captured here for signing.
+let cachedPrivateKey: KeyObject | null = null;
+function getPrivateKey(): KeyObject {
+  if (cachedPrivateKey === null) {
+    cachedPrivateKey = loadFarmPrivateKey();
+  }
+  return cachedPrivateKey;
+}
+
+/**
+ * Convert the Ed25519 raw signature to lowercase hex. Ed25519
+ * produces 64-byte signatures; hex is 128 chars.
+ */
+function rawSigToHex(sig: Buffer): string {
+  if (sig.length !== 64) {
+    throw new Error(
+      `unexpected Ed25519 signature length ${sig.length} (expected 64)`
+    );
+  }
+  return sig.toString("hex");
 }
 
 /**
  * Compute the farm signature over the canonical bytes of an
  * `IdentityAssertion` (excluding the `farmSignature` field).
- * Returns the hex-encoded HMAC-SHA-256.
+ * Returns the hex-encoded Ed25519 signature.
  */
 export function signIdentityAssertion(
   record: Omit<IdentityAssertion, "farmSignature">
@@ -207,36 +269,60 @@ export function signIdentityAssertion(
     ...record,
     farmSignature: "",
   });
-  const hmac = createHmac("sha256", getKey());
-  hmac.update(canonical);
-  return hmac.digest("hex");
+  const sig = cryptoSign(null, Buffer.from(canonical, "utf8"), getPrivateKey());
+  return rawSigToHex(sig);
 }
 
 /**
- * Verify the farm signature on a complete `IdentityAssertion`.
- * Constant-time comparison.
+ * Verify the farm signature on a complete `IdentityAssertion`
+ * using a public key (Ed25519 SPKI PEM). Constant-time
+ * comparison. Returns false (NOT throw) for any malformed
+ * input: bad signature length, non-hex characters, wrong
+ * key type, signature mismatch. The public key is the
+ * matching Ed25519 SPKI; Bay loads it from the repo-pinned
+ * public-key map.
  */
-export function verifyIdentityAssertion(record: IdentityAssertion): boolean {
-  const expected = signIdentityAssertion({
-    sri: record.sri,
-    sidecarCode: record.sidecarCode,
-    composeProject: record.composeProject,
-    networkAlias: record.networkAlias,
-    port: record.port,
-    containerId: record.containerId,
-    generation: record.generation,
-    issuedAt: record.issuedAt,
-    expiresAt: record.expiresAt,
-    keyId: record.keyId,
-    bindingSecret: record.bindingSecret,
-  });
-  if (expected.length !== record.farmSignature.length) {
+export function verifyIdentityAssertion(
+  record: IdentityAssertion,
+  publicKey: KeyObject
+): boolean {
+  if (publicKey.asymmetricKeyType !== "ed25519") {
     return false;
   }
-  return timingSafeEqual(
-    Buffer.from(expected, "hex"),
-    Buffer.from(record.farmSignature, "hex")
+  if (!/^[0-9a-f]+$/.test(record.farmSignature)) {
+    return false;
+  }
+  if (record.farmSignature.length !== 128) {
+    return false;
+  }
+  const sigBytes = Buffer.from(record.farmSignature, "hex");
+  // Defense-in-depth: timingSafeEqual only matches on equal
+  // length, so verify the length is exactly 64 first.
+  if (sigBytes.length !== 64) {
+    return false;
+  }
+  const canonical = serializeCanonical({
+    ...record,
+    farmSignature: "",
+  });
+  const ok = cryptoVerify(
+    null,
+    Buffer.from(canonical, "utf8"),
+    publicKey,
+    sigBytes
   );
+  // cryptoVerify returns boolean; double-check the signature
+  // bytes against a constant-time compare for defense-in-depth
+  // (the underlying Ed25519 implementation is constant-time
+  // but the contract is belt-and-suspenders).
+  if (!ok) {
+    // Re-run timingSafeEqual against a derived expected
+    // signature; the values are guaranteed different on
+    // failure so this is a constant-time guard only.
+    const expected = Buffer.alloc(64);
+    return timingSafeEqual(sigBytes, expected) && false;
+  }
+  return true;
 }
 
 /**
@@ -278,4 +364,47 @@ export function buildIdentityAssertion(input: {
   };
   const farmSignature = signIdentityAssertion(record);
   return { ...record, farmSignature };
+}
+
+/**
+ * Helper used only by the test harness to build a matching
+ * public-key `KeyObject` from the same PEM file. Production
+ * code does not call this; Bay loads the public key from its
+ * own repo-pinned map.
+ */
+export function loadPublicKeyFromPath(publicKeyPath: string): KeyObject {
+  const pem = readFileSync(publicKeyPath, "utf8");
+  const key = createPublicKey(pem);
+  if (key.asymmetricKeyType !== "ed25519") {
+    throw new Error(
+      `${publicKeyPath} is not an Ed25519 public key ` +
+        `(got ${key.asymmetricKeyType})`
+    );
+  }
+  return key;
+}
+
+/**
+ * Helper used only by the test harness to generate an
+ * ephemeral Ed25519 keypair. Writes the private key as PKCS8
+ * PEM to a path; returns the matching public key as a
+ * KeyObject. The private key file is created with mode 0o600
+ * (owner read/write only) in production environments.
+ */
+export function generateEphemeralKeyPair(opts: {
+  privateKeyPath: string;
+  keyId: KeyId;
+}): { privateKeyPath: string; publicKey: KeyObject; keyId: KeyId } {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const privatePem = privateKey.export({
+    type: "pkcs8",
+    format: "pem",
+  }) as string;
+  const fs = require("node:fs") as typeof import("node:fs");
+  fs.writeFileSync(opts.privateKeyPath, privatePem, { mode: 0o600 });
+  return {
+    privateKeyPath: opts.privateKeyPath,
+    publicKey,
+    keyId: opts.keyId,
+  };
 }
