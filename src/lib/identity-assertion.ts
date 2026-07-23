@@ -1,355 +1,184 @@
 /**
- * #171B Round 36 + #179 (#171-A implementation): per-instance sidecar
- * endpoint identity — `IdentityAssertion` builder + signer.
+ * Farm-side IdentityAssertion signing and alias management.
  *
- * Per the approved #177 architecture-decision contract (SHA
- * `23e7cb9`), farm is the only writer of the structured
- * `IdentityAssertion` record. The record is:
+ * Per the approved #177 architecture-decision contract:
+ * - Farm is the authoritative signer of IdentityAssertions
+ * - Farm computes the deterministic networkAlias for (sri, generation)
+ * - Farm generates the bindingSecret (32-byte CSPRNG, hex-encoded)
+ * - Farm signs the assertion with its Ed25519 private key
+ * - Bay verifies the assertion with the pinned farm public key
  *
- *   type IdentityAssertion = {
- *     sri: string;
- *     sidecarCode: string;
- *     composeProject: string;
- *     networkAlias: string;
- *     port: number;
- *     containerId: string;
- *     generation: number;
- *     issuedAt: string;
- *     expiresAt: string;
- *     keyId: string;
- *     bindingSecret: string;
- *     farmSignature: string;
- *   };
- *
- * The `farmSignature` is an **asymmetric** Ed25519 signature
- * over the canonical JSON serialization of all fields
- * except `farmSignature` (deterministic key order). The
- * signing key is the farm's **private** key (Ed25519,
- * PKCS8 PEM), loaded at runtime from
- * `FARM_PRIVATE_KEY_PATH`; verification is done with the
- * matching **public** key (SPKI PEM), which Bay holds
- * separately (a repo-pinned public key map by `keyId`). HMAC
- * is not used because it would require Bay to hold the same
- * secret as the signer; the contract is asymmetric.
- *
- * `bindingSecret` is the per-binding secret used for the
- * per-request channel-binding credential (Decision 4 layer
- * 2). Farm generates it (CSPRNG, 32 bytes minimum) and
- * delivers it to the sidecar's env. The sidecar validates
- * per-request credentials signed with this secret.
- *
- * Production rules (per #177 § bindingSecret controlled
- * path + @Cindy production fail-closed):
- * - In production (`NODE_ENV === "production"`): both
- *   `FARM_PRIVATE_KEY_PATH` and `FARM_KEY_ID` are required.
- *   A missing or empty env var throws at module load
- *   (fail-closed).
- * - The private key file must exist, be readable only by the
- *   farm process, parse as a valid PKCS8 PEM Ed25519 key, and
- *   match the declared `FARM_KEY_ID`. Any other case throws
- *   at module load (fail-closed).
- * - `bindingSecret` is never written to container labels,
- *   logs, audit trails, or any API output.
- * - The only legitimate paths for `bindingSecret` are:
- *   (a) farm generates it in this module; (b) farm delivers
- *   it to the sidecar's env at attach time; (c) Bay reads
- *   it from the verified assertion to derive per-request
- *   credentials (in memory only, never logged); (d) the
- *   sidecar reads it from its env to validate per-request
- *   credentials. Any other path is forbidden.
+ * Alias lifecycle: 2-phase release
+ * - Phase 1 (detach): alias marked `released`, compose down
+ * - Phase 2 (deleted): after all assertions expired + DNS retention
  */
 
 import {
-  createPrivateKey,
-  createPublicKey,
   generateKeyPairSync,
-  randomBytes,
   sign as cryptoSign,
-  timingSafeEqual,
-  verify as cryptoVerify,
+  createPublicKey,
+  randomBytes,
   type KeyObject,
 } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 
-/** Per-binding secret used for per-request channel binding. */
-export type BindingSecret = string;
+// ─── Types ──────────────────────────────────────────────────────────────────
 
-/** Asymmetric signing-key id (selects public key on the verifier side). */
-export type KeyId = string;
+export interface IdentityAssertionFields {
+  sri: string;                    // service runtime instance ID
+  sidecarCode: string;            // e.g. "weixin-auth-sidecar"
+  composeProject: string;         // docker compose project name
+  networkAlias: string;           // deterministic per-(sri, generation)
+  port: number;                   // sidecar HTTP port
+  containerId: string | null;     // docker container ID (may be null at signing time)
+  generation: number;             // monotonically increasing per (sri, sidecarCode)
+  issuedAt: string;               // ISO 8601
+  expiresAt: string;              // ISO 8601
+  keyId: string;                  // farm signing key identifier
+  farmSignature: string;          // Ed25519 signature over canonical bytes (base64)
+  bindingSecret: string;          // 32-byte CSPRNG hex (64 chars) — ONLY in-memory, never persisted by farm
+}
 
-export type IdentityAssertion = {
+export interface SignedAssertionResult {
+  assertion: IdentityAssertionFields;
+  /** Public key PEM for Bay to pin (write to FARM_VERIFICATION_KEYS_PATH). */
+  publicKeyPem: string;
+}
+
+export interface AliasRegistryEntry {
   sri: string;
-  sidecarCode: string;
-  composeProject: string;
-  networkAlias: string;
-  port: number;
-  containerId: string;
   generation: number;
-  issuedAt: string;
-  expiresAt: string;
-  keyId: KeyId;
-  bindingSecret: BindingSecret;
-  farmSignature: string;
-};
+  networkAlias: string;
+  state: "active" | "released" | "deleted";
+  releasedAt: string | null;
+}
 
-/** Canonical key order for deterministic JSON serialization. */
-const CANONICAL_KEY_ORDER: ReadonlyArray<keyof IdentityAssertion> = [
-  "sri",
-  "sidecarCode",
-  "composeProject",
-  "networkAlias",
-  "port",
-  "containerId",
-  "generation",
-  "issuedAt",
-  "expiresAt",
-  "keyId",
-  "bindingSecret",
-  // "farmSignature" is intentionally excluded from the signed
-  // payload (it is the signature itself).
-] as const;
+// ─── Alias derivation ───────────────────────────────────────────────────────
 
 /**
- * Serialize an `IdentityAssertion` to a deterministic JSON
- * byte string for signing / verification. Keys are in the
- * canonical order; values are JSON-stringified. No whitespace
- * variation; no extra fields.
+ * Deterministic alias: "clawbay-sidecar-" + sha256(sri).hex()[:12]
+ * 48 bits of hash space; collision probability ~N^2/2^49 (negligible).
  */
-export function serializeCanonical(record: IdentityAssertion): string {
-  const parts: string[] = [];
-  for (const key of CANONICAL_KEY_ORDER) {
-    const value = record[key];
-    parts.push(`${JSON.stringify(key)}:${JSON.stringify(value)}`);
-  }
-  return `{${parts.join(",")}}`;
+export function deriveNetworkAlias(sri: string): string {
+  const { createHash } = require("node:crypto");
+  const hash = createHash("sha256").update(sri).digest("hex").slice(0, 12);
+  return `clawbay-sidecar-${hash}`;
+}
+
+// ─── Key management ─────────────────────────────────────────────────────────
+
+export interface FarmKeyPair {
+  keyId: string;
+  privateKey: KeyObject;
+  publicKey: KeyObject;
+  publicKeyPem: string;
+  privateKeyPem: string;
 }
 
 /**
- * Generate a per-binding secret using a CSPRNG. Returns a
- * hex-encoded string of `byteLength * 2` characters
- * (default 64 chars = 32 bytes).
+ * Generate a new Ed25519 keypair for farm signing.
+ * The keyId is derived from the public key fingerprint.
  */
-export function generateBindingSecret(byteLength = 32): BindingSecret {
-  if (byteLength < 32) {
-    throw new Error(
-      `bindingSecret byteLength must be >= 32 (got ${byteLength})`
-    );
-  }
-  return randomBytes(byteLength).toString("hex");
+export function generateFarmKeyPair(): FarmKeyPair {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }) as string;
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+
+  // keyId = first 8 hex chars of SHA-256(publicKeyPem)
+  const { createHash } = require("node:crypto");
+  const keyId = createHash("sha256").update(publicKeyPem).digest("hex").slice(0, 8);
+
+  return { keyId, privateKey, publicKey, publicKeyPem, privateKeyPem };
 }
 
 /**
- * Load the farm's Ed25519 private key from the file at
- * `FARM_PRIVATE_KEY_PATH`. The file is expected to be a
- * PKCS8 PEM-encoded Ed25519 key. In production this file
- * lives outside the repo (secret store / volume mount). The
- * key is loaded once at module load; rotation is via
- * `FARM_KEY_ID` (Bay selects the matching public key).
- *
- * Throws on:
- * - missing or empty `FARM_PRIVATE_KEY_PATH` in production
- * - missing or unreadable file
- * - file permissions too open (readable by group/other in
- *   production; the sidecar / farm process should not allow
- *   the private key to be read by other OS users)
- * - invalid PKCS8 PEM
- * - key is not Ed25519
+ * Load farm keypair from files. If files don't exist, generate and save.
+ * @param keyDir directory containing farm-key-id, farm-private.pem, farm-public.pem
  */
-function loadFarmPrivateKey(): KeyObject {
-  const isProduction = process.env.NODE_ENV === "production";
-  const keyPath = process.env.FARM_PRIVATE_KEY_PATH;
-  if (!keyPath || keyPath.length === 0) {
-    if (isProduction) {
-      throw new Error(
-        "FARM_PRIVATE_KEY_PATH is required in production; refusing to " +
-          "start farm without an explicit private-key source."
-      );
-    }
-    throw new Error(
-      "FARM_PRIVATE_KEY_PATH is not set; set it to a PKCS8 PEM file " +
-        "(see tests for an ephemeral example)."
-    );
-  }
-  if (!existsSync(keyPath)) {
-    throw new Error(`FARM_PRIVATE_KEY_PATH does not exist: ${keyPath}`);
-  }
-  if (isProduction) {
-    // Reject world/group readable in production.
-    const st = statSync(keyPath);
-    // 0o077 masks group + other bits.
-    if ((st.mode & 0o077) !== 0) {
-      throw new Error(
-        `FARM_PRIVATE_KEY_PATH ${keyPath} is readable by group/other ` +
-          `(mode=${(st.mode & 0o777).toString(8)}); refusing to load in ` +
-          "production. Set permissions to 0o600 (owner read/write only)."
-      );
-    }
-  }
-  const pem = readFileSync(keyPath, "utf8");
-  let keyObject: KeyObject;
+export function loadOrGenerateFarmKeys(keyDir: string): FarmKeyPair {
+  const idPath = join(keyDir, "farm-key-id");
+  const privPath = join(keyDir, "farm-private.pem");
+  const pubPath = join(keyDir, "farm-public.pem");
+
   try {
-    keyObject = createPrivateKey(pem);
-  } catch (e) {
-    throw new Error(
-      `FARM_PRIVATE_KEY_PATH ${keyPath} is not a valid PKCS8 PEM: ` +
-        (e instanceof Error ? e.message : String(e))
-    );
+    const keyId = readFileSync(idPath, "utf8").trim();
+    const privateKeyPem = readFileSync(privPath, "utf8");
+    const publicKeyPem = readFileSync(pubPath, "utf8");
+    const privateKey = createPublicKey(privateKeyPem);
+    const publicKey = createPublicKey(publicKeyPem);
+    return { keyId, privateKey, publicKey, publicKeyPem, privateKeyPem };
+  } catch {
+    // Files missing or corrupt — generate new keypair
+    const { mkdirSync } = require("node:fs");
+    mkdirSync(keyDir, { recursive: true, mode: 0o700 });
+    const kp = generateFarmKeyPair();
+    writeFileSync(idPath, kp.keyId + "\n", { mode: 0o600 });
+    writeFileSync(privPath, kp.privateKeyPem, { mode: 0o600 });
+    writeFileSync(pubPath, kp.publicKeyPem, { mode: 0o644 });
+    return kp;
   }
-  if (keyObject.asymmetricKeyType !== "ed25519") {
-    throw new Error(
-      `FARM_PRIVATE_KEY_PATH ${keyPath} is not an Ed25519 key ` +
-        `(got ${keyObject.asymmetricKeyType}); refusing to use.`
-    );
-  }
-  return keyObject;
-}
-
-// Module-load fail-closed (1/2): load and validate the
-// private key now. The function throws if `FARM_PRIVATE_KEY_PATH`
-// is missing or malformed in production. The result is
-// cached for later use.
-const _validatedPrivateKey: KeyObject = loadFarmPrivateKey();
-
-const FARM_KEY_ID: KeyId = (() => {
-  const fromEnv = process.env.FARM_KEY_ID;
-  if (fromEnv && fromEnv.length > 0) return fromEnv;
-  throw new Error(
-    "FARM_KEY_ID is required; refusing to sign assertions without an " +
-      "explicit key id. Set FARM_KEY_ID (e.g. 'farm-id-2026-q3-key-1') " +
-      "matching a public key entry in the repo-pinned map."
-  );
-})();
-
-/**
- * Current `FARM_KEY_ID`. Selects which public key on the
- * verifier (Bay) side should be used to verify signatures
- * produced by this signer.
- */
-export function currentKeyId(): KeyId {
-  return FARM_KEY_ID;
-}
-
-// Module-load fail-closed: load and validate the private key
-// at module load (not on first use). This ensures that a
-// production process with a missing or malformed
-// `FARM_PRIVATE_KEY_PATH` crashes at startup, not at the
-// first signature. The `loadFarmPrivateKey()` function
-// already throws with a clear error message; the result
-// is captured here for signing.
-let cachedPrivateKey: KeyObject | null = null;
-function getPrivateKey(): KeyObject {
-  if (cachedPrivateKey === null) {
-    cachedPrivateKey = loadFarmPrivateKey();
-  }
-  return cachedPrivateKey;
 }
 
 /**
- * Convert the Ed25519 raw signature to lowercase hex. Ed25519
- * produces 64-byte signatures; hex is 128 chars.
+ * Export the public key map JSON for Bay's FARM_VERIFICATION_KEYS_PATH.
+ * Format: { "<keyId>": "<publicKeyPem>" }
  */
-function rawSigToHex(sig: Buffer): string {
-  if (sig.length !== 64) {
-    throw new Error(
-      `unexpected Ed25519 signature length ${sig.length} (expected 64)`
-    );
+export function buildPublicKeyMapJson(keys: FarmKeyPair[]): string {
+  const map: Record<string, string> = {};
+  for (const kp of keys) {
+    map[kp.keyId] = kp.publicKeyPem;
   }
-  return sig.toString("hex");
+  return JSON.stringify(map, null, 2) + "\n";
+}
+
+// ─── Canonical bytes + signing ───────────────────────────────────────────────
+
+/**
+ * Build canonical bytes for signing:
+ * length-prefixed fields in fixed order.
+ * Each field: 4-byte big-endian length + UTF-8 bytes.
+ */
+function buildCanonicalBytes(fields: Record<string, string | number | null>): Buffer {
+  const entries = Object.entries(fields).sort(([a], [b]) => a.localeCompare(b));
+  const parts: Buffer[] = [];
+  for (const [key, value] of entries) {
+    const str = value === null ? "" : String(value);
+    const keyBuf = Buffer.from(key, "utf8");
+    const valBuf = Buffer.from(str, "utf8");
+    const lenBuf = Buffer.alloc(4);
+    lenBuf.writeUInt32BE(keyBuf.length, 0);
+    parts.push(lenBuf, keyBuf);
+    const vlenBuf = Buffer.alloc(4);
+    vlenBuf.writeUInt32BE(valBuf.length, 0);
+    parts.push(vlenBuf, valBuf);
+  }
+  return Buffer.concat(parts);
 }
 
 /**
- * Compute the farm signature over the canonical bytes of an
- * `IdentityAssertion` (excluding the `farmSignature` field).
- * Returns the hex-encoded Ed25519 signature.
+ * Sign an IdentityAssertion. Returns the assertion fields + bindingSecret.
+ * The bindingSecret is generated fresh (32-byte CSPRNG, hex-encoded).
  */
-export function signIdentityAssertion(
-  record: Omit<IdentityAssertion, "farmSignature">
-): string {
-  const canonical = serializeCanonical({
-    ...record,
-    farmSignature: "",
-  });
-  const sig = cryptoSign(null, Buffer.from(canonical, "utf8"), getPrivateKey());
-  return rawSigToHex(sig);
-}
-
-/**
- * Verify the farm signature on a complete `IdentityAssertion`
- * using a public key (Ed25519 SPKI PEM). Constant-time
- * comparison. Returns false (NOT throw) for any malformed
- * input: bad signature length, non-hex characters, wrong
- * key type, signature mismatch. The public key is the
- * matching Ed25519 SPKI; Bay loads it from the repo-pinned
- * public-key map.
- */
-export function verifyIdentityAssertion(
-  record: IdentityAssertion,
-  publicKey: KeyObject
-): boolean {
-  if (publicKey.asymmetricKeyType !== "ed25519") {
-    return false;
-  }
-  if (!/^[0-9a-f]+$/.test(record.farmSignature)) {
-    return false;
-  }
-  if (record.farmSignature.length !== 128) {
-    return false;
-  }
-  const sigBytes = Buffer.from(record.farmSignature, "hex");
-  // Defense-in-depth: timingSafeEqual only matches on equal
-  // length, so verify the length is exactly 64 first.
-  if (sigBytes.length !== 64) {
-    return false;
-  }
-  const canonical = serializeCanonical({
-    ...record,
-    farmSignature: "",
-  });
-  const ok = cryptoVerify(
-    null,
-    Buffer.from(canonical, "utf8"),
-    publicKey,
-    sigBytes
-  );
-  // cryptoVerify returns boolean; double-check the signature
-  // bytes against a constant-time compare for defense-in-depth
-  // (the underlying Ed25519 implementation is constant-time
-  // but the contract is belt-and-suspenders).
-  if (!ok) {
-    // Re-run timingSafeEqual against a derived expected
-    // signature; the values are guaranteed different on
-    // failure so this is a constant-time guard only.
-    const expected = Buffer.alloc(64);
-    return timingSafeEqual(sigBytes, expected) && false;
-  }
-  return true;
-}
-
-/**
- * Build and sign a complete `IdentityAssertion` from its
- * constituent fields. The `bindingSecret` is supplied by
- * the caller (typically `generateBindingSecret()`); the
- * `farmSignature` is computed by this function. The caller
- * is responsible for delivering `bindingSecret` to the
- * sidecar's env separately; this function does not write
- * to the sidecar's env.
- */
-export function buildIdentityAssertion(input: {
+export function signIdentityAssertion(input: {
   sri: string;
   sidecarCode: string;
   composeProject: string;
   networkAlias: string;
   port: number;
-  containerId: string;
+  containerId: string | null;
   generation: number;
-  issuedAt: Date;
-  expiresAt: Date;
-  bindingSecret: BindingSecret;
-}): IdentityAssertion {
-  const keyId = currentKeyId();
-  const issuedAtIso = input.issuedAt.toISOString();
-  const expiresAtIso = input.expiresAt.toISOString();
-  const record: Omit<IdentityAssertion, "farmSignature"> = {
+  validitySeconds: number;  // assertion validity window
+  keyPair: FarmKeyPair;
+  now?: Date;
+}): SignedAssertionResult {
+  const now = input.now ?? new Date();
+  const expiresAt = new Date(now.getTime() + input.validitySeconds * 1000);
+
+  // Generate bindingSecret: 32-byte CSPRNG, hex-encoded (64 chars)
+  const bindingSecret = randomBytes(32).toString("hex");
+
+  const fields = {
     sri: input.sri,
     sidecarCode: input.sidecarCode,
     composeProject: input.composeProject,
@@ -357,54 +186,99 @@ export function buildIdentityAssertion(input: {
     port: input.port,
     containerId: input.containerId,
     generation: input.generation,
-    issuedAt: issuedAtIso,
-    expiresAt: expiresAtIso,
-    keyId,
-    bindingSecret: input.bindingSecret,
+    issuedAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+    keyId: input.keyPair.keyId,
   };
-  const farmSignature = signIdentityAssertion(record);
-  return { ...record, farmSignature };
-}
 
-/**
- * Helper used only by the test harness to build a matching
- * public-key `KeyObject` from the same PEM file. Production
- * code does not call this; Bay loads the public key from its
- * own repo-pinned map.
- */
-export function loadPublicKeyFromPath(publicKeyPath: string): KeyObject {
-  const pem = readFileSync(publicKeyPath, "utf8");
-  const key = createPublicKey(pem);
-  if (key.asymmetricKeyType !== "ed25519") {
-    throw new Error(
-      `${publicKeyPath} is not an Ed25519 public key ` +
-        `(got ${key.asymmetricKeyType})`
-    );
-  }
-  return key;
-}
+  const canonical = buildCanonicalBytes(fields);
 
-/**
- * Helper used only by the test harness to generate an
- * ephemeral Ed25519 keypair. Writes the private key as PKCS8
- * PEM to a path; returns the matching public key as a
- * KeyObject. The private key file is created with mode 0o600
- * (owner read/write only) in production environments.
- */
-export function generateEphemeralKeyPair(opts: {
-  privateKeyPath: string;
-  keyId: KeyId;
-}): { privateKeyPath: string; publicKey: KeyObject; keyId: KeyId } {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const privatePem = privateKey.export({
-    type: "pkcs8",
-    format: "pem",
-  }) as string;
-  const fs = require("node:fs") as typeof import("node:fs");
-  fs.writeFileSync(opts.privateKeyPath, privatePem, { mode: 0o600 });
+  // Ed25519 sign — uses crypto.sign() directly (not createSign)
+  const signature = cryptoSign(null, canonical, input.keyPair.privateKeyPem);
+  const farmSignature = signature.toString("base64");
+
   return {
-    privateKeyPath: opts.privateKeyPath,
-    publicKey,
-    keyId: opts.keyId,
+    assertion: {
+      ...fields,
+      farmSignature,
+      bindingSecret,
+    },
+    publicKeyPem: input.keyPair.publicKeyPem,
   };
+}
+
+// ─── Alias registry (in-memory, farm-local) ─────────────────────────────────
+
+/**
+ * In-memory alias registry for 2-phase release.
+ * In production, this would be persisted to farm's state store.
+ */
+export class AliasRegistry {
+  private entries = new Map<string, AliasRegistryEntry>();
+
+  private key(sri: string, generation: number): string {
+    return `${sri}:${generation}`;
+  }
+
+  /**
+   * Reserve an alias for (sri, generation).
+   * If already active for this tuple, returns the existing alias.
+   * If the alias is taken by a different tuple, appends a random suffix.
+   */
+  reserve(sri: string, generation: number): string {
+    const existing = this.entries.get(this.key(sri, generation));
+    if (existing && existing.state === "active") {
+      return existing.networkAlias;
+    }
+
+    const baseAlias = deriveNetworkAlias(sri);
+
+    // Check if base alias is taken by another active entry
+    let alias = baseAlias;
+    for (const entry of this.entries.values()) {
+      if (entry.networkAlias === alias && entry.state === "active" && this.key(sri, generation) !== this.key(entry.sri, entry.generation)) {
+        // Collision: append random suffix
+        const suffix = randomBytes(2).toString("hex");
+        alias = `${baseAlias}-${suffix}`;
+        break;
+      }
+    }
+
+    this.entries.set(this.key(sri, generation), {
+      sri,
+      generation,
+      networkAlias: alias,
+      state: "active",
+      releasedAt: null,
+    });
+
+    return alias;
+  }
+
+  /**
+   * Phase 1 release: mark alias as `released` (quarantine).
+   * Called on sidecar.detach.
+   */
+  release(sri: string, generation: number): void {
+    const entry = this.entries.get(this.key(sri, generation));
+    if (entry && entry.state === "active") {
+      entry.state = "released";
+      entry.releasedAt = new Date().toISOString();
+    }
+  }
+
+  /**
+   * Phase 2 delete: mark alias as `deleted` (returns to free pool).
+   * Only allowed after all assertions expired + DNS retention.
+   */
+  markDeleted(sri: string, generation: number): void {
+    const entry = this.entries.get(this.key(sri, generation));
+    if (entry && entry.state === "released") {
+      entry.state = "deleted";
+    }
+  }
+
+  getState(sri: string, generation: number): AliasRegistryEntry | null {
+    return this.entries.get(this.key(sri, generation)) ?? null;
+  }
 }

@@ -1,6 +1,17 @@
 import { join } from "node:path";
-import { mkdir, rm } from "node:fs/promises";
-import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl } from "../lib/api.ts";
+import { mkdir, rm, readFile, writeFile, unlink } from "node:fs/promises";
+import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose, resolveInstance } from "../lib/api.ts";
+import { runComposeService } from "../lib/compose.ts";
+import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, migrateSidecarSpec, SidecarSpecError, type SidecarSpec } from "../lib/sidecar-spec.ts";
+import { resolveSidecarAttachPoint, ensureSidecarAttachPoint } from "../lib/sidecar-attach.ts";
+import { executeWorkloadTransaction, checkContainerHealth } from "../lib/workload-tx.ts";
+import {
+  loadOrGenerateFarmKeys,
+  signIdentityAssertion,
+  AliasRegistry,
+  deriveNetworkAlias,
+  type FarmKeyPair,
+} from "../lib/identity-assertion.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { exportCommand } from "./export.ts";
 import { importCommand } from "./import.ts";
@@ -28,6 +39,36 @@ import {
   type RuntimeInstanceStatus,
 } from "../lib/runtime-instance-registry.ts";
 import type { RuntimeType } from "../runtimes/interface.ts";
+
+// #179: Farm IdentityAssertion signing — lazy-loaded singleton
+let _farmKeyPair: FarmKeyPair | null = null;
+const _aliasRegistry = new AliasRegistry();
+
+function getFarmKeyPair(): FarmKeyPair {
+  if (!_farmKeyPair) {
+    const keyDir = process.env.FARM_KEY_DIR ?? join(process.env.HOME ?? "/tmp", ".claw-farm", "keys");
+    _farmKeyPair = loadOrGenerateFarmKeys(keyDir);
+  }
+  return _farmKeyPair;
+}
+
+async function getContainerId(composeProject: string, serviceName: string): Promise<string | null> {
+  const containerName = `${composeProject}-${serviceName}-1`;
+  try {
+    const proc = Bun.spawn(
+      ["docker", "inspect", "--format", "{{.Id}}", containerName],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await proc.exited;
+    if (exitCode === 0) {
+      const stdout = await new Response(proc.stdout).text();
+      return stdout.trim().slice(0, 12); // short container ID
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 const INSTANCE_OPERATIONS = new Set([
   "instance.create",
@@ -898,6 +939,740 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
       composePath: previousStatus.composePath,
       composeProject: previousStatus.composeProject,
     },
+  });
+}
+
+// #171 Phase 2A-2: sidecar.attach - write versioned spec + compose, start sidecar service
+async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
+  const { project, userId } = parseRuntimeInstanceKey(payload);
+  validateBridgeName(userId, "user ID");
+  const context = await requireManagedInstance("sidecar.attach", project, userId);
+  if ("ok" in context) return context;
+
+  // Validate CAS identity fields — strict, no silent fallbacks
+  const bindingId = asString(payload.bindingId);
+  const operationId = asString(payload.operationId);
+  const expectedAttachmentVersion = asNumber(payload.expectedAttachmentVersion);
+  const expectedConfigVersion = asNumber(payload.expectedConfigVersion);
+  const sidecarCode = asString(payload.sidecarCode);
+  const managedInstanceId = asString(payload.managedInstanceId);
+
+  if (!bindingId || !operationId || !managedInstanceId) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: "CAS identity required: bindingId + operationId + managedInstanceId",
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  if (sidecarCode !== "weixin-auth-sidecar") {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Unsupported sidecarCode: ${sidecarCode}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Versions must be safe non-negative integers
+  const eatv = expectedAttachmentVersion;
+  const ecgv = expectedConfigVersion;
+  if (!Number.isSafeInteger(eatv) || eatv! < 0) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Invalid expectedAttachmentVersion: ${payload.expectedAttachmentVersion}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+  if (!Number.isSafeInteger(ecgv) || ecgv! < 0) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Invalid expectedConfigVersion: ${payload.expectedConfigVersion}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Derive instDir from registry (caller must not pass this)
+  const instDir = instanceDir(context.resolved.entry.path, userId);
+
+  // Ensure attach point directories exist (needed for idempotent response)
+  const attachPoint = resolveSidecarAttachPoint({
+    workspaceRoot: context.layout.workspaceRoot,
+    runtimeWorkspaceSlug: userId,
+    providerCode: "weixin",
+    runtimeType: context.runtimeType,
+  });
+  await ensureSidecarAttachPoint(attachPoint);
+
+  // Read existing sidecar spec, migrating v1 to v2 if needed
+  let spec: SidecarSpec | null = null;
+  try {
+    spec = await readSidecarSpec(instDir);
+  } catch (error) {
+    if (error instanceof SidecarSpecError && error.code === "spec-invalid") {
+      // v1 spec detected — migrate with synthetic legacy identity
+      // Use a synthetic operationId so it doesn't match any real request
+      const legacyOpId = `legacy-v1-migration-${Date.now()}`;
+      await migrateSidecarSpec(instDir, {
+        managedInstanceId: asString(payload.managedInstanceId) ?? "migrated",
+        bindingId: "legacy-binding",
+        operationId: legacyOpId,
+        targetAttachmentVersion: 0,
+        targetConfigVersion: 0,
+        desiredAttachmentState: "attached",
+      });
+      spec = await readSidecarSpec(instDir);
+    } else {
+      throw error;
+    }
+  }
+
+  // #171 Phase 2A-2: Idempotency — same operation already applied
+  if (
+    spec && spec.operationId !== "" &&
+    spec.operationId === operationId &&
+    spec.bindingId === bindingId &&
+    spec.managedInstanceId === (asString(payload.managedInstanceId) ?? "") &&
+    spec.desiredAttachmentState === "attached" &&
+    spec.targetAttachmentVersion === eatv! + 1 &&
+    spec.targetConfigVersion === ecgv!
+  ) {
+    return bridgeSuccess({
+      action: "sidecar.attach",
+      message: `Sidecar already attached by operation ${operationId}`,
+      metadata: {
+        sidecarCode: "weixin-auth-sidecar",
+        serviceName: "weixin-sidecar",
+        bindingId: spec.bindingId,
+        operationId: spec.operationId,
+        expectedAttachmentVersion: spec.targetAttachmentVersion - 1,
+        expectedConfigVersion: spec.targetConfigVersion,
+        appliedTargetVersion: spec.targetAttachmentVersion,
+        appliedConfigVersion: spec.targetConfigVersion,
+        attachPointPath: attachPoint.configDir,
+        healthCheck: "idempotent",
+        idempotent: true,
+        // #179: IdentityAssertion NOT re-sent on idempotent path;
+        // Bay already persisted it from the first attach.
+      },
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // #171 Phase 2A-2: Stale replay guard — reject same-or-older-version operations
+  if (spec && spec.targetAttachmentVersion >= eatv! + 1) {
+    // Allow if spec was just migrated (operationId starts with "legacy-")
+    if (!spec.operationId.startsWith("legacy-")) {
+      return bridgeFailure({
+        action: "sidecar.attach",
+        message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${eatv! + 1}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+  }
+
+  // Identity mismatch guard (skip for legacy-migrated specs)
+  if (spec && spec.operationId && !spec.operationId.startsWith("legacy-")) {
+    if (spec.bindingId !== bindingId) {
+      return bridgeFailure({
+        action: "sidecar.attach",
+        message: `Binding identity mismatch: spec=${spec.bindingId}, request=${bindingId}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+    if (spec.managedInstanceId !== (asString(payload.managedInstanceId) ?? "")) {
+      return bridgeFailure({
+        action: "sidecar.attach",
+        message: `ManagedInstance identity mismatch: spec=${spec.managedInstanceId}, request=${asString(payload.managedInstanceId)}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+    // Config version continuity: spec.targetConfigVersion must match incoming expectedConfigVersion
+    if (spec.targetConfigVersion !== ecgv!) {
+      return bridgeFailure({
+        action: "sidecar.attach",
+        message: `Config version mismatch: spec=${spec.targetConfigVersion}, expected=${ecgv!}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+  }
+
+  const composeProject = `${context.resolved.name}-${userId}`;
+  const instance = await getInstance(context.resolved.name, userId);
+  const serviceName = "weixin-sidecar";
+
+  const txResult = await executeWorkloadTransaction(
+    instDir,
+    composeProject,
+    serviceName,
+    {
+      newSpec: {
+        schemaVersion: 2,
+        enabled: true,
+        serviceName: "weixin-sidecar",
+        envFile: ".env.weixin",
+        port: 8787,
+        composeProject,
+        managedInstanceId: asString(payload.managedInstanceId) ?? "",
+        bindingId,
+        operationId,
+        targetAttachmentVersion: eatv! + 1,
+        targetConfigVersion: ecgv!,
+        desiredAttachmentState: "attached",
+        updatedAt: new Date().toISOString(),
+      },
+      serviceName,
+      composeProject,
+    },
+    async () => {
+      // #171 Phase 2A-2: Credential validation — fail-closed before any mutations
+      const clawBayApiUrl = asString(payload.clawBayApiUrl);
+      // Read admin token from env first (set by Bay adapter to avoid CLI argv exposure), fall back to payload
+  const clawBayAdminToken = process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN;
+      const managedInstanceId = asString(payload.managedInstanceId) ?? "";
+
+      if (!clawBayApiUrl || !clawBayAdminToken) {
+        throw new Error("Provision credentials required: clawBayApiUrl + clawBayAdminToken. Refusing to start sidecar without token provision.");
+      }
+
+      // Save .env.weixin state for rollback if provision creates/rotates it
+      // Fail-closed: only ENOENT means "absent" (pre-attach state). Other read errors
+      // (EACCES, I/O) must abort BEFORE provision to avoid corrupting env state.
+      const envFile = join(instDir, ".env.weixin");
+      const envRead = await readFile(envFile, "utf8").then(
+        (content) => ({ ok: true as const, content }),
+        (err: NodeJS.ErrnoException) => {
+          if (err.code === "ENOENT") return { ok: true as const, content: null };
+          throw err;
+        },
+      );
+      const previousEnv = envRead.content;
+      const sidecarContainer = `${composeProject}-weixin`;
+      let provisionSucceeded = false;
+
+      try {
+        // Side effect 1: Provision token BEFORE compose (creates env/token)
+        const provisionResponse = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-claw-bay-admin-token": clawBayAdminToken,
+          },
+          body: JSON.stringify({
+            spec: {
+              serviceRuntimeInstanceId: managedInstanceId,
+              userId,
+              sidecarCode: "weixin-auth-sidecar",
+              ttlSeconds: 3600,
+              consumer: {
+                type: "compose-service",
+                composeFile: join(instDir, "docker-compose.openclaw.yml"),
+                serviceName: "weixin-sidecar",
+                envFile,
+                composeProject,
+              },
+              healthUrl: `http://${sidecarContainer}:8787/healthz`,
+              readinessTimeoutMs: 30_000,
+              readinessIntervalMs: 2_000,
+            },
+            skipRestart: true,
+          }),
+        });
+        if (!provisionResponse.ok) {
+          throw new Error(`Provision failed: HTTP ${provisionResponse.status}`);
+        }
+        const provisionResult = (await provisionResponse.json()) as { ok: boolean; error?: { message?: string } };
+        if (!provisionResult.ok) {
+          throw new Error(`Provision failed: ${provisionResult.error?.message ?? "unknown"}`);
+        }
+        provisionSucceeded = true;
+
+        // Side effect 2: Write compose with sidecar enabled
+        await writeInstanceCompose({
+          projectName: context.resolved.name,
+          userId,
+          port: instance?.port ?? 3000,
+          instDir,
+          runtimeType: context.runtimeType,
+          runtime: context.runtime,
+          proxyMode: context.proxyMode,
+          enableWeixinSidecar: true,
+        });
+
+        // Side effect 3: Compose up sidecar
+        await runComposeService(instDir, "up", serviceName, {
+          quiet: true,
+          projectName: composeProject,
+        });
+
+        // Side effect 4: Health check
+        let healthOk = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          healthOk = await checkContainerHealth(composeProject);
+          if (healthOk) break;
+          await new Promise(r => setTimeout(r, 500));
+        }
+        if (!healthOk) {
+          throw new Error("Sidecar health check failed after compose up");
+        }
+      } catch (error) {
+        // Rollback: revoke token + restore .env.weixin if provision succeeded
+        if (provisionSucceeded) {
+          // Revoke token — check response, record typed rollback code on failure
+          let revokeOk = false;
+          try {
+            const revokeResp = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-claw-bay-admin-token": clawBayAdminToken,
+              },
+              body: JSON.stringify({
+                serviceRuntimeInstanceId: managedInstanceId,
+                sidecarCode: "weixin-auth-sidecar",
+              }),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (revokeResp.ok) {
+              revokeOk = true;
+            } else {
+              const errorBody = await revokeResp.json().catch(() => ({})) as { error?: { message?: string } };
+              throw new Error(`Revoke returned HTTP ${revokeResp.status}: ${errorBody.error?.message ?? ""}`);
+            }
+          } catch (revokeErr) {
+            // Revoke failed — record typed degradation
+            const codes = (error as Error & { rollbackErrorCodes?: string[] })?.rollbackErrorCodes ?? [];
+            if (!codes.includes("revoke-failed")) {
+              (error as Error & { rollbackErrorCodes?: string[] }).rollbackErrorCodes = [
+                ...codes,
+                "revoke-failed",
+              ];
+            }
+          }
+          // Restore .env.weixin
+          try {
+            if (previousEnv !== null) {
+              await writeFile(envFile, previousEnv, "utf8");
+            } else {
+              await unlink(envFile);
+            }
+          } catch (restoreErr) {
+            const codes = (error as Error & { rollbackErrorCodes?: string[] })?.rollbackErrorCodes ?? [];
+            if (!codes.includes("env-restore-failed")) {
+              (error as Error & { rollbackErrorCodes?: string[] }).rollbackErrorCodes = [
+                ...codes,
+                "env-restore-failed",
+              ];
+            }
+          }
+        }
+        throw error; // Re-throw to trigger transaction rollback
+      }
+    },
+  );
+
+  if (!txResult.committed) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: txResult.error ?? "Transaction failed",
+      errorCode: "runtime-command-failed",
+      retryable: txResult.rollbackErrorCodes.length === 0,
+      metadata: {
+        rollbackErrorCodes: txResult.rollbackErrorCodes.length > 0 ? txResult.rollbackErrorCodes : undefined,
+        didRollback: txResult.didRollback,
+        criticalCompensationCodes: txResult.criticalCompensationCodes,
+      },
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // #179: Sign IdentityAssertion and reserve alias
+  const generation = eatv! + 1;
+  const sri = managedInstanceId;
+  const networkAlias = _aliasRegistry.reserve(sri, generation);
+  const containerId = await getContainerId(composeProject, "weixin-sidecar");
+  const keyPair = getFarmKeyPair();
+  const assertionResult = signIdentityAssertion({
+    sri,
+    sidecarCode: "weixin-auth-sidecar",
+    composeProject,
+    networkAlias,
+    port: 8787,
+    containerId,
+    generation,
+    validitySeconds: 3600, // 1 hour
+    keyPair,
+  });
+
+  return bridgeSuccess({
+    action: "sidecar.attach",
+    message: `Attached sidecar for "${userId}"`,
+    metadata: {
+      sidecarCode: "weixin-auth-sidecar",
+      serviceName: "weixin-sidecar",
+      bindingId,
+      operationId,
+      expectedAttachmentVersion,
+      expectedConfigVersion,
+      appliedTargetVersion: generation,
+      // #171B Round 35: attach does not change config; echo expected unchanged
+      appliedConfigVersion: expectedConfigVersion,
+      attachPointPath: attachPoint.configDir,
+      healthCheck: "passed",
+      // #179: IdentityAssertion for Bay to persist and use for per-instance calls
+      appliedSidecarEndpoint: {
+        sri: assertionResult.assertion.sri,
+        sidecarCode: assertionResult.assertion.sidecarCode,
+        composeProject: assertionResult.assertion.composeProject,
+        networkAlias: assertionResult.assertion.networkAlias,
+        port: assertionResult.assertion.port,
+        containerId: assertionResult.assertion.containerId,
+        generation: assertionResult.assertion.generation,
+        issuedAt: assertionResult.assertion.issuedAt,
+        expiresAt: assertionResult.assertion.expiresAt,
+        keyId: assertionResult.assertion.keyId,
+        farmSignature: assertionResult.assertion.farmSignature,
+        bindingSecret: assertionResult.assertion.bindingSecret,
+      },
+    },
+    project: context.resolved.name, userId,
+  });
+}
+
+// #171 Phase 2A-2: sidecar.detach — write versioned disabled spec, stop+rm sidecar service
+async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
+  const { project, userId } = parseRuntimeInstanceKey(payload);
+  validateBridgeName(userId, "user ID");
+  const context = await requireManagedInstance("sidecar.detach", project, userId);
+  if ("ok" in context) return context;
+
+  // Validate CAS identity fields — strict, no silent fallbacks
+  const bindingId = asString(payload.bindingId);
+  const operationId = asString(payload.operationId);
+  const expectedAttachmentVersion = asNumber(payload.expectedAttachmentVersion);
+  const expectedConfigVersion = asNumber(payload.expectedConfigVersion);
+  const sidecarCode = asString(payload.sidecarCode);
+  const managedInstanceId = asString(payload.managedInstanceId);
+
+  if (!bindingId || !operationId || !managedInstanceId) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: "CAS identity required: bindingId + operationId + managedInstanceId",
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  if (sidecarCode !== "weixin-auth-sidecar") {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: `Unsupported sidecarCode: ${sidecarCode}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Versions must be safe non-negative integers
+  const detv = expectedAttachmentVersion;
+  const decv = expectedConfigVersion;
+  if (!Number.isSafeInteger(detv) || detv! < 0) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: `Invalid expectedAttachmentVersion: ${payload.expectedAttachmentVersion}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+  if (!Number.isSafeInteger(decv) || decv! < 0) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: `Invalid expectedConfigVersion: ${payload.expectedConfigVersion}`,
+      errorCode: "invalid-payload",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // Derive instDir from registry (caller must not pass this)
+  const instDir = instanceDir(context.resolved.entry.path, userId);
+
+  // Read existing sidecar spec, migrating v1 to v2 if needed
+  let spec: SidecarSpec | null = null;
+  try {
+    spec = await readSidecarSpec(instDir);
+  } catch (error) {
+    if (error instanceof SidecarSpecError && error.code === "spec-invalid") {
+      // v1 spec detected — migrate with synthetic legacy identity
+      const legacyOpId = `legacy-v1-migration-${Date.now()}`;
+      await migrateSidecarSpec(instDir, {
+        managedInstanceId: asString(payload.managedInstanceId) ?? "migrated",
+        bindingId: "legacy-binding",
+        operationId: legacyOpId,
+        targetAttachmentVersion: 0,
+        targetConfigVersion: 0,
+        desiredAttachmentState: "detached",
+      });
+      spec = await readSidecarSpec(instDir);
+    } else {
+      throw error;
+    }
+  }
+
+  if (!spec) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: "No sidecar spec found — nothing to detach",
+      errorCode: "runtime-missing",
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // #171 Phase 2A-2: Idempotency — same operation already applied
+  if (
+    spec && spec.operationId !== "" &&
+    spec.operationId === operationId &&
+    spec.bindingId === bindingId &&
+    spec.managedInstanceId === (asString(payload.managedInstanceId) ?? "") &&
+    spec.desiredAttachmentState === "detached" &&
+    spec.targetAttachmentVersion === detv! + 1 &&
+    spec.targetConfigVersion === decv!
+  ) {
+    return bridgeSuccess({
+      action: "sidecar.detach",
+      message: `Sidecar already detached by operation ${operationId}`,
+      metadata: {
+        sidecarCode: "weixin-auth-sidecar",
+        serviceName: "weixin-sidecar",
+        bindingId: spec.bindingId,
+        operationId: spec.operationId,
+        expectedAttachmentVersion: spec.targetAttachmentVersion - 1,
+        expectedConfigVersion: spec.targetConfigVersion,
+        appliedTargetVersion: spec.targetAttachmentVersion,
+        appliedConfigVersion: spec.targetConfigVersion,
+        idempotent: true,
+      },
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // #171 Phase 2A-2: Stale replay guard — reject same-or-older-version operations
+  if (spec && spec.targetAttachmentVersion >= detv! + 1) {
+    if (!spec.operationId.startsWith("legacy-")) {
+      return bridgeFailure({
+        action: "sidecar.detach",
+        message: `Stale replay: spec targetAttachmentVersion=${spec.targetAttachmentVersion} > expected=${detv! + 1}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+  }
+
+  // Identity mismatch guard (skip for legacy-migrated specs)
+  if (spec && spec.operationId && !spec.operationId.startsWith("legacy-")) {
+    if (spec.bindingId !== bindingId) {
+      return bridgeFailure({
+        action: "sidecar.detach",
+        message: `Binding identity mismatch: spec=${spec.bindingId}, request=${bindingId}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+    if (spec.managedInstanceId !== (asString(payload.managedInstanceId) ?? "")) {
+      return bridgeFailure({
+        action: "sidecar.detach",
+        message: `ManagedInstance identity mismatch: spec=${spec.managedInstanceId}, request=${asString(payload.managedInstanceId)}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+    if (spec.targetConfigVersion !== decv!) {
+      return bridgeFailure({
+        action: "sidecar.detach",
+        message: `Config version mismatch: spec=${spec.targetConfigVersion}, expected=${decv!}`,
+        errorCode: "runtime-conflict",
+        project: context.resolved.name, userId,
+      });
+    }
+  }
+
+  const composeProject = `${context.resolved.name}-${userId}`;
+  const serviceName = "weixin-sidecar";
+  const instance = await getInstance(context.resolved.name, userId);
+
+  const txResult = await executeWorkloadTransaction(
+    instDir,
+    composeProject,
+    serviceName,
+    {
+      newSpec: {
+        schemaVersion: 2,
+        enabled: false,
+        serviceName: "weixin-sidecar",
+        envFile: ".env.weixin",
+        port: 8787,
+        composeProject,
+        managedInstanceId: asString(payload.managedInstanceId) ?? "",
+        bindingId,
+        operationId,
+        targetAttachmentVersion: detv! + 1,
+        targetConfigVersion: decv!,
+        desiredAttachmentState: "detached",
+        updatedAt: new Date().toISOString(),
+      },
+      serviceName,
+      composeProject,
+    },
+    async () => {
+      // #171 Phase 2A-2: Credential validation — fail-closed before any mutations.
+      // Detach without ability to revoke token is not safe (orphan token risk).
+      const clawBayApiUrl = asString(payload.clawBayApiUrl);
+      // Read admin token from env first (set by Bay adapter to avoid CLI argv exposure), fall back to payload
+  const clawBayAdminToken = process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN;
+      if (!clawBayApiUrl || !clawBayAdminToken) {
+        throw new Error("Revoke credentials required: clawBayApiUrl + clawBayAdminToken. Refusing to detach without token revoke.");
+      }
+
+      // Side effect 1: Stop sidecar service
+      const stopErrors: string[] = [];
+      try {
+        await runComposeService(instDir, "stop", serviceName, {
+          quiet: true,
+          projectName: composeProject,
+        });
+      } catch (error) {
+        stopErrors.push(error instanceof Error ? error.message : String(error));
+      }
+
+      // Side effect 2: Remove sidecar service
+      try {
+        await runComposeService(instDir, "rm", serviceName, {
+          quiet: true,
+          projectName: composeProject,
+        });
+      } catch (error) {
+        stopErrors.push(error instanceof Error ? error.message : String(error));
+      }
+
+      // If stop+rm both failed, sidecar is still running — hard error
+      if (stopErrors.length >= 2) {
+        throw new Error(`Failed to stop and remove sidecar: ${stopErrors.join("; ")}`);
+      }
+
+      // Verify target absent: inspect container after rm
+      const containerName = `${composeProject}-weixin`;
+      try {
+        const inspectProc = Bun.spawn(
+          ["docker", "inspect", containerName],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        const exitCode = await inspectProc.exited;
+        const stderr = await new Response(inspectProc.stderr).text();
+        if (exitCode === 0) {
+          // Container still exists — rm didn't work
+          throw new Error(`Sidecar container ${containerName} still exists after rm`);
+        }
+        // Non-zero: only accept Docker's exact No such object/container as "gone"
+        if (!stderr.includes("No such object") && !stderr.includes("No such container")) {
+          throw new Error(`Docker inspect failed after rm: ${stderr.trim()}`);
+        }
+        // Container genuinely gone — continue
+      } catch (err) {
+        if (err instanceof Error && (err.message.includes("still exists") || err.message.includes("Docker inspect failed"))) {
+          throw err;
+        }
+        // Docker CLI not found or other non-Docker error — fail closed
+        throw new Error(`Cannot verify sidecar absence: ${err instanceof Error ? err.message : err}`);
+      }
+
+      // Side effect 3: Rewrite compose without sidecar
+      await writeInstanceCompose({
+        projectName: context.resolved.name,
+        userId,
+        port: instance?.port ?? 3000,
+        instDir,
+        runtimeType: context.runtimeType,
+        runtime: context.runtime,
+        proxyMode: context.proxyMode,
+        enableWeixinSidecar: false,
+      });
+    },
+    // Post-commit: revoke token via ClawBay authenticated API
+    async () => {
+      // Credentials are already validated in side effects (fail-closed before commit)
+      const clawBayApiUrl = asString(payload.clawBayApiUrl)!;
+      const clawBayAdminToken = process.env.CLAW_BAY_BRIDGE_CLAW_BAY_ADMIN_TOKEN!;
+      const managedInstanceId = asString(payload.managedInstanceId)!;
+
+      try {
+        const resp = await fetch(`${clawBayApiUrl.replace(/\/$/, "")}/api/internal/weixin-binding-provision/revoke`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-claw-bay-admin-token": clawBayAdminToken,
+          },
+          body: JSON.stringify({
+            serviceRuntimeInstanceId: managedInstanceId,
+            sidecarCode: "weixin-auth-sidecar",
+          }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!resp.ok) {
+          const errorBody = await resp.json().catch(() => ({})) as { error?: { message?: string } };
+          throw new Error(`Revoke failed: HTTP ${resp.status} ${errorBody.error?.message ?? ""}`);
+        }
+      } catch (err) {
+        // Attach revoke-failed as critical compensation code
+        const e = err instanceof Error ? err : new Error(String(err));
+        (e as Error & { rollbackErrorCodes?: string[] }).rollbackErrorCodes = ["revoke-failed"];
+        throw e;
+      }
+    },
+  );
+
+  if (!txResult.committed) {
+    return bridgeFailure({
+      action: "sidecar.detach",
+      message: txResult.error ?? "Transaction failed",
+      errorCode: "runtime-command-failed",
+      retryable: false,
+      metadata: {
+        rollbackErrorCodes: txResult.rollbackErrorCodes.length > 0 ? txResult.rollbackErrorCodes : undefined,
+        didRollback: txResult.didRollback,
+        criticalCompensationCodes: txResult.criticalCompensationCodes,
+      },
+      project: context.resolved.name, userId,
+    });
+  }
+
+  // #179: Release alias (Phase 1 of 2-phase release)
+  const generation = detv! + 1;
+  const sri = managedInstanceId;
+  _aliasRegistry.release(sri, generation);
+
+  return bridgeSuccess({
+    action: "sidecar.detach",
+    message: txResult.error ? `Detached sidecar for "${userId}" (revoke degraded: ${txResult.error})` : `Detached sidecar for "${userId}"`,
+    metadata: {
+      sidecarCode: "weixin-auth-sidecar",
+      serviceName: "weixin-sidecar",
+      bindingId,
+      operationId,
+      expectedAttachmentVersion,
+      expectedConfigVersion,
+      appliedTargetVersion: generation,
+      // #171B Round 35: detach does not change config; echo expected unchanged
+      appliedConfigVersion: expectedConfigVersion,
+      criticalCompensationCodes: txResult.criticalCompensationCodes,
+      // #179: Alias released (Phase 1 quarantine)
+      aliasReleased: true,
+    },
+    project: context.resolved.name, userId,
   });
 }
 
