@@ -20,7 +20,7 @@ import {
   randomBytes,
   type KeyObject,
 } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -44,14 +44,6 @@ export interface SignedAssertionResult {
   assertion: IdentityAssertionFields;
   /** Public key PEM for Bay to pin (write to FARM_VERIFICATION_KEYS_PATH). */
   publicKeyPem: string;
-}
-
-export interface AliasRegistryEntry {
-  sri: string;
-  generation: number;
-  networkAlias: string;
-  state: "active" | "released" | "deleted";
-  releasedAt: string | null;
 }
 
 // ─── Alias derivation ───────────────────────────────────────────────────────
@@ -205,80 +197,4 @@ export function signIdentityAssertion(input: {
     },
     publicKeyPem: input.keyPair.publicKeyPem,
   };
-}
-
-// ─── Alias registry (in-memory, farm-local) ─────────────────────────────────
-
-/**
- * In-memory alias registry for 2-phase release.
- * In production, this would be persisted to farm's state store.
- */
-export class AliasRegistry {
-  private entries = new Map<string, AliasRegistryEntry>();
-
-  private key(sri: string, generation: number): string {
-    return `${sri}:${generation}`;
-  }
-
-  /**
-   * Reserve an alias for (sri, generation).
-   * If already active for this tuple, returns the existing alias.
-   * If the alias is taken by a different tuple, appends a random suffix.
-   */
-  reserve(sri: string, generation: number): string {
-    const existing = this.entries.get(this.key(sri, generation));
-    if (existing && existing.state === "active") {
-      return existing.networkAlias;
-    }
-
-    const baseAlias = deriveNetworkAlias(sri);
-
-    // Check if base alias is taken by another active entry
-    let alias = baseAlias;
-    for (const entry of this.entries.values()) {
-      if (entry.networkAlias === alias && entry.state === "active" && this.key(sri, generation) !== this.key(entry.sri, entry.generation)) {
-        // Collision: append random suffix
-        const suffix = randomBytes(2).toString("hex");
-        alias = `${baseAlias}-${suffix}`;
-        break;
-      }
-    }
-
-    this.entries.set(this.key(sri, generation), {
-      sri,
-      generation,
-      networkAlias: alias,
-      state: "active",
-      releasedAt: null,
-    });
-
-    return alias;
-  }
-
-  /**
-   * Phase 1 release: mark alias as `released` (quarantine).
-   * Called on sidecar.detach.
-   */
-  release(sri: string, generation: number): void {
-    const entry = this.entries.get(this.key(sri, generation));
-    if (entry && entry.state === "active") {
-      entry.state = "released";
-      entry.releasedAt = new Date().toISOString();
-    }
-  }
-
-  /**
-   * Phase 2 delete: mark alias as `deleted` (returns to free pool).
-   * Only allowed after all assertions expired + DNS retention.
-   */
-  markDeleted(sri: string, generation: number): void {
-    const entry = this.entries.get(this.key(sri, generation));
-    if (entry && entry.state === "released") {
-      entry.state = "deleted";
-    }
-  }
-
-  getState(sri: string, generation: number): AliasRegistryEntry | null {
-    return this.entries.get(this.key(sri, generation)) ?? null;
-  }
 }

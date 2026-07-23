@@ -31,6 +31,8 @@ export interface InstanceComposeOptions {
    * Source: CLAW_FARM_RUNTIME_ATTACH_NETWORKS (first entry).
    */
   externalNetwork?: string;
+  /** #179: Farm-authoritative DNS alias on externalNetwork. */
+  networkAlias?: string;
 }
 
 /**
@@ -77,10 +79,15 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
     weixinEnvFile = ".env.weixin",
     weixinSidecarPort = 8787,
     externalNetwork,
+    networkAlias,
   } = opts;
 
   safeYamlIdentifier(projectName, "project name");
   safeYamlIdentifier(userId, "user ID");
+  if (networkAlias) {
+    safeYamlIdentifier(networkAlias, "sidecar network alias");
+    if (!externalNetwork) throw new Error("sidecar networkAlias requires externalNetwork");
+  }
   const containerPrefix = `${projectName}-${userId}`;
   const hasProxy = proxyMode !== "none";
   const openclawMountSource = instanceHostDir ? `${instanceHostDir}/openclaw` : "./openclaw";
@@ -132,6 +139,10 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
   // via host.docker.internal, which resolves to the host's loopback from
   // within the container.
 
+  const weixinNetworks = networkAlias
+    ? `    networks:\n      sidecar-net:\n      ${externalNetwork}:\n        aliases:\n          - ${networkAlias}`
+    : `    networks:\n      - sidecar-net${externalNetwork ? `\n      - ${externalNetwork}` : ""}`;
+
   const weixinSidecarService = enableWeixinSidecar ? `  weixin-sidecar:
     container_name: ${containerPrefix}-weixin
     image: clawbay-bay-sidecar-weixin:latest
@@ -153,8 +164,7 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
       - "8787"
     volumes:
       - ${openclawMountSource}/workspace/runtime/sidecar-weixin:/data
-    networks:
-      - sidecar-net${externalNetwork ? `\n      - ${externalNetwork}` : ""}
+${weixinNetworks}
     tmpfs:
       - /tmp:size=50M
     security_opt:

@@ -215,6 +215,30 @@ describe("sidecar-spec persistence", () => {
     expect(read!.externalNetwork).toBe("clawbay_default");
   });
 
+  it("spec with alias identity round-trips correctly", async () => {
+    const spec: SidecarSpec = {
+      ...validSpec,
+      externalNetwork: "clawbay_default",
+      networkAlias: "clawbay-sidecar-deadbeef0000",
+      aliasGeneration: 3,
+    };
+    await writeSidecarSpec(tempDir, spec);
+    const read = await readSidecarSpec(tempDir);
+    expect(read?.networkAlias).toBe("clawbay-sidecar-deadbeef0000");
+    expect(read?.aliasGeneration).toBe(3);
+  });
+
+  it("rejects unsafe aliases and invalid alias generations", async () => {
+    await expect(writeSidecarSpec(tempDir, {
+      ...validSpec,
+      networkAlias: "alias;injection",
+    })).rejects.toThrow(SidecarSpecError);
+    await expect(writeSidecarSpec(tempDir, {
+      ...validSpec,
+      aliasGeneration: 0,
+    })).rejects.toThrow(SidecarSpecError);
+  });
+
   it("throws for Docker-unsafe externalNetwork", async () => {
     const badSpec = { ...validSpec, externalNetwork: "net;evil" } as unknown as SidecarSpec;
     expect(writeSidecarSpec(tempDir, badSpec)).rejects.toThrow(SidecarSpecError);

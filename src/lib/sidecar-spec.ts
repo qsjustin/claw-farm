@@ -36,6 +36,10 @@ export interface SidecarSpec {
   port: number;
   /** External network name (optional, Docker-safe) */
   externalNetwork?: string;
+  /** #179: Farm-authoritative alias bound to this SRI + generation. */
+  networkAlias?: string;
+  /** #179: Attachment generation that owns networkAlias. */
+  aliasGeneration?: number;
   /** Compose project name (Docker-safe) */
   composeProject: string;
   /**
@@ -150,6 +154,26 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
     }
   }
 
+  // networkAlias must be Docker DNS/YAML-safe if present
+  if (obj.networkAlias !== undefined) {
+    if (typeof obj.networkAlias !== "string" || !/^[a-z0-9][a-z0-9_-]{0,62}$/.test(obj.networkAlias)) {
+      throw new SidecarSpecError(
+        `sidecar spec 'networkAlias' must be Docker-safe if present, got ${JSON.stringify(obj.networkAlias)}`,
+        "spec-invalid",
+      );
+    }
+  }
+
+  // aliasGeneration is required to be a positive safe integer when present
+  if (obj.aliasGeneration !== undefined) {
+    if (typeof obj.aliasGeneration !== "number" || !Number.isSafeInteger(obj.aliasGeneration) || obj.aliasGeneration < 1) {
+      throw new SidecarSpecError(
+        `sidecar spec 'aliasGeneration' must be a positive safe integer if present, got ${JSON.stringify(obj.aliasGeneration)}`,
+        "spec-invalid",
+      );
+    }
+  }
+
   // updatedAt must be valid ISO 8601
   if (typeof obj.updatedAt !== "string" || isNaN(Date.parse(obj.updatedAt))) {
     throw new SidecarSpecError(
@@ -199,7 +223,7 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
   }
 
   // Reject unknown fields
-  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "composeProject", "managedInstanceId", "bindingId", "operationId", "targetAttachmentVersion", "targetConfigVersion", "desiredAttachmentState", "updatedAt"]);
+  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "networkAlias", "aliasGeneration", "composeProject", "managedInstanceId", "bindingId", "operationId", "targetAttachmentVersion", "targetConfigVersion", "desiredAttachmentState", "updatedAt"]);
   for (const key of Object.keys(obj)) {
     if (!allowed.has(key)) {
       throw new SidecarSpecError(

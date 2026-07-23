@@ -202,7 +202,7 @@ function runtimeAttachNetworks(): string[] {
  * Source: CLAW_FARM_RUNTIME_ATTACH_NETWORKS (first entry).
  * Throws if the network name is missing or contains unsafe characters.
  */
-function resolveExternalNetwork(): string {
+export function resolveExternalNetwork(): string {
   const networks = runtimeAttachNetworks();
   if (networks.length === 0) {
  throw new Error(
@@ -509,6 +509,8 @@ export async function writeInstanceCompose(options: {
   weixinEnvFile?: string;
   /** #159B: External Docker network for sidecar↔API/gateway DNS */
   externalNetwork?: string;
+  /** #179: Farm-authoritative DNS alias on the external network. */
+  networkAlias?: string;
 }): Promise<string> {
   const instanceHostDir = resolveDockerHostInstanceDir(options.instDir);
   const enableWeixin = options.enableWeixinSidecar ?? false;
@@ -526,6 +528,7 @@ export async function writeInstanceCompose(options: {
       weixinSidecarPort: options.weixinSidecarPort,
       weixinEnvFile: options.weixinEnvFile,
       externalNetwork: options.externalNetwork,
+      networkAlias: options.networkAlias,
     });
   } else if (options.runtimeType === "openclaw") {
     composeContent = instanceComposeTemplate(
@@ -549,6 +552,7 @@ export async function writeInstanceCompose(options: {
         weixinEnvFile: options.weixinEnvFile ?? ".env.weixin",
         weixinSidecarPort: options.weixinSidecarPort ?? 8787,
         externalNetwork: options.externalNetwork,
+        networkAlias: options.networkAlias,
       },
     );
   } else {
@@ -1148,6 +1152,7 @@ export async function upInstance(
     weixinSidecarPort: effectiveWeixinSidecarPort,
     weixinEnvFile: effectiveWeixinEnvFile,
     externalNetwork,
+    networkAlias: sidecarSpec?.networkAlias,
   });
 
   // #159B/#171: Rotate weixin sidecar token on rebuild/restore (fail-closed).

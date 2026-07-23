@@ -18,6 +18,7 @@ let projectDir: string;
 let instDir: string;
 let registryDir: string;
 let origRegistryDir: string | undefined;
+let origAttachNetworks: string | undefined;
 const projectName = "clawbay-test";
 const userId = "test-user";
 
@@ -53,6 +54,8 @@ beforeEach(async () => {
   // Set registry dir for dispatch calls
   origRegistryDir = process.env.CLAW_FARM_REGISTRY_DIR;
   process.env.CLAW_FARM_REGISTRY_DIR = registryDir;
+  origAttachNetworks = process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS;
+  process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS = "clawbay-test-network";
 
   // Create project and instance dirs
   await mkdir(join(instDir, "hermes", "workspace"), { recursive: true });
@@ -99,6 +102,11 @@ afterEach(() => {
     delete process.env.CLAW_FARM_REGISTRY_DIR;
   } else {
     process.env.CLAW_FARM_REGISTRY_DIR = origRegistryDir;
+  }
+  if (origAttachNetworks === undefined) {
+    delete process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS;
+  } else {
+    process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS = origAttachNetworks;
   }
 });
 
@@ -179,6 +187,59 @@ describe("sidecar.attach dispatch", () => {
     expect(spec.operationId).toBe("op-1");
     expect(spec.bindingId).toBe("binding-1");
     expect(spec.targetAttachmentVersion).toBe(1);
+    expect(spec.aliasGeneration).toBe(1);
+    expect(spec.networkAlias).toMatch(/^clawbay-sidecar-[0-9a-f]{12}$/);
+    expect(spec.externalNetwork).toBe("clawbay-test-network");
+
+    const compose = await readFile(join(instDir, "docker-compose.openclaw.yml"), "utf8");
+    expect(compose).toContain(`clawbay-test-network:\n        aliases:\n          - ${spec.networkAlias}`);
+
+    const aliasRegistry = JSON.parse(await readFile(join(registryDir, "alias-registry.json"), "utf8")) as {
+      entries: Record<string, { state: string; networkAlias: string }>;
+    };
+    expect(aliasRegistry.entries["sri-1:1"]).toMatchObject({
+      state: "active",
+      networkAlias: spec.networkAlias,
+    });
+  });
+
+  it("releases the attached generation into durable quarantine on detach", async () => {
+    const attached = await dispatch("sidecar.attach", basePayload());
+    expect(attached.ok).toBe(true);
+    const attachedSpec = JSON.parse(await readFile(join(instDir, "sidecar-spec.json"), "utf8")) as SidecarSpec;
+
+    Bun.spawn = ((args: string[]) => {
+      if (args.join(" ").includes("docker inspect")) {
+        return {
+          exited: Promise.resolve(1),
+          stdout: new Blob([""]).stream(),
+          stderr: new Blob(["No such container"]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([""]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as typeof Bun.spawn;
+
+    const detached = await dispatch("sidecar.detach", basePayload({
+      operationId: "op-2",
+      expectedAttachmentVersion: 1,
+      expectedConfigVersion: 1,
+    }));
+    expect(detached.ok).toBe(true);
+    if (detached.ok) {
+      expect(detached.metadata?.aliasReleased).toBe(true);
+      expect(detached.metadata?.appliedTargetVersion).toBe(2);
+    }
+    const aliasRegistry = JSON.parse(await readFile(join(registryDir, "alias-registry.json"), "utf8")) as {
+      entries: Record<string, { state: string; networkAlias: string }>;
+    };
+    expect(aliasRegistry.entries["sri-1:1"]).toMatchObject({
+      state: "released",
+      networkAlias: attachedSpec.networkAlias,
+    });
   });
 
   it("returns idempotent success when same operation already applied", async () => {
@@ -314,6 +375,10 @@ describe("sidecar.attach dispatch", () => {
       specExists = true;
     } catch { /* file doesn't exist */ }
     expect(specExists).toBe(false);
+    const aliasRegistry = JSON.parse(await readFile(join(registryDir, "alias-registry.json"), "utf8")) as {
+      entries: Record<string, { state: string }>;
+    };
+    expect(aliasRegistry.entries["sri-1:1"]?.state).toBe("deleted");
   });
 });
 
