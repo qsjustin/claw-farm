@@ -5,6 +5,13 @@ import { runComposeService } from "../lib/compose.ts";
 import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, migrateSidecarSpec, SidecarSpecError, type SidecarSpec } from "../lib/sidecar-spec.ts";
 import { resolveSidecarAttachPoint, ensureSidecarAttachPoint } from "../lib/sidecar-attach.ts";
 import { executeWorkloadTransaction, checkContainerHealth } from "../lib/workload-tx.ts";
+import {
+  loadOrGenerateFarmKeys,
+  signIdentityAssertion,
+  AliasRegistry,
+  deriveNetworkAlias,
+  type FarmKeyPair,
+} from "../lib/identity-assertion.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { exportCommand } from "./export.ts";
 import { importCommand } from "./import.ts";
@@ -32,6 +39,36 @@ import {
   type RuntimeInstanceStatus,
 } from "../lib/runtime-instance-registry.ts";
 import type { RuntimeType } from "../runtimes/interface.ts";
+
+// #179: Farm IdentityAssertion signing — lazy-loaded singleton
+let _farmKeyPair: FarmKeyPair | null = null;
+const _aliasRegistry = new AliasRegistry();
+
+function getFarmKeyPair(): FarmKeyPair {
+  if (!_farmKeyPair) {
+    const keyDir = process.env.FARM_KEY_DIR ?? join(process.env.HOME ?? "/tmp", ".claw-farm", "keys");
+    _farmKeyPair = loadOrGenerateFarmKeys(keyDir);
+  }
+  return _farmKeyPair;
+}
+
+async function getContainerId(composeProject: string, serviceName: string): Promise<string | null> {
+  const containerName = `${composeProject}-${serviceName}-1`;
+  try {
+    const proc = Bun.spawn(
+      ["docker", "inspect", "--format", "{{.Id}}", containerName],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await proc.exited;
+    if (exitCode === 0) {
+      const stdout = await new Response(proc.stdout).text();
+      return stdout.trim().slice(0, 12); // short container ID
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 const INSTANCE_OPERATIONS = new Set([
   "instance.create",
@@ -1026,6 +1063,8 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
         attachPointPath: attachPoint.configDir,
         healthCheck: "idempotent",
         idempotent: true,
+        // #179: IdentityAssertion NOT re-sent on idempotent path;
+        // Bay already persisted it from the first attach.
       },
       project: context.resolved.name, userId,
     });
@@ -1262,6 +1301,24 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
+  // #179: Sign IdentityAssertion and reserve alias
+  const generation = eatv! + 1;
+  const sri = managedInstanceId;
+  const networkAlias = _aliasRegistry.reserve(sri, generation);
+  const containerId = await getContainerId(composeProject, "weixin-sidecar");
+  const keyPair = getFarmKeyPair();
+  const assertionResult = signIdentityAssertion({
+    sri,
+    sidecarCode: "weixin-auth-sidecar",
+    composeProject,
+    networkAlias,
+    port: 8787,
+    containerId,
+    generation,
+    validitySeconds: 3600, // 1 hour
+    keyPair,
+  });
+
   return bridgeSuccess({
     action: "sidecar.attach",
     message: `Attached sidecar for "${userId}"`,
@@ -1272,11 +1329,26 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       operationId,
       expectedAttachmentVersion,
       expectedConfigVersion,
-      appliedTargetVersion: eatv! + 1,
+      appliedTargetVersion: generation,
       // #171B Round 35: attach does not change config; echo expected unchanged
       appliedConfigVersion: expectedConfigVersion,
       attachPointPath: attachPoint.configDir,
       healthCheck: "passed",
+      // #179: IdentityAssertion for Bay to persist and use for per-instance calls
+      appliedSidecarEndpoint: {
+        sri: assertionResult.assertion.sri,
+        sidecarCode: assertionResult.assertion.sidecarCode,
+        composeProject: assertionResult.assertion.composeProject,
+        networkAlias: assertionResult.assertion.networkAlias,
+        port: assertionResult.assertion.port,
+        containerId: assertionResult.assertion.containerId,
+        generation: assertionResult.assertion.generation,
+        issuedAt: assertionResult.assertion.issuedAt,
+        expiresAt: assertionResult.assertion.expiresAt,
+        keyId: assertionResult.assertion.keyId,
+        farmSignature: assertionResult.assertion.farmSignature,
+        bindingSecret: assertionResult.assertion.bindingSecret,
+      },
     },
     project: context.resolved.name, userId,
   });
@@ -1586,6 +1658,11 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
+  // #179: Release alias (Phase 1 of 2-phase release)
+  const generation = detv! + 1;
+  const sri = managedInstanceId;
+  _aliasRegistry.release(sri, generation);
+
   return bridgeSuccess({
     action: "sidecar.detach",
     message: txResult.error ? `Detached sidecar for "${userId}" (revoke degraded: ${txResult.error})` : `Detached sidecar for "${userId}"`,
@@ -1596,10 +1673,12 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       operationId,
       expectedAttachmentVersion,
       expectedConfigVersion,
-      appliedTargetVersion: detv! + 1,
+      appliedTargetVersion: generation,
       // #171B Round 35: detach does not change config; echo expected unchanged
       appliedConfigVersion: expectedConfigVersion,
       criticalCompensationCodes: txResult.criticalCompensationCodes,
+      // #179: Alias released (Phase 1 quarantine)
+      aliasReleased: true,
     },
     project: context.resolved.name, userId,
   });
