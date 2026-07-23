@@ -205,6 +205,10 @@ export function buildPublicKeyMapJson(keys: FarmKeyPair[]): string {
   return `${JSON.stringify(map, null, 2)}\n`;
 }
 
+export function generateBindingSecret(): string {
+  return randomBytes(32).toString("hex");
+}
+
 export function signIdentityAssertion(input: {
   sri: string;
   sidecarCode: string;
@@ -215,6 +219,7 @@ export function signIdentityAssertion(input: {
   generation: number;
   validitySeconds: number;
   keyPair: FarmKeyPair;
+  bindingSecret?: string;
   now?: Date;
 }): SignedAssertionResult {
   if (!input.containerId) throw new Error("containerId is required for IdentityAssertion signing");
@@ -230,6 +235,10 @@ export function signIdentityAssertion(input: {
 
   const issuedAt = input.now ?? new Date();
   const expiresAt = new Date(issuedAt.getTime() + input.validitySeconds * 1000);
+  const bindingSecret = input.bindingSecret ?? generateBindingSecret();
+  if (!/^[0-9a-f]{64}$/i.test(bindingSecret)) {
+    throw new Error("IdentityAssertion bindingSecret must be 64 hex characters");
+  }
   const unsigned: Omit<IdentityAssertionFields, "farmSignature"> = {
     sri: input.sri,
     sidecarCode: input.sidecarCode,
@@ -241,7 +250,7 @@ export function signIdentityAssertion(input: {
     issuedAt: issuedAt.toISOString(),
     expiresAt: expiresAt.toISOString(),
     keyId: input.keyPair.keyId,
-    bindingSecret: randomBytes(32).toString("hex"),
+    bindingSecret,
   };
   const record: IdentityAssertionFields = { ...unsigned, farmSignature: "" };
   const canonical = serializeIdentityAssertionCanonical(record);

@@ -151,15 +151,18 @@ describe("sidecar.attach dispatch", () => {
     }) as typeof Bun.spawn;
 
     // Mock globalThis.fetch for provision/revoke API
-    globalThis.fetch = ((url: string | URL | Request, _init?: RequestInit) => {
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) => {
       const urlStr = typeof url === "string" ? url : url.toString();
       if (urlStr.includes("weixin-binding-provision")) {
-        return Promise.resolve(new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
+        if (!urlStr.endsWith("/revoke")) {
+          await writeFile(join(instDir, ".env.weixin"), "WEIXIN_BINDING_TOKEN=test-binding-token\n", { mode: 0o600 });
+        }
+        return new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
           status: 200,
           headers: { "content-type": "application/json" },
-        })) as Promise<Response>;
+        });
       }
-      return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
+      return new Response("OK", { status: 200 });
     }) as unknown as typeof fetch;
   });
 
@@ -201,6 +204,16 @@ describe("sidecar.attach dispatch", () => {
       state: "active",
       networkAlias: spec.networkAlias,
     });
+
+    const credentialEnv = await readFile(join(instDir, ".env.weixin"), "utf8");
+    expect(credentialEnv).toContain("WEIXIN_REQUIRE_BAY_CREDENTIAL=true");
+    expect(credentialEnv).toContain("WEIXIN_IDENTITY_GENERATION=1");
+    const secret = credentialEnv.match(/^WEIXIN_BAY_CREDENTIAL_SECRET=([0-9a-f]{64})$/m)?.[1];
+    expect(secret).toMatch(/^[0-9a-f]{64}$/);
+    if (result.ok) {
+      const endpoint = result.metadata?.appliedSidecarEndpoint as { bindingSecret?: string } | undefined;
+      expect(endpoint?.bindingSecret).toBe(secret);
+    }
   });
 
   it("releases the attached generation into durable quarantine on detach", async () => {
@@ -240,6 +253,9 @@ describe("sidecar.attach dispatch", () => {
       state: "released",
       networkAlias: attachedSpec.networkAlias,
     });
+    const detachedEnv = await readFile(join(instDir, ".env.weixin"), "utf8");
+    expect(detachedEnv).not.toContain("WEIXIN_BAY_CREDENTIAL_SECRET");
+    expect(detachedEnv).not.toContain("WEIXIN_IDENTITY_GENERATION");
   });
 
   it("returns idempotent success when same operation already applied", async () => {
@@ -403,15 +419,18 @@ describe("sidecar.detach dispatch", () => {
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
-    globalThis.fetch = ((url: string | URL | Request) => {
+    globalThis.fetch = (async (url: string | URL | Request) => {
       const urlStr = typeof url === "string" ? url : url.toString();
       if (urlStr.includes("weixin-binding-provision")) {
-        return Promise.resolve(new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
+        if (!urlStr.endsWith("/revoke")) {
+          await writeFile(join(instDir, ".env.weixin"), "WEIXIN_BINDING_TOKEN=test-binding-token\n", { mode: 0o600 });
+        }
+        return new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
           status: 200,
           headers: { "content-type": "application/json" },
-        })) as Promise<Response>;
+        });
       }
-      return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
+      return new Response("OK", { status: 200 });
     }) as unknown as typeof fetch;
   });
 
@@ -504,15 +523,18 @@ describe("sidecar.attach v1 migration", () => {
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
-    globalThis.fetch = ((url: string | URL | Request) => {
+    globalThis.fetch = (async (url: string | URL | Request) => {
       const urlStr = typeof url === "string" ? url : url.toString();
       if (urlStr.includes("weixin-binding-provision")) {
-        return Promise.resolve(new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
+        if (!urlStr.endsWith("/revoke")) {
+          await writeFile(join(instDir, ".env.weixin"), "WEIXIN_BINDING_TOKEN=test-binding-token\n", { mode: 0o600 });
+        }
+        return new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
           status: 200,
           headers: { "content-type": "application/json" },
-        })) as Promise<Response>;
+        });
       }
-      return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
+      return new Response("OK", { status: 200 });
     }) as unknown as typeof fetch;
   });
 
@@ -571,15 +593,18 @@ describe("sidecar.detach v1 migration", () => {
         stderr: new Blob([""]).stream(),
       } as unknown as ReturnType<typeof Bun.spawn>;
     }) as typeof Bun.spawn;
-    globalThis.fetch = ((url: string | URL | Request) => {
+    globalThis.fetch = (async (url: string | URL | Request) => {
       const urlStr = typeof url === "string" ? url : url.toString();
       if (urlStr.includes("weixin-binding-provision")) {
-        return Promise.resolve(new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
+        if (!urlStr.endsWith("/revoke")) {
+          await writeFile(join(instDir, ".env.weixin"), "WEIXIN_BINDING_TOKEN=test-binding-token\n", { mode: 0o600 });
+        }
+        return new Response(JSON.stringify({ ok: true, tokenLast4: "1234" }), {
           status: 200,
           headers: { "content-type": "application/json" },
-        })) as Promise<Response>;
+        });
       }
-      return Promise.resolve(new Response("OK", { status: 200 })) as Promise<Response>;
+      return new Response("OK", { status: 200 });
     }) as unknown as typeof fetch;
   });
 

@@ -124,7 +124,7 @@ async function isServiceRunning(composeProject: string): Promise<boolean> {
   }
   // Non-zero exit: only allow Docker's exact "No such object" or "No such container" as absent;
   // Other errors (daemon, permission, I/O) → fail-closed
-  if (stderr.includes("No such object") || stderr.includes("No such container")) {
+  if (/no such (?:object|container)/i.test(stderr)) {
     return false; // container genuinely doesn't exist
   }
   throw new Error(`docker inspect failed: exit ${exitCode}: ${stderr.trim() || stdout.trim()}`);

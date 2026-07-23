@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { mkdir, rm, readFile, writeFile, unlink } from "node:fs/promises";
+import { mkdir, rm, readFile, writeFile, unlink, chmod } from "node:fs/promises";
 import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose, resolveInstance, resolveExternalNetwork } from "../lib/api.ts";
 import { runComposeService } from "../lib/compose.ts";
 import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, migrateSidecarSpec, SidecarSpecError, type SidecarSpec } from "../lib/sidecar-spec.ts";
@@ -8,6 +8,7 @@ import { executeWorkloadTransaction, checkContainerHealth } from "../lib/workloa
 import {
   loadOrGenerateFarmKeys,
   signIdentityAssertion,
+  generateBindingSecret,
   type FarmKeyPair,
 } from "../lib/identity-assertion.ts";
 import {
@@ -52,6 +53,33 @@ function getAliasRegistry(): AliasRegistry {
   return _aliasRegistry;
 }
 
+const BAY_CREDENTIAL_ENV_KEYS = new Set([
+  "WEIXIN_REQUIRE_BAY_CREDENTIAL",
+  "WEIXIN_BAY_CREDENTIAL_SECRET",
+  "WEIXIN_IDENTITY_GENERATION",
+  "WEIXIN_BAY_CREDENTIAL_MAX_SKEW_MS",
+]);
+
+function updateBayCredentialEnv(
+  content: string,
+  values: Record<string, string> | null,
+): string {
+  const lines = content.split(/\r?\n/).filter((line) => {
+    const key = line.split("=", 1)[0]?.trim();
+    return !BAY_CREDENTIAL_ENV_KEYS.has(key);
+  });
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  if (values) {
+    for (const key of BAY_CREDENTIAL_ENV_KEYS) lines.push(`${key}=${values[key]}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+async function writeBayCredentialEnv(path: string, content: string): Promise<void> {
+  await writeFile(path, content, { encoding: "utf8", mode: 0o600 });
+  await chmod(path, 0o600);
+}
+
 function getFarmKeyPair(): FarmKeyPair {
   if (!_farmKeyPair) {
     const keyDir = process.env.FARM_KEY_DIR ?? join(process.env.HOME ?? "/tmp", ".claw-farm", "keys");
@@ -61,16 +89,22 @@ function getFarmKeyPair(): FarmKeyPair {
 }
 
 async function getContainerId(composeProject: string, serviceName: string): Promise<string | null> {
-  const containerName = `${composeProject}-${serviceName}-1`;
+  const candidates = [
+    `${composeProject}-${serviceName}-1`,
+    serviceName === "weixin-sidecar" ? `${composeProject}-weixin` : "",
+  ].filter(Boolean);
   try {
-    const proc = Bun.spawn(
-      ["docker", "inspect", "--format", "{{.Id}}", containerName],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    const exitCode = await proc.exited;
-    if (exitCode === 0) {
-      const stdout = await new Response(proc.stdout).text();
-      return stdout.trim().slice(0, 12); // short container ID
+    for (const containerName of candidates) {
+      const proc = Bun.spawn(
+        ["docker", "inspect", "--format", "{{.Id}}", containerName],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      const exitCode = await proc.exited;
+      if (exitCode === 0) {
+        const stdout = await new Response(proc.stdout).text();
+        const id = stdout.trim();
+        if (id) return id.slice(0, 12);
+      }
     }
     return null;
   } catch {
@@ -1130,6 +1164,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   const assertionNow = new Date();
   const validitySeconds = 3600;
   const assertionExpiresAt = new Date(assertionNow.getTime() + validitySeconds * 1000).toISOString();
+  const bindingSecret = generateBindingSecret();
 
   let aliasReservation: AliasReservation;
   try {
@@ -1255,6 +1290,16 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
         }
         provisionSucceeded = true;
 
+        // Controlled Farm→sidecar handoff for the per-request HMAC verifier.
+        // Values remain in the owner-only env file and are never logged/returned.
+        const provisionedEnv = await readFile(envFile, "utf8");
+        await writeBayCredentialEnv(envFile, updateBayCredentialEnv(provisionedEnv, {
+          WEIXIN_REQUIRE_BAY_CREDENTIAL: "true",
+          WEIXIN_BAY_CREDENTIAL_SECRET: bindingSecret,
+          WEIXIN_IDENTITY_GENERATION: String(generation),
+          WEIXIN_BAY_CREDENTIAL_MAX_SKEW_MS: "60000",
+        }));
+
         // Side effect 2: Write compose with sidecar enabled
         await writeInstanceCompose({
           projectName: context.resolved.name,
@@ -1267,6 +1312,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
           enableWeixinSidecar: true,
           externalNetwork,
           networkAlias,
+          weixinSidecarImage: process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE?.trim() || undefined,
         });
 
         // Side effect 3: Compose up sidecar
@@ -1277,10 +1323,12 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
 
         // Side effect 4: Health check
         let healthOk = false;
-        for (let attempt = 0; attempt < 3; attempt++) {
+        const healthAttempts = process.env.NODE_ENV === "test" ? 3 : 30;
+        const healthIntervalMs = process.env.NODE_ENV === "test" ? 500 : 1_000;
+        for (let attempt = 0; attempt < healthAttempts; attempt++) {
           healthOk = await checkContainerHealth(composeProject);
           if (healthOk) break;
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, healthIntervalMs));
         }
         if (!healthOk) {
           throw new Error("Sidecar health check failed after compose up");
@@ -1384,6 +1432,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     generation,
     validitySeconds,
     keyPair,
+    bindingSecret,
     now: assertionNow,
   });
   if (!await getAliasRegistry().activate(aliasReservation)) {
@@ -1677,7 +1726,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
           throw new Error(`Sidecar container ${containerName} still exists after rm`);
         }
         // Non-zero: only accept Docker's exact No such object/container as "gone"
-        if (!stderr.includes("No such object") && !stderr.includes("No such container")) {
+        if (!/no such (?:object|container)/i.test(stderr)) {
           throw new Error(`Docker inspect failed after rm: ${stderr.trim()}`);
         }
         // Container genuinely gone — continue
@@ -1724,6 +1773,14 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         if (!resp.ok) {
           const errorBody = await resp.json().catch(() => ({})) as { error?: { message?: string } };
           throw new Error(`Revoke failed: HTTP ${resp.status} ${errorBody.error?.message ?? ""}`);
+        }
+
+        const envFile = join(instDir, ".env.weixin");
+        try {
+          const currentEnv = await readFile(envFile, "utf8");
+          await writeBayCredentialEnv(envFile, updateBayCredentialEnv(currentEnv, null));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
       } catch (err) {
         // Attach revoke-failed as critical compensation code

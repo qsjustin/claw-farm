@@ -109,10 +109,10 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(compose).not.toContain("host.docker.internal");
     });
 
-    it("has a healthcheck on /healthz for readiness verification", () => {
+    it("has a liveness healthcheck on /livez", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
       expect(compose).toContain("healthcheck:");
-      expect(compose).toContain("http://127.0.0.1:8787/healthz");
+      expect(compose).toContain("http://127.0.0.1:8787/livez");
     });
 
     it("mounts the instance workspace runtime sidecar data dir", () => {
@@ -212,7 +212,7 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       });
       const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
       expect(weixinSection).toContain("WEIXIN_SIDECAR_PORT: \"8787\"");
-      expect(weixinSection).toContain("http://127.0.0.1:8787/healthz");
+      expect(weixinSection).toContain("http://127.0.0.1:8787/livez");
       // Uses expose, not ports (no host publishing)
       expect(weixinSection).not.toContain("0.0.0.0:");
     });

@@ -74,9 +74,13 @@ export function hermesInstanceComposeTemplate(
   weixinSidecarPort = 8787,
   externalNetwork?: string,
   networkAlias?: string,
+  weixinSidecarImage = "clawbay-bay-sidecar-weixin:latest",
 ): string {
   safeYamlIdentifier(projectName, "project name");
   safeYamlIdentifier(userId, "user ID");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,255}$/.test(weixinSidecarImage)) {
+    throw new Error("Unsafe weixin sidecar image reference");
+  }
   if (networkAlias) {
     safeYamlIdentifier(networkAlias, "sidecar network alias");
     if (!externalNetwork) throw new Error("sidecar networkAlias requires externalNetwork");
@@ -91,7 +95,7 @@ export function hermesInstanceComposeTemplate(
 
   const weixinSidecarService = enableWeixinSidecar ? `  weixin-sidecar:
     container_name: ${containerPrefix}-weixin
-    image: clawbay-bay-sidecar-weixin:latest
+    image: ${weixinSidecarImage}
     user: "1000:1000"
     env_file:
       - ./${weixinEnvFile}
@@ -124,7 +128,7 @@ ${weixinNetworks}
           memory: 256M
           cpus: "0.5"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/livez').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 10

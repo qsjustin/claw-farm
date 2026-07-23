@@ -511,6 +511,8 @@ export async function writeInstanceCompose(options: {
   externalNetwork?: string;
   /** #179: Farm-authoritative DNS alias on the external network. */
   networkAlias?: string;
+  /** Optional sidecar image override for isolated deployment/E2E. */
+  weixinSidecarImage?: string;
 }): Promise<string> {
   const instanceHostDir = resolveDockerHostInstanceDir(options.instDir);
   const enableWeixin = options.enableWeixinSidecar ?? false;
@@ -529,6 +531,7 @@ export async function writeInstanceCompose(options: {
       weixinEnvFile: options.weixinEnvFile,
       externalNetwork: options.externalNetwork,
       networkAlias: options.networkAlias,
+      weixinSidecarImage: options.weixinSidecarImage,
     });
   } else if (options.runtimeType === "openclaw") {
     composeContent = instanceComposeTemplate(
@@ -553,6 +556,7 @@ export async function writeInstanceCompose(options: {
         weixinSidecarPort: options.weixinSidecarPort ?? 8787,
         externalNetwork: options.externalNetwork,
         networkAlias: options.networkAlias,
+        weixinSidecarImage: options.weixinSidecarImage,
       },
     );
   } else {
@@ -1153,6 +1157,7 @@ export async function upInstance(
     weixinEnvFile: effectiveWeixinEnvFile,
     externalNetwork,
     networkAlias: sidecarSpec?.networkAlias,
+    weixinSidecarImage: process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE?.trim() || undefined,
   });
 
   // #159B/#171: Rotate weixin sidecar token on rebuild/restore (fail-closed).
