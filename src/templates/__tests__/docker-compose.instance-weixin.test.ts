@@ -309,6 +309,27 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(weixinSection).toContain("- clawbay_default");
     });
 
+    it("binds the farm-authoritative alias only on the external network", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        enableWeixinSidecar: true,
+        externalNetwork: "clawbay_default",
+        networkAlias: "clawbay-sidecar-deadbeef0000",
+      });
+      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"), compose.indexOf("openclaw-gateway:"));
+      expect(weixinSection).toContain("sidecar-net:");
+      expect(weixinSection).toContain("clawbay_default:\n        aliases:\n          - clawbay-sidecar-deadbeef0000");
+      expect(compose).toContain("clawbay_default:\n    external: true");
+    });
+
+    it("rejects a network alias without an external network", () => {
+      expect(() => buildInstanceCompose({
+        ...baseOpts,
+        enableWeixinSidecar: true,
+        networkAlias: "clawbay-sidecar-deadbeef0000",
+      })).toThrow("requires externalNetwork");
+    });
+
     it("does not declare external network when not provided", () => {
       const compose = buildInstanceCompose({
         ...baseOpts,

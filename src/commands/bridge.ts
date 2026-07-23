@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { mkdir, rm, readFile, writeFile, unlink } from "node:fs/promises";
-import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose, resolveInstance } from "../lib/api.ts";
+import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose, resolveInstance, resolveExternalNetwork } from "../lib/api.ts";
 import { runComposeService } from "../lib/compose.ts";
 import { readSidecarSpec, writeSidecarSpec, removeSidecarSpec, migrateSidecarSpec, SidecarSpecError, type SidecarSpec } from "../lib/sidecar-spec.ts";
 import { resolveSidecarAttachPoint, ensureSidecarAttachPoint } from "../lib/sidecar-attach.ts";
@@ -8,10 +8,13 @@ import { executeWorkloadTransaction, checkContainerHealth } from "../lib/workloa
 import {
   loadOrGenerateFarmKeys,
   signIdentityAssertion,
-  AliasRegistry,
-  deriveNetworkAlias,
   type FarmKeyPair,
 } from "../lib/identity-assertion.ts";
+import {
+  AliasRegistry,
+  isAliasBoundOnDockerNetwork,
+  type AliasReservation,
+} from "../lib/alias-registry.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { exportCommand } from "./export.ts";
 import { importCommand } from "./import.ts";
@@ -42,7 +45,12 @@ import type { RuntimeType } from "../runtimes/interface.ts";
 
 // #179: Farm IdentityAssertion signing — lazy-loaded singleton
 let _farmKeyPair: FarmKeyPair | null = null;
-const _aliasRegistry = new AliasRegistry();
+let _aliasRegistry: AliasRegistry | null = null;
+
+function getAliasRegistry(): AliasRegistry {
+  if (!_aliasRegistry) _aliasRegistry = new AliasRegistry();
+  return _aliasRegistry;
+}
 
 function getFarmKeyPair(): FarmKeyPair {
   if (!_farmKeyPair) {
@@ -80,6 +88,9 @@ const INSTANCE_OPERATIONS = new Set([
   "instance.export",
   "instance.import",
   "instance.applyModelControl",
+  "sidecar.attach",
+  "sidecar.detach",
+  "sidecar.alias.reconcile",
   "agent.create",
   "agent.updateConfig",
   "runtime.registry.list",
@@ -1107,6 +1118,47 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   const composeProject = `${context.resolved.name}-${userId}`;
   const instance = await getInstance(context.resolved.name, userId);
   const serviceName = "weixin-sidecar";
+  const generation = eatv! + 1;
+  const sri = managedInstanceId;
+  const externalNetwork = spec?.externalNetwork ?? resolveExternalNetwork();
+  const assertionNow = new Date();
+  const validitySeconds = 3600;
+  const assertionExpiresAt = new Date(assertionNow.getTime() + validitySeconds * 1000).toISOString();
+
+  let aliasReservation: AliasReservation;
+  try {
+    aliasReservation = await getAliasRegistry().reserve({
+      sri,
+      generation,
+      externalNetwork,
+      assertionExpiresAt,
+    });
+  } catch (error) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Alias reservation failed: ${error instanceof Error ? error.message : String(error)}`,
+      errorCode: "runtime-conflict",
+      retryable: false,
+      project: context.resolved.name,
+      userId,
+    });
+  }
+  const networkAlias = aliasReservation.networkAlias;
+
+  let keyPair: FarmKeyPair;
+  try {
+    keyPair = getFarmKeyPair();
+  } catch (error) {
+    await getAliasRegistry().cancelReservation(aliasReservation).catch(() => false);
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: `Farm signing key unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      errorCode: "runtime-command-failed",
+      retryable: false,
+      project: context.resolved.name,
+      userId,
+    });
+  }
 
   const txResult = await executeWorkloadTransaction(
     instDir,
@@ -1119,11 +1171,14 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
         serviceName: "weixin-sidecar",
         envFile: ".env.weixin",
         port: 8787,
+        externalNetwork,
+        networkAlias,
+        aliasGeneration: generation,
         composeProject,
         managedInstanceId: asString(payload.managedInstanceId) ?? "",
         bindingId,
         operationId,
-        targetAttachmentVersion: eatv! + 1,
+        targetAttachmentVersion: generation,
         targetConfigVersion: ecgv!,
         desiredAttachmentState: "attached",
         updatedAt: new Date().toISOString(),
@@ -1204,6 +1259,8 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
           runtime: context.runtime,
           proxyMode: context.proxyMode,
           enableWeixinSidecar: true,
+          externalNetwork,
+          networkAlias,
         });
 
         // Side effect 3: Compose up sidecar
@@ -1279,6 +1336,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   );
 
   if (!txResult.committed) {
+    const reservationCancelled = await getAliasRegistry().cancelReservation(aliasReservation).catch(() => false);
     return bridgeFailure({
       action: "sidecar.attach",
       message: txResult.error ?? "Transaction failed",
@@ -1287,18 +1345,18 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       metadata: {
         rollbackErrorCodes: txResult.rollbackErrorCodes.length > 0 ? txResult.rollbackErrorCodes : undefined,
         didRollback: txResult.didRollback,
-        criticalCompensationCodes: txResult.criticalCompensationCodes,
+        criticalCompensationCodes: [
+          ...(txResult.criticalCompensationCodes ?? []),
+          ...(!reservationCancelled && aliasReservation.created ? ["alias-reservation-cancel-failed"] : []),
+        ],
       },
       project: context.resolved.name, userId,
     });
   }
 
-  // #179: Sign IdentityAssertion and reserve alias
-  const generation = eatv! + 1;
-  const sri = managedInstanceId;
-  const networkAlias = _aliasRegistry.reserve(sri, generation);
+  // Sign only after the aliased sidecar is healthy. Activation is an owner-safe
+  // CAS: stale workers cannot publish an assertion for a reassigned alias.
   const containerId = await getContainerId(composeProject, "weixin-sidecar");
-  const keyPair = getFarmKeyPair();
   const assertionResult = signIdentityAssertion({
     sri,
     sidecarCode: "weixin-auth-sidecar",
@@ -1307,9 +1365,21 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     port: 8787,
     containerId,
     generation,
-    validitySeconds: 3600, // 1 hour
+    validitySeconds,
     keyPair,
+    now: assertionNow,
   });
+  if (!await getAliasRegistry().activate(aliasReservation)) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: "Alias reservation ownership changed before activation; endpoint not issued",
+      errorCode: "runtime-conflict",
+      retryable: false,
+      metadata: { criticalCompensationCodes: ["alias-activation-cas-failed"] },
+      project: context.resolved.name,
+      userId,
+    });
+  }
 
   return bridgeSuccess({
     action: "sidecar.attach",
@@ -1443,6 +1513,13 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     spec.targetAttachmentVersion === detv! + 1 &&
     spec.targetConfigVersion === decv!
   ) {
+    const aliasReleased = spec.aliasGeneration
+      ? await getAliasRegistry().release({
+          sri: managedInstanceId,
+          generation: spec.aliasGeneration,
+          networkAlias: spec.networkAlias,
+        }).catch(() => false)
+      : false;
     return bridgeSuccess({
       action: "sidecar.detach",
       message: `Sidecar already detached by operation ${operationId}`,
@@ -1455,6 +1532,8 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         expectedConfigVersion: spec.targetConfigVersion,
         appliedTargetVersion: spec.targetAttachmentVersion,
         appliedConfigVersion: spec.targetConfigVersion,
+        aliasReleased,
+        criticalCompensationCodes: aliasReleased ? [] : ["alias-release-failed"],
         idempotent: true,
       },
       project: context.resolved.name, userId,
@@ -1516,6 +1595,9 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         serviceName: "weixin-sidecar",
         envFile: ".env.weixin",
         port: 8787,
+        externalNetwork: spec.externalNetwork,
+        networkAlias: spec.networkAlias,
+        aliasGeneration: spec.aliasGeneration,
         composeProject,
         managedInstanceId: asString(payload.managedInstanceId) ?? "",
         bindingId,
@@ -1650,10 +1732,16 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
-  // #179: Release alias (Phase 1 of 2-phase release)
-  const generation = detv! + 1;
+  // #179: Phase 1 quarantine. Release the generation that owned the
+  // attached endpoint (not the detach operation's incremented version).
+  const releasedGeneration = spec.aliasGeneration ?? detv!;
   const sri = managedInstanceId;
-  _aliasRegistry.release(sri, generation);
+  const aliasReleased = await getAliasRegistry().release({
+    sri,
+    generation: releasedGeneration,
+    networkAlias: spec.networkAlias,
+  }).catch(() => false);
+  const aliasCompensationCodes = aliasReleased ? [] : ["alias-release-failed"];
 
   return bridgeSuccess({
     action: "sidecar.detach",
@@ -1665,14 +1753,45 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       operationId,
       expectedAttachmentVersion,
       expectedConfigVersion,
-      appliedTargetVersion: generation,
+      appliedTargetVersion: detv! + 1,
       // #171B Round 35: detach does not change config; echo expected unchanged
       appliedConfigVersion: expectedConfigVersion,
-      criticalCompensationCodes: txResult.criticalCompensationCodes,
-      // #179: Alias released (Phase 1 quarantine)
-      aliasReleased: true,
+      criticalCompensationCodes: [
+        ...(txResult.criticalCompensationCodes ?? []),
+        ...aliasCompensationCodes,
+      ],
+      // False is explicit fail-closed degradation; the quarantined alias is
+      // never treated as reusable without a durable registry transition.
+      aliasReleased,
     },
     project: context.resolved.name, userId,
+  });
+}
+
+async function bridgeSidecarAliasReconcile(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
+  const rawLimit = payload.limit === undefined ? 100 : asNumber(payload.limit);
+  if (!Number.isSafeInteger(rawLimit) || rawLimit! < 1 || rawLimit! > 1_000) {
+    return bridgeFailure({
+      action: "sidecar.alias.reconcile",
+      message: "limit must be a safe integer between 1 and 1000",
+      errorCode: "invalid-payload",
+      retryable: false,
+    });
+  }
+
+  const result = await getAliasRegistry().reconcile({
+    limit: rawLimit,
+    isAliasInUse: (entry) => isAliasBoundOnDockerNetwork(entry.networkAlias, entry.externalNetwork),
+  });
+  return bridgeSuccess({
+    action: "sidecar.alias.reconcile",
+    message: result.failed > 0 || result.deferred > 0
+      ? "Alias reconciliation completed with quarantined entries scheduled for retry"
+      : "Alias reconciliation completed",
+    metadata: {
+      ...result,
+      retryable: result.failed > 0 || result.deferred > 0,
+    },
   });
 }
 
@@ -1925,6 +2044,12 @@ async function dispatch(operation: string, payload: Record<string, unknown>): Pr
         return await bridgeInstanceImport(payload);
       case "instance.applyModelControl":
         return await bridgeInstanceApplyModelControl(payload);
+      case "sidecar.attach":
+        return await bridgeSidecarAttach(payload);
+      case "sidecar.detach":
+        return await bridgeSidecarDetach(payload);
+      case "sidecar.alias.reconcile":
+        return await bridgeSidecarAliasReconcile(payload);
       case "agent.create":
         return await bridgeAgentCreate(payload);
       case "agent.updateConfig":

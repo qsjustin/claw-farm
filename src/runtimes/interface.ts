@@ -45,7 +45,7 @@ export interface AgentRuntime {
     proxyMode: ProxyMode,
     instanceHostDir?: string,
     gatewayAllowAllUsers?: boolean,
-    weixinSidecarOptions?: { enableWeixinSidecar?: boolean; weixinEnvFile?: string; weixinSidecarPort?: number; externalNetwork?: string },
+    weixinSidecarOptions?: { enableWeixinSidecar?: boolean; weixinEnvFile?: string; weixinSidecarPort?: number; externalNetwork?: string; networkAlias?: string },
   ): string;
 
   /** Generate shared proxy compose (only used when proxyMode=shared) */
