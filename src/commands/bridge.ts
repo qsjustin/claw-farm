@@ -1363,6 +1363,17 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   // Sign only after the aliased sidecar is healthy. Activation is an owner-safe
   // CAS: stale workers cannot publish an assertion for a reassigned alias.
   const containerId = await getContainerId(composeProject, "weixin-sidecar");
+  if (!containerId) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: "Aliased sidecar is healthy but its container identity could not be inspected; endpoint not issued",
+      errorCode: "runtime-command-failed",
+      retryable: false,
+      metadata: { criticalCompensationCodes: ["container-identity-inspect-failed"] },
+      project: context.resolved.name,
+      userId,
+    });
+  }
   const assertionResult = signIdentityAssertion({
     sri,
     sidecarCode: "weixin-auth-sidecar",
