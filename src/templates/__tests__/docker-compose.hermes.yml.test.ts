@@ -1,6 +1,29 @@
 import { describe, expect, test } from "bun:test";
 import { hermesComposeTemplate, hermesInstanceComposeTemplate } from "../docker-compose.hermes.yml.ts";
 
+const hermesHealthcheck = `healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8642/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s`;
+
+describe("Hermes healthcheck", () => {
+  test("base compose uses the available python3 executable without changing health policy", () => {
+    const compose = hermesComposeTemplate("test-proj", 18790);
+
+    expect(compose).toContain(hermesHealthcheck);
+    expect(compose).not.toContain('test: ["CMD", "python",');
+  });
+
+  test("instance compose uses the same python3 healthcheck", () => {
+    const compose = hermesInstanceComposeTemplate("test-proj", "user-1", 18790);
+
+    expect(compose).toContain(hermesHealthcheck);
+    expect(compose).not.toContain('test: ["CMD", "python",');
+  });
+});
+
 describe("hermesComposeTemplate gatewayAllowAllUsers", () => {
   test("defaults to GATEWAY_ALLOW_ALL_USERS: false", () => {
     const compose = hermesComposeTemplate("test-proj", 18790);
