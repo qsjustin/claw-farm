@@ -16,7 +16,7 @@ function hermesEnvironment(indent = "      ", gatewayAllowAllUsers = false): str
 
 function healthcheck(indent = "    "): string {
   return `${indent}healthcheck:
-${indent}  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${HERMES_API_PORT}/health')"]
+${indent}  test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${HERMES_API_PORT}/health')"]
 ${indent}  interval: 10s
 ${indent}  timeout: 5s
 ${indent}  retries: 12
