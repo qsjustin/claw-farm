@@ -25,6 +25,12 @@ const validSpec: SidecarSpec = {
   envFile: ".env.weixin",
   port: 8787,
   composeProject: "clawbay-hermes-user1",
+  managedInstanceId: "sri-test-1",
+  bindingId: "binding-test-1",
+  operationId: "op-test-1",
+  targetAttachmentVersion: 1,
+  targetConfigVersion: 0,
+  desiredAttachmentState: "attached",
   updatedAt: "2026-06-21T12:00:00.000Z",
 };
 
@@ -272,6 +278,12 @@ describe("upInstance behavioral — sidecar spec integration", () => {
       envFile: ".env.weixin",
       port: 8787,
       composeProject: `${projectName}-${userId}`,
+      managedInstanceId: "sri-test-1",
+      bindingId: "binding-test-1",
+      operationId: "op-test-1",
+      targetAttachmentVersion: 1,
+      targetConfigVersion: 0,
+      desiredAttachmentState: "attached",
       updatedAt: new Date().toISOString(),
     });
 
@@ -358,6 +370,12 @@ describe("upInstance behavioral — sidecar spec integration", () => {
       envFile: ".env.weixin",
       port: 8787,
       composeProject: `${projectName}-${userId}`,
+      managedInstanceId: "sri-test-1",
+      bindingId: "binding-test-1",
+      operationId: "op-test-1",
+      targetAttachmentVersion: 1,
+      targetConfigVersion: 0,
+      desiredAttachmentState: "attached",
       updatedAt: new Date().toISOString(),
     });
 
@@ -388,6 +406,12 @@ describe("upInstance behavioral — sidecar spec integration", () => {
       envFile: ".env.weixin",
       port: 8787,
       composeProject: `${projectName}-${userId}`,
+      managedInstanceId: "sri-test-1",
+      bindingId: "binding-test-1",
+      operationId: "op-test-1",
+      targetAttachmentVersion: 1,
+      targetConfigVersion: 0,
+      desiredAttachmentState: "attached",
       updatedAt: new Date().toISOString(),
     });
 
@@ -436,6 +460,12 @@ describe("upInstance behavioral — sidecar spec integration", () => {
       envFile: ".env.weixin",
       port: 8787,
       composeProject: `${projectName}-${userId}`,
+      managedInstanceId: "sri-test-1",
+      bindingId: "binding-test-1",
+      operationId: "op-test-1",
+      targetAttachmentVersion: 1,
+      targetConfigVersion: 0,
+      desiredAttachmentState: "attached",
       updatedAt: new Date().toISOString(),
     });
 

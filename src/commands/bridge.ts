@@ -99,7 +99,13 @@ const INSTANCE_OPERATIONS = new Set([
   "runtime.registry.resolve",
 ]);
 
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+
 function emit(value: BridgeResponse): void {
+
   console.log(JSON.stringify(value));
 }
 
@@ -317,10 +323,10 @@ function safeBridgeContext(project?: string, userId?: string): { project?: strin
 async function resolveBridgeContext(project: string, userId: string) {
   const resolved = await resolveProjectName(project);
   const config = await readProjectConfig(resolved.entry.path);
-  const { runtimeType, runtime } = resolveRuntimeConfig(config, resolved.entry);
+  const { runtimeType, runtime, proxyMode } = resolveRuntimeConfig(config, resolved.entry);
   const layout = resolveWorkspaceLayout(resolved.entry.path, userId, runtimeType);
   const instance = await getInstance(resolved.name, userId);
-  return { resolved, runtimeType, runtime, layout, instance };
+  return { resolved, runtimeType, runtime, proxyMode, layout, instance };
 }
 
 async function requireManagedInstance(
@@ -332,6 +338,7 @@ async function requireManagedInstance(
       resolved: Awaited<ReturnType<typeof resolveProjectName>>;
       runtimeType: Awaited<ReturnType<typeof resolveBridgeContext>>["runtimeType"];
       runtime: Awaited<ReturnType<typeof resolveBridgeContext>>["runtime"];
+      proxyMode: Awaited<ReturnType<typeof resolveBridgeContext>>["proxyMode"];
       layout: Awaited<ReturnType<typeof resolveBridgeContext>>["layout"];
     }
   | BridgeFailure
@@ -1381,6 +1388,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
+  const assertion = (typeof assertionResult === "string" ? { assertion: { sri, sidecarCode: "weixin-auth-sidecar", composeProject, networkAlias, port: 8787, containerId: null, generation, issuedAt: assertionNow.toISOString(), expiresAt: new Date(assertionNow.getTime() + validitySeconds * 1000).toISOString(), keyId: process.env.FARM_KEY_ID ?? "k", bindingSecret: "", farmSignature: assertionResult } } : assertionResult);
   return bridgeSuccess({
     action: "sidecar.attach",
     message: `Attached sidecar for "${userId}"`,
@@ -1398,18 +1406,18 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       healthCheck: "passed",
       // #179: IdentityAssertion for Bay to persist and use for per-instance calls
       appliedSidecarEndpoint: {
-        sri: assertionResult.assertion.sri,
-        sidecarCode: assertionResult.assertion.sidecarCode,
-        composeProject: assertionResult.assertion.composeProject,
-        networkAlias: assertionResult.assertion.networkAlias,
-        port: assertionResult.assertion.port,
-        containerId: assertionResult.assertion.containerId,
-        generation: assertionResult.assertion.generation,
-        issuedAt: assertionResult.assertion.issuedAt,
-        expiresAt: assertionResult.assertion.expiresAt,
-        keyId: assertionResult.assertion.keyId,
-        farmSignature: assertionResult.assertion.farmSignature,
-        bindingSecret: assertionResult.assertion.bindingSecret,
+        sri: assertion.assertion.sri,
+        sidecarCode: assertion.assertion.sidecarCode,
+        composeProject: assertion.assertion.composeProject,
+        networkAlias: assertion.assertion.networkAlias,
+        port: assertion.assertion.port,
+        containerId: assertion.assertion.containerId,
+        generation: assertion.assertion.generation,
+        issuedAt: assertion.assertion.issuedAt,
+        expiresAt: assertion.assertion.expiresAt,
+        keyId: assertion.assertion.keyId,
+        farmSignature: assertion.assertion.farmSignature,
+        bindingSecret: assertion.assertion.bindingSecret,
       },
     },
     project: context.resolved.name, userId,
@@ -2015,7 +2023,7 @@ async function bridgeAgentUpdateConfig(payload: Record<string, unknown>): Promis
   });
 }
 
-async function dispatch(operation: string, payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
+export async function dispatch(operation: string, payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
   if (!INSTANCE_OPERATIONS.has(operation)) {
     return bridgeFailure({
       action: operation,

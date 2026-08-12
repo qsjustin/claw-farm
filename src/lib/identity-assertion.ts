@@ -136,12 +136,28 @@ export function generateBindingSecret(byteLength = 32): string {
   return randomBytes(byteLength).toString("hex");
 }
 
-export function serializeCanonical(record: Record<string, unknown>): string {
-  const ordered = ["sri", "sidecarCode", "composeProject", "networkAlias", "port", "containerId", "generation", "issuedAt", "expiresAt", "keyId", "bindingSecret"];
-  return `{${ordered.map((key) => `${JSON.stringify(key)}:${JSON.stringify(record[key] instanceof Date ? (record[key] as Date).toISOString() : record[key])}`).join(",")}}`;
+export function serializeCanonical(record: IdentityAssertion | Record<string, unknown>): string {
+  const ordered = ["sri", "sidecarCode", "composeProject", "networkAlias", "port", "containerId", "generation", "issuedAt", "expiresAt", "keyId", "bindingSecret"] as const;
+  return `{${ordered.map((key) => `${JSON.stringify(key)}:${JSON.stringify((record as Record<string, unknown>)[key] instanceof Date ? ((record as Record<string, unknown>)[key] as Date).toISOString() : (record as Record<string, unknown>)[key])}`).join(",")}}`;
 }
 
-export function verifyIdentityAssertion(record: Record<string, unknown>, publicKey: KeyObject): boolean {
+export interface IdentityAssertion {
+  sri: string;
+  sidecarCode: string;
+  composeProject: string;
+  networkAlias: string;
+  port: number;
+  containerId: string;
+  generation: number;
+  issuedAt: string;
+  expiresAt: string;
+  keyId: string;
+  bindingSecret: string;
+  farmSignature: string;
+}
+export type { IdentityAssertionFields as IdentityAssertionFieldsCompat };
+
+export function verifyIdentityAssertion(record: IdentityAssertion | Record<string, unknown>, publicKey: KeyObject): boolean {
   try {
     if (publicKey.asymmetricKeyType !== "ed25519" || typeof record.farmSignature !== "string" || !/^[0-9a-f]{128}$/.test(record.farmSignature)) return false;
     const { farmSignature, ...unsigned } = record;
@@ -149,15 +165,16 @@ export function verifyIdentityAssertion(record: Record<string, unknown>, publicK
   } catch { return false; }
 }
 
-export function buildIdentityAssertion(input: {
+export function buildIdentityAssertion(input: IdentityAssertion | {
   sri: string; sidecarCode: string; composeProject: string; networkAlias: string; port: number;
   containerId: string; generation: number; issuedAt: Date; expiresAt: Date; bindingSecret: string;
-}): Record<string, unknown> {
+}): IdentityAssertion {
   const privatePath = process.env.FARM_PRIVATE_KEY_PATH;
   const keyId = process.env.FARM_KEY_ID;
   if (!privatePath || !keyId) throw new Error("FARM_PRIVATE_KEY_PATH and FARM_KEY_ID are required");
   const privateKey = createPrivateKey(readFileSync(privatePath, "utf8"));
-  const record = { ...input, issuedAt: input.issuedAt.toISOString(), expiresAt: input.expiresAt.toISOString(), keyId };
+  const toIso = (v: string | Date) => v instanceof Date ? v.toISOString() : v;
+  const record: Omit<IdentityAssertion, "farmSignature"> = { sri: input.sri, sidecarCode: input.sidecarCode, composeProject: input.composeProject, networkAlias: input.networkAlias, port: input.port, containerId: input.containerId, generation: input.generation, issuedAt: toIso(input.issuedAt), expiresAt: toIso(input.expiresAt), keyId, bindingSecret: input.bindingSecret };
   return { ...record, farmSignature: cryptoSign(null, Buffer.from(serializeCanonical(record), "utf8"), privateKey).toString("hex") };
 }
 

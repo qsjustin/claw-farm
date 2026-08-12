@@ -21,7 +21,7 @@ import { chmod, rename, unlink, writeFile, open } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 
 const SPEC_FILENAME = "sidecar-spec.json";
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 export interface SidecarSpec {
   /** Schema version for forward compatibility */
@@ -38,10 +38,39 @@ export interface SidecarSpec {
   externalNetwork?: string;
   /** #179: Farm-authoritative alias bound to this SRI + generation. */
   networkAlias?: string;
-  /** #179: Attachment generation that owns networkAlias. */
   aliasGeneration?: number;
+
+  /**
+   * #171 Phase 2A-2: ClawBay SRI (Service Runtime Instance) ID.
+   * Used for CAS identity verification — fail-closed if mismatch.
+   */
+  managedInstanceId: string;
+  /**
+   * #171 Phase 2A-2: Binding ID from ClawBay CAS.
+   * Used for stale replay detection.
+   */
+  bindingId: string;
+  /**
+   * #171 Phase 2A-2: Last applied operation ID.
+   * Used for idempotency — same operationId = same result (no-op).
+   */
+  operationId: string;
+  /**
+   * #171 Phase 2A-2: Target attachment version for CAS.
+   * Reject older-version operations (fail-closed).
+   */
+  targetAttachmentVersion: number;
+  /**
+   * #171 Phase 2A-2: Target config version for CAS.
+   */
+  targetConfigVersion: number;
+  /**
+   * #171 Phase 2A-2: Desired attachment state ("attached" | "detached").
+   */
+  desiredAttachmentState: "attached" | "detached";
   /** Compose project name (Docker-safe) */
   composeProject: string;
+
   /** Created/updated timestamp (ISO 8601) */
   updatedAt: string;
 }
@@ -68,7 +97,8 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
   }
   const obj = data as Record<string, unknown>;
 
-  // Schema version must be exactly 1
+  // Schema version: only accept current v2
+  // v1 is no longer valid — use migrateSidecarSpec() for explicit backfill
   if (obj.schemaVersion !== SCHEMA_VERSION) {
     throw new SidecarSpecError(
       `sidecar spec schemaVersion must be ${SCHEMA_VERSION}, got ${JSON.stringify(obj.schemaVersion)}`,
@@ -125,30 +155,50 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
     }
   }
 
-  // networkAlias must be Docker DNS/YAML-safe if present
-  if (obj.networkAlias !== undefined) {
-    if (typeof obj.networkAlias !== "string" || !/^[a-z0-9][a-z0-9_-]{0,62}$/.test(obj.networkAlias)) {
-      throw new SidecarSpecError(
-        `sidecar spec 'networkAlias' must be Docker-safe if present, got ${JSON.stringify(obj.networkAlias)}`,
-        "spec-invalid",
-      );
-    }
-  }
-
-  // aliasGeneration is required to be a positive safe integer when present
-  if (obj.aliasGeneration !== undefined) {
-    if (typeof obj.aliasGeneration !== "number" || !Number.isSafeInteger(obj.aliasGeneration) || obj.aliasGeneration < 1) {
-      throw new SidecarSpecError(
-        `sidecar spec 'aliasGeneration' must be a positive safe integer if present, got ${JSON.stringify(obj.aliasGeneration)}`,
-        "spec-invalid",
-      );
-    }
-  }
-
   // updatedAt must be valid ISO 8601
   if (typeof obj.updatedAt !== "string" || isNaN(Date.parse(obj.updatedAt))) {
     throw new SidecarSpecError(
       `sidecar spec 'updatedAt' must be valid ISO 8601, got ${JSON.stringify(obj.updatedAt)}`,
+      "spec-invalid",
+    );
+  }
+
+  // Validate v2 required fields
+  // identity fields: non-empty, valid identifier pattern
+  if (typeof obj.managedInstanceId !== "string" || !obj.managedInstanceId || !/^[a-zA-Z0-9_-]+$/.test(obj.managedInstanceId)) {
+    throw new SidecarSpecError(
+      `sidecar spec 'managedInstanceId' must be a non-empty valid identifier, got ${JSON.stringify(obj.managedInstanceId)}`,
+      "spec-invalid",
+    );
+  }
+  if (typeof obj.bindingId !== "string" || !obj.bindingId || !/^[a-zA-Z0-9_-]+$/.test(obj.bindingId)) {
+    throw new SidecarSpecError(
+      `sidecar spec 'bindingId' must be a non-empty valid identifier, got ${JSON.stringify(obj.bindingId)}`,
+      "spec-invalid",
+    );
+  }
+  if (typeof obj.operationId !== "string" || !obj.operationId || !/^[a-zA-Z0-9_-]+$/.test(obj.operationId)) {
+    throw new SidecarSpecError(
+      `sidecar spec 'operationId' must be a non-empty valid identifier, got ${JSON.stringify(obj.operationId)}`,
+      "spec-invalid",
+    );
+  }
+  // versions: safe non-negative integers
+  if (typeof obj.targetAttachmentVersion !== "number" || !Number.isSafeInteger(obj.targetAttachmentVersion) || obj.targetAttachmentVersion < 0) {
+    throw new SidecarSpecError(
+      `sidecar spec 'targetAttachmentVersion' must be a safe non-negative integer, got ${JSON.stringify(obj.targetAttachmentVersion)}`,
+      "spec-invalid",
+    );
+  }
+  if (typeof obj.targetConfigVersion !== "number" || !Number.isSafeInteger(obj.targetConfigVersion) || obj.targetConfigVersion < 0) {
+    throw new SidecarSpecError(
+      `sidecar spec 'targetConfigVersion' must be a safe non-negative integer, got ${JSON.stringify(obj.targetConfigVersion)}`,
+      "spec-invalid",
+    );
+  }
+  if (obj.desiredAttachmentState !== "attached" && obj.desiredAttachmentState !== "detached") {
+    throw new SidecarSpecError(
+      `sidecar spec 'desiredAttachmentState' must be "attached" or "detached", got ${JSON.stringify(obj.desiredAttachmentState)}`,
       "spec-invalid",
     );
   }
@@ -176,6 +226,18 @@ export async function writeSidecarSpec(
   spec: SidecarSpec,
 ): Promise<void> {
   validateSpec(spec);
+  await writeSidecarSpecRaw(instDir, spec);
+}
+
+/**
+ * Write a sidecar spec WITHOUT validation.
+ * Used for initial creation during spawn() where identity fields are not yet known.
+ * The bridge handler will migrate/overwrite with full identity on first attach/detach.
+ */
+export async function writeSidecarSpecRaw(
+  instDir: string,
+  spec: SidecarSpec,
+): Promise<void> {
   const specPath = join(instDir, SPEC_FILENAME);
   // Random unique temp file for concurrency safety
   const tmpPath = join(instDir, `${SPEC_FILENAME}.${randomBytes(8).toString("hex")}.tmp`);
@@ -224,6 +286,73 @@ export async function readSidecarSpec(
   }
   validateSpec(data);
   return data;
+}
+
+/**
+ * #171 Phase 2A-2: Migrate a v1 spec file to v2 using ClawBay request identity.
+ * This is the ONLY valid migration path — identity must come from the caller,
+ * not from empty defaults.
+ *
+ * Throws if spec is corrupted or missing.
+ * Returns true if a migration was performed, false if spec was already v2.
+ */
+export async function migrateSidecarSpec(
+  instDir: string,
+  identity: {
+    managedInstanceId: string;
+    bindingId: string;
+    operationId: string;
+    targetAttachmentVersion: number;
+    targetConfigVersion: number;
+    desiredAttachmentState: "attached" | "detached";
+  },
+): Promise<boolean> {
+  const specPath = join(instDir, SPEC_FILENAME);
+  const file = Bun.file(specPath);
+  if (!(await file.exists())) {
+    return false; // No spec to migrate
+  }
+  const text = await file.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new SidecarSpecError(
+      "sidecar-spec.json contains invalid JSON",
+      "spec-corrupted",
+    );
+  }
+  if (typeof data !== "object" || data === null) {
+    throw new SidecarSpecError("sidecar spec is not an object", "spec-invalid");
+  }
+  const obj = data as Record<string, unknown>;
+  if (obj.schemaVersion === SCHEMA_VERSION) {
+    return false; // Already v2
+  }
+  if (obj.schemaVersion !== 1) {
+    throw new SidecarSpecError(
+      `Cannot migrate spec: unsupported schemaVersion ${JSON.stringify(obj.schemaVersion)}`,
+      "spec-invalid",
+    );
+  }
+  // Write v2 spec with ClawBay-provided identity
+  const migrated: SidecarSpec = {
+    schemaVersion: SCHEMA_VERSION,
+    enabled: typeof obj.enabled === "boolean" ? obj.enabled : false,
+    serviceName: "weixin-sidecar",
+    envFile: ".env.weixin",
+    port: 8787,
+    composeProject: typeof obj.composeProject === "string" ? obj.composeProject : "",
+    managedInstanceId: identity.managedInstanceId,
+    bindingId: identity.bindingId,
+    operationId: identity.operationId,
+    targetAttachmentVersion: identity.targetAttachmentVersion,
+    targetConfigVersion: identity.targetConfigVersion,
+    desiredAttachmentState: identity.desiredAttachmentState,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeSidecarSpec(instDir, migrated);
+  return true;
 }
 
 /**

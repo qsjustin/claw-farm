@@ -366,7 +366,7 @@ function validateEnvEntry(key: string, value: string): string {
   return `${key}=${value}`;
 }
 
-async function resolveInstance(project: string, userId: string) {
+export async function resolveInstance(project: string, userId: string) {
   validateName(userId, "user ID");
   const { name: projectName, entry } = await resolveProjectName(project);
   const projectDir = entry.path;
@@ -492,7 +492,7 @@ async function syncHermesConfigYaml(
   await Bun.write(configYamlPath, content);
 }
 
-async function writeInstanceCompose(options: {
+export async function writeInstanceCompose(options: {
   projectName: string;
   userId: string;
   port: number;
@@ -755,6 +755,12 @@ export async function spawn(options: {
         port: 8787,
         externalNetwork,
         composeProject: `${projectName}-${userId}`,
+        managedInstanceId: managedInstanceId ?? "migrated",
+        bindingId: "legacy-binding",
+        operationId: "legacy-bootstrap",
+        targetAttachmentVersion: 0,
+        targetConfigVersion: 0,
+        desiredAttachmentState: "attached",
         updatedAt: new Date().toISOString(),
       });
     } else {

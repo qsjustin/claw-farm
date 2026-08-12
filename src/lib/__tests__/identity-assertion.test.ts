@@ -69,7 +69,7 @@ beforeAll(async () => {
   process.env.FARM_KEY_ID = "farm-id-test-key-1";
   // Load the public key for verification.
   const mod = await loadIdentityModule();
-  VERIFIER_PUBLIC_KEY = mod.loadPublicKeyFromPath(PUBLIC_KEY_PATH);
+  VERIFIER_PUBLIC_KEY = mod.loadPublicKeyFromPath(PUBLIC_KEY_PATH) as KeyObject;
 });
 
 afterAll(() => {
