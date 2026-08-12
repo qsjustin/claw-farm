@@ -91,7 +91,7 @@ export function hermesInstanceComposeTemplate(
 
   const weixinSidecarService = enableWeixinSidecar ? `  weixin-sidecar:
     container_name: ${containerPrefix}-weixin
-    image: clawbay-bay-sidecar-weixin:latest
+    image: \${WEIXIN_SIDECAR_IMAGE:-clawbay-bay-sidecar-weixin:latest}
     user: "1000:1000"
     env_file:
       - ./${weixinEnvFile}
