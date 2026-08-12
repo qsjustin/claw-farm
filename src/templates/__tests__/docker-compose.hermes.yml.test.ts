@@ -118,7 +118,7 @@ describe("hermesInstanceComposeTemplate with weixin sidecar (#159B)", () => {
     const compose = hermesInstanceComposeTemplate(
       "test-proj", "user-1", 18790, "none", undefined, false, true
     );
-    expect(compose).toContain("image: clawbay-bay-sidecar-weixin:latest");
+    expect(compose).toContain("image: ${WEIXIN_SIDECAR_IMAGE:-clawbay-bay-sidecar-weixin:latest}");
     expect(compose).not.toContain("build: ../../claw-sidecar-weixin");
   });
 

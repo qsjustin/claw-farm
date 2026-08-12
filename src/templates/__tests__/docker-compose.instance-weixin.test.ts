@@ -54,7 +54,7 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
       // Per-instance compose cannot use local build context (not accessible from instance dir)
       // Must use the pre-built sidecar image from the workspace compose
-      expect(compose).toContain("image: clawbay-bay-sidecar-weixin:latest");
+      expect(compose).toContain("image: ${WEIXIN_SIDECAR_IMAGE:-clawbay-bay-sidecar-weixin:latest}");
       // Must NOT use the local build context (which is unreachable from per-instance compose)
       expect(compose).not.toContain("build: ../../claw-sidecar-weixin");
     });
@@ -342,4 +342,3 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
     });
   });
 });
-
