@@ -14,16 +14,25 @@
  */
 
 import {
+  createPrivateKey,
+  createPublicKey,
   generateKeyPairSync,
   sign as cryptoSign,
-  createPublicKey,
+  verify as cryptoVerify,
   randomBytes,
   type KeyObject,
 } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-// ─── Types ──────────────────────────────────────────────────────────────────
+const isProduction = process.env.NODE_ENV === "production";
+if (isProduction && !process.env.FARM_PRIVATE_KEY_PATH) {
+  throw new Error("FARM_PRIVATE_KEY_PATH is required in production");
+}
+if (isProduction && !process.env.FARM_KEY_ID) {
+  throw new Error("FARM_KEY_ID is required in production");
+}
+
 
 export interface IdentityAssertionFields {
   sri: string;                    // service runtime instance ID
@@ -97,7 +106,7 @@ export function loadOrGenerateFarmKeys(keyDir: string): FarmKeyPair {
     const keyId = readFileSync(idPath, "utf8").trim();
     const privateKeyPem = readFileSync(privPath, "utf8");
     const publicKeyPem = readFileSync(pubPath, "utf8");
-    const privateKey = createPublicKey(privateKeyPem);
+    const privateKey = createPrivateKey(privateKeyPem);
     const publicKey = createPublicKey(publicKeyPem);
     return { keyId, privateKey, publicKey, publicKeyPem, privateKeyPem };
   } catch {
@@ -116,15 +125,47 @@ export function loadOrGenerateFarmKeys(keyDir: string): FarmKeyPair {
  * Export the public key map JSON for Bay's FARM_VERIFICATION_KEYS_PATH.
  * Format: { "<keyId>": "<publicKeyPem>" }
  */
-export function buildPublicKeyMapJson(keys: FarmKeyPair[]): string {
-  const map: Record<string, string> = {};
-  for (const kp of keys) {
-    map[kp.keyId] = kp.publicKeyPem;
-  }
-  return JSON.stringify(map, null, 2) + "\n";
+export function loadPublicKeyFromPath(publicKeyPath: string): KeyObject {
+  const key = createPublicKey(readFileSync(publicKeyPath, "utf8"));
+  if (key.asymmetricKeyType !== "ed25519") throw new Error("public key is not Ed25519");
+  return key;
 }
 
-// ─── Canonical bytes + signing ───────────────────────────────────────────────
+export function generateBindingSecret(byteLength = 32): string {
+  if (byteLength < 32) throw new Error(`bindingSecret byteLength must be >= 32 (got ${byteLength})`);
+  return randomBytes(byteLength).toString("hex");
+}
+
+export function serializeCanonical(record: Record<string, unknown>): string {
+  const ordered = ["sri", "sidecarCode", "composeProject", "networkAlias", "port", "containerId", "generation", "issuedAt", "expiresAt", "keyId", "bindingSecret"];
+  return `{${ordered.map((key) => `${JSON.stringify(key)}:${JSON.stringify(record[key] instanceof Date ? (record[key] as Date).toISOString() : record[key])}`).join(",")}}`;
+}
+
+export function verifyIdentityAssertion(record: Record<string, unknown>, publicKey: KeyObject): boolean {
+  try {
+    if (publicKey.asymmetricKeyType !== "ed25519" || typeof record.farmSignature !== "string" || !/^[0-9a-f]{128}$/.test(record.farmSignature)) return false;
+    const { farmSignature, ...unsigned } = record;
+    return cryptoVerify(null, Buffer.from(serializeCanonical(unsigned), "utf8"), publicKey, Buffer.from(farmSignature, "hex"));
+  } catch { return false; }
+}
+
+export function buildIdentityAssertion(input: {
+  sri: string; sidecarCode: string; composeProject: string; networkAlias: string; port: number;
+  containerId: string; generation: number; issuedAt: Date; expiresAt: Date; bindingSecret: string;
+}): Record<string, unknown> {
+  const privatePath = process.env.FARM_PRIVATE_KEY_PATH;
+  const keyId = process.env.FARM_KEY_ID;
+  if (!privatePath || !keyId) throw new Error("FARM_PRIVATE_KEY_PATH and FARM_KEY_ID are required");
+  const privateKey = createPrivateKey(readFileSync(privatePath, "utf8"));
+  const record = { ...input, issuedAt: input.issuedAt.toISOString(), expiresAt: input.expiresAt.toISOString(), keyId };
+  return { ...record, farmSignature: cryptoSign(null, Buffer.from(serializeCanonical(record), "utf8"), privateKey).toString("hex") };
+}
+
+
+export function buildPublicKeyMapJson(keys: FarmKeyPair[]): string {
+  return JSON.stringify(Object.fromEntries(keys.map((kp) => [kp.keyId, kp.publicKeyPem])), null, 2) + "\n";
+}
+
 
 /**
  * Build canonical bytes for signing:
@@ -152,49 +193,34 @@ function buildCanonicalBytes(fields: Record<string, string | number | null>): Bu
  * Sign an IdentityAssertion. Returns the assertion fields + bindingSecret.
  * The bindingSecret is generated fresh (32-byte CSPRNG, hex-encoded).
  */
-export function signIdentityAssertion(input: {
-  sri: string;
-  sidecarCode: string;
-  composeProject: string;
-  networkAlias: string;
-  port: number;
-  containerId: string | null;
-  generation: number;
-  validitySeconds: number;  // assertion validity window
-  keyPair: FarmKeyPair;
-  now?: Date;
+export function currentKeyId(): string {
+  const keyId = process.env.FARM_KEY_ID;
+  if (!keyId) throw new Error("FARM_KEY_ID is required");
+  return keyId;
+}
+
+export function signIdentityAssertion(input: Record<string, unknown>): string | SignedAssertionResult {
+  if ("keyPair" in input) {
+    const typed = input as Parameters<typeof signIdentityAssertionResult>[0];
+    return signIdentityAssertionResult(typed);
+  }
+  const privatePath = process.env.FARM_PRIVATE_KEY_PATH;
+  if (!privatePath) throw new Error("FARM_PRIVATE_KEY_PATH is required");
+  const record = input;
+  const canonical = serializeCanonical(record);
+  return cryptoSign(null, Buffer.from(canonical, "utf8"), createPrivateKey(readFileSync(privatePath, "utf8"))).toString("hex");
+}
+
+function signIdentityAssertionResult(input: {
+  sri: string; sidecarCode: string; composeProject: string; networkAlias: string; port: number;
+  containerId: string | null; generation: number; validitySeconds: number; keyPair: FarmKeyPair; now?: Date;
 }): SignedAssertionResult {
   const now = input.now ?? new Date();
-  const expiresAt = new Date(now.getTime() + input.validitySeconds * 1000);
-
-  // Generate bindingSecret: 32-byte CSPRNG, hex-encoded (64 chars)
   const bindingSecret = randomBytes(32).toString("hex");
-
-  const fields = {
-    sri: input.sri,
-    sidecarCode: input.sidecarCode,
-    composeProject: input.composeProject,
-    networkAlias: input.networkAlias,
-    port: input.port,
-    containerId: input.containerId,
-    generation: input.generation,
-    issuedAt: now.toISOString(),
-    expiresAt: expiresAt.toISOString(),
-    keyId: input.keyPair.keyId,
-  };
-
-  const canonical = buildCanonicalBytes(fields);
-
-  // Ed25519 sign — uses crypto.sign() directly (not createSign)
-  const signature = cryptoSign(null, canonical, input.keyPair.privateKeyPem);
-  const farmSignature = signature.toString("base64");
-
-  return {
-    assertion: {
-      ...fields,
-      farmSignature,
-      bindingSecret,
-    },
-    publicKeyPem: input.keyPair.publicKeyPem,
-  };
+  const fields = { sri: input.sri, sidecarCode: input.sidecarCode, composeProject: input.composeProject,
+    networkAlias: input.networkAlias, port: input.port, containerId: input.containerId ?? "",
+    generation: input.generation, issuedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + input.validitySeconds * 1000).toISOString(),
+    keyId: input.keyPair.keyId, bindingSecret };
+  return { assertion: { ...fields, farmSignature: cryptoSign(null, Buffer.from(serializeCanonical(fields), "utf8"), input.keyPair.privateKey).toString("hex") }, publicKeyPem: input.keyPair.publicKeyPem };
 }
