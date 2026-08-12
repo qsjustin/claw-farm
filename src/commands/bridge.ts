@@ -8,6 +8,7 @@ import { executeWorkloadTransaction, checkContainerHealth } from "../lib/workloa
 import {
   loadOrGenerateFarmKeys,
   signIdentityAssertion,
+  generateBindingSecret,
   type FarmKeyPair,
 } from "../lib/identity-assertion.ts";
 import {
@@ -61,21 +62,31 @@ function getFarmKeyPair(): FarmKeyPair {
 }
 
 async function getContainerId(composeProject: string, serviceName: string): Promise<string | null> {
-  const containerName = `${composeProject}-${serviceName}-1`;
-  try {
-    const proc = Bun.spawn(
-      ["docker", "inspect", "--format", "{{.Id}}", containerName],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    const exitCode = await proc.exited;
-    if (exitCode === 0) {
-      const stdout = await new Response(proc.stdout).text();
-      return stdout.trim().slice(0, 12); // short container ID
+  // The sidecar template uses an explicit container_name (${project}-weixin),
+  // while compose's default naming convention appends -1. Try the explicit
+  // name first and never return an empty identity.
+  const candidates = [
+    `${composeProject}-weixin`,
+    `${composeProject}-${serviceName}`,
+    `${composeProject}-${serviceName}-1`,
+  ];
+  for (const containerName of candidates) {
+    try {
+      const proc = Bun.spawn(
+        ["docker", "inspect", "--format", "{{.Id}}", containerName],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      const exitCode = await proc.exited;
+      if (exitCode === 0) {
+        const stdout = await new Response(proc.stdout).text();
+        const id = stdout.trim();
+        if (id) return id.slice(0, 12); // short container ID
+      }
+    } catch {
+      // Try the next canonical Docker name.
     }
-    return null;
-  } catch {
-    return null;
   }
+  return null;
 }
 
 const INSTANCE_OPERATIONS = new Set([
@@ -1167,6 +1178,11 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
+  // Farm owns the per-binding secret. It is sent only through the
+  // authenticated internal provision request and signed into the in-memory
+  // assertion; it is never logged or returned in retained evidence.
+  const bindingSecret = generateBindingSecret();
+
   const txResult = await executeWorkloadTransaction(
     instDir,
     composeProject,
@@ -1243,6 +1259,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
               healthUrl: `http://${sidecarContainer}:8787/healthz`,
               readinessTimeoutMs: 30_000,
               readinessIntervalMs: 2_000,
+              bayCredentialSecret: bindingSecret,
             },
             skipRestart: true,
           }),
@@ -1375,6 +1392,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     validitySeconds,
     keyPair,
     now: assertionNow,
+    bindingSecret,
   });
   if (!await getAliasRegistry().activate(aliasReservation)) {
     return bridgeFailure({

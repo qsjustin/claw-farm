@@ -155,6 +155,9 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
       GATEWAY_INTERNAL_TOKEN: \${GATEWAY_INTERNAL_TOKEN:-gateway-dev-token}
       SIDECAR_CLAW_BAY_API_URL: http://claw-bay-api:3001
       WEIXIN_ENABLE_ILINK_TRANSPORT: \${WEIXIN_ENABLE_ILINK_TRANSPORT:-false}
+      WEIXIN_REQUIRE_BAY_CREDENTIAL: \${WEIXIN_REQUIRE_BAY_CREDENTIAL:-false}
+      WEIXIN_INSTANCE_ID: \${WEIXIN_INSTANCE_ID:?Set WEIXIN_INSTANCE_ID in instance.env}
+      WEIXIN_IDENTITY_GENERATION: \${WEIXIN_IDENTITY_GENERATION:-1}
       OPENCLAW_STATE_DIR: /data/openclaw
       SESSION_STORAGE_PATH: /data/weixin-sessions
       WEIXIN_HEALTH_CHECK_URL: http://claw-bay-api:3001/health

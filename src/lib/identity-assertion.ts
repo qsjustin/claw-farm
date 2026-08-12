@@ -231,9 +231,13 @@ export function signIdentityAssertion(input: Record<string, unknown>): string | 
 function signIdentityAssertionResult(input: {
   sri: string; sidecarCode: string; composeProject: string; networkAlias: string; port: number;
   containerId: string | null; generation: number; validitySeconds: number; keyPair: FarmKeyPair; now?: Date;
+  bindingSecret?: string;
 }): SignedAssertionResult {
   const now = input.now ?? new Date();
-  const bindingSecret = randomBytes(32).toString("hex");
+  const bindingSecret = input.bindingSecret ?? randomBytes(32).toString("hex");
+  if (!/^[0-9a-f]{64}$/i.test(bindingSecret)) {
+    throw new Error("bindingSecret must be a 64-character hex string");
+  }
   const fields = { sri: input.sri, sidecarCode: input.sidecarCode, composeProject: input.composeProject,
     networkAlias: input.networkAlias, port: input.port, containerId: input.containerId ?? "",
     generation: input.generation, issuedAt: now.toISOString(),
