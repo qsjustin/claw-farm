@@ -23,7 +23,7 @@
  */
 
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -73,6 +73,8 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  delete process.env.FARM_PRIVATE_KEY_PATH;
+  delete process.env.FARM_KEY_ID;
   if (existsSync(TMP_DIR)) {
     rmSync(TMP_DIR, { recursive: true, force: true });
   }
@@ -125,6 +127,16 @@ const FIXTURE_FIELDS = {
 };
 
 describe("identity-assertion: Ed25519 sign / verify (asymmetric)", () => {
+  it("uses the configured private-key path and key ID for bridge signing", async () => {
+    const mod = await loadIdentityModule();
+    const pair = mod.loadConfiguredFarmKeyPair();
+    expect(pair).not.toBeNull();
+    expect(pair!.keyId).toBe("farm-id-test-key-1");
+    expect(
+      pair!.publicKey.export({ type: "spki", format: "pem" }),
+    ).toBe(readFileSync(PUBLIC_KEY_PATH, "utf8"));
+  });
+
   it("verifyIdentityAssertion returns true with the matching public key", async () => {
     const mod = await loadIdentityModule();
     const record = mod.buildIdentityAssertion(FIXTURE_FIELDS);

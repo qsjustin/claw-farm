@@ -7,6 +7,7 @@ import { resolveSidecarAttachPoint, ensureSidecarAttachPoint } from "../lib/side
 import { executeWorkloadTransaction, checkContainerHealth } from "../lib/workload-tx.ts";
 import {
   loadOrGenerateFarmKeys,
+  loadConfiguredFarmKeyPair,
   signIdentityAssertion,
   generateBindingSecret,
   type FarmKeyPair,
@@ -55,8 +56,10 @@ function getAliasRegistry(): AliasRegistry {
 
 function getFarmKeyPair(): FarmKeyPair {
   if (!_farmKeyPair) {
-    const keyDir = process.env.FARM_KEY_DIR ?? join(process.env.HOME ?? "/tmp", ".claw-farm", "keys");
-    _farmKeyPair = loadOrGenerateFarmKeys(keyDir);
+    _farmKeyPair = loadConfiguredFarmKeyPair()
+      ?? loadOrGenerateFarmKeys(
+        process.env.FARM_KEY_DIR ?? join(process.env.HOME ?? "/tmp", ".claw-farm", "keys"),
+      );
   }
   return _farmKeyPair;
 }

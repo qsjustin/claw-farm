@@ -122,6 +122,34 @@ export function loadOrGenerateFarmKeys(keyDir: string): FarmKeyPair {
 }
 
 /**
+ * Load the explicitly configured Farm signing identity.  Production already
+ * requires FARM_PRIVATE_KEY_PATH and FARM_KEY_ID at module load; the bridge
+ * must actually use those values rather than silently generating a second
+ * key under HOME.  Returning null preserves the legacy development fallback
+ * when neither setting is present.
+ */
+export function loadConfiguredFarmKeyPair(): FarmKeyPair | null {
+  const privatePath = process.env.FARM_PRIVATE_KEY_PATH?.trim();
+  const keyId = process.env.FARM_KEY_ID?.trim();
+  if (!privatePath && !keyId) return null;
+  if (!privatePath || !keyId) {
+    throw new Error("FARM_PRIVATE_KEY_PATH and FARM_KEY_ID must be configured together");
+  }
+
+  const privateKeyPem = readFileSync(privatePath, "utf8");
+  const privateKey = createPrivateKey(privateKeyPem);
+  if (privateKey.asymmetricKeyType !== "ed25519") {
+    throw new Error("configured farm private key is not Ed25519");
+  }
+  const publicKey = createPublicKey(privateKey);
+  if (publicKey.asymmetricKeyType !== "ed25519") {
+    throw new Error("configured farm public key is not Ed25519");
+  }
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }) as string;
+  return { keyId, privateKey, publicKey, publicKeyPem, privateKeyPem };
+}
+
+/**
  * Export the public key map JSON for Bay's FARM_VERIFICATION_KEYS_PATH.
  * Format: { "<keyId>": "<publicKeyPem>" }
  */
