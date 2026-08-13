@@ -1293,15 +1293,30 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
           projectName: composeProject,
         });
 
-        // Side effect 4: Health check
+        // Side effect 4: Health check. Docker health checks normally begin
+        // after the service has had time to boot (the generated sidecar uses a
+        // 10s interval), so three 500ms polls could never observe a healthy
+        // real container. Keep the bounded wait configurable for isolated
+        // tests, but default to a fail-closed 45 second readiness window.
+        const healthTimeoutRaw = Number(process.env.FARM_SIDECAR_HEALTH_TIMEOUT_MS ?? 45_000);
+        const healthIntervalRaw = Number(process.env.FARM_SIDECAR_HEALTH_INTERVAL_MS ?? 1_000);
+        const healthTimeoutMs = Number.isSafeInteger(healthTimeoutRaw) && healthTimeoutRaw >= 1_000
+          ? healthTimeoutRaw
+          : 45_000;
+        const healthIntervalMs = Number.isSafeInteger(healthIntervalRaw) && healthIntervalRaw >= 10
+          ? healthIntervalRaw
+          : 1_000;
+        const healthDeadline = Date.now() + healthTimeoutMs;
         let healthOk = false;
-        for (let attempt = 0; attempt < 3; attempt++) {
+        do {
           healthOk = await checkContainerHealth(composeProject);
           if (healthOk) break;
-          await new Promise(r => setTimeout(r, 500));
-        }
+          const remainingMs = healthDeadline - Date.now();
+          if (remainingMs <= 0) break;
+          await new Promise((resolve) => setTimeout(resolve, Math.min(healthIntervalMs, remainingMs)));
+        } while (Date.now() < healthDeadline);
         if (!healthOk) {
-          throw new Error("Sidecar health check failed after compose up");
+          throw new Error(`Sidecar health check failed after ${healthTimeoutMs}ms`);
         }
       } catch (error) {
         // Rollback: revoke token + restore .env.weixin if provision succeeded

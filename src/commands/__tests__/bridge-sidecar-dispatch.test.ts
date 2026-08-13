@@ -19,6 +19,8 @@ let instDir: string;
 let registryDir: string;
 let origRegistryDir: string | undefined;
 let origAttachNetworks: string | undefined;
+let origHealthTimeout: string | undefined;
+let origHealthInterval: string | undefined;
 const projectName = "clawbay-test";
 const userId = "test-user";
 
@@ -56,6 +58,12 @@ beforeEach(async () => {
   process.env.CLAW_FARM_REGISTRY_DIR = registryDir;
   origAttachNetworks = process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS;
   process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS = "clawbay-test-network";
+  // Keep the negative-health test bounded while production uses the longer
+  // Docker-health readiness window required by a real sidecar startup.
+  origHealthTimeout = process.env.FARM_SIDECAR_HEALTH_TIMEOUT_MS;
+  origHealthInterval = process.env.FARM_SIDECAR_HEALTH_INTERVAL_MS;
+  process.env.FARM_SIDECAR_HEALTH_TIMEOUT_MS = "1000";
+  process.env.FARM_SIDECAR_HEALTH_INTERVAL_MS = "10";
 
   // Create project and instance dirs
   await mkdir(join(instDir, "hermes", "workspace"), { recursive: true });
@@ -107,6 +115,16 @@ afterEach(() => {
     delete process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS;
   } else {
     process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS = origAttachNetworks;
+  }
+  if (origHealthTimeout === undefined) {
+    delete process.env.FARM_SIDECAR_HEALTH_TIMEOUT_MS;
+  } else {
+    process.env.FARM_SIDECAR_HEALTH_TIMEOUT_MS = origHealthTimeout;
+  }
+  if (origHealthInterval === undefined) {
+    delete process.env.FARM_SIDECAR_HEALTH_INTERVAL_MS;
+  } else {
+    process.env.FARM_SIDECAR_HEALTH_INTERVAL_MS = origHealthInterval;
   }
 });
 
