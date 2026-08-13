@@ -95,6 +95,34 @@ async function getContainerId(composeProject: string, serviceName: string): Prom
   return null;
 }
 
+/**
+ * The sidecar compose template owns one private `sidecar-net` network. A
+ * service-scoped `docker compose rm` deliberately leaves project networks
+ * behind, so detach must remove this now-empty, per-instance network itself.
+ * The name is deterministic because every sidecar operation passes the
+ * explicit compose project name to Docker Compose.
+ */
+async function removeDetachedSidecarNetwork(composeProject: string): Promise<void> {
+  const networkName = `${composeProject}_sidecar-net`;
+  const proc = Bun.spawn(
+    ["docker", "network", "rm", networkName],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  if (exitCode === 0) return;
+
+  // Detach is idempotent with respect to an already-removed sidecar network,
+  // but daemon/permission/active-endpoint failures must remain fail-closed.
+  if (/No such network|network .+ not found/i.test(stderr)) return;
+  throw new Error(
+    `Failed to remove detached sidecar network ${networkName}: ${stderr.trim() || stdout.trim() || `exit ${exitCode}`}`,
+  );
+}
+
 const INSTANCE_OPERATIONS = new Set([
   "instance.create",
   "instance.start",
@@ -1519,6 +1547,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
 
   // Derive instDir from registry (caller must not pass this)
   const instDir = instanceDir(context.resolved.entry.path, userId);
+  const composeProject = `${context.resolved.name}-${userId}`;
 
   // Read existing sidecar spec, migrating v1 to v2 if needed
   let spec: SidecarSpec | null = null;
@@ -1561,6 +1590,21 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     spec.targetAttachmentVersion === detv! + 1 &&
     spec.targetConfigVersion === decv!
   ) {
+    try {
+      // Repair a historical service-scoped detach that may have left its
+      // otherwise empty Compose network behind. If the old sidecar still owns
+      // it, removal fails closed instead of falsely reporting clean detach.
+      await removeDetachedSidecarNetwork(composeProject);
+    } catch (error) {
+      return bridgeFailure({
+        action: "sidecar.detach",
+        message: error instanceof Error ? error.message : String(error),
+        errorCode: "runtime-command-failed",
+        retryable: false,
+        project: context.resolved.name,
+        userId,
+      });
+    }
     const aliasReleased = spec.aliasGeneration
       ? await getAliasRegistry().release({
           sri: managedInstanceId,
@@ -1628,7 +1672,6 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
     }
   }
 
-  const composeProject = `${context.resolved.name}-${userId}`;
   const serviceName = "weixin-sidecar";
   const instance = await getInstance(context.resolved.name, userId);
 
@@ -1719,6 +1762,14 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         // Docker CLI not found or other non-Docker error — fail closed
         throw new Error(`Cannot verify sidecar absence: ${err instanceof Error ? err.message : err}`);
       }
+
+      // `docker compose rm` is deliberately service-scoped and does not
+      // remove the private Compose network. It has no remaining members once
+      // the sidecar absence check above passes, so remove it before publishing
+      // the detached spec. This prevents per-instance network leaks on normal
+      // detach while preserving rollback: a later transaction failure rewrites
+      // the previous compose and its service-scoped restart recreates it.
+      await removeDetachedSidecarNetwork(composeProject);
 
       // Side effect 3: Rewrite compose without sidecar
       await writeInstanceCompose({

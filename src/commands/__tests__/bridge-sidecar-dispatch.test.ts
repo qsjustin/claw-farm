@@ -226,7 +226,9 @@ describe("sidecar.attach dispatch", () => {
     expect(attached.ok).toBe(true);
     const attachedSpec = JSON.parse(await readFile(join(instDir, "sidecar-spec.json"), "utf8")) as SidecarSpec;
 
+    const calls: string[][] = [];
     Bun.spawn = ((args: string[]) => {
+      calls.push(args);
       if (args.join(" ").includes("docker inspect")) {
         return {
           exited: Promise.resolve(1),
@@ -251,6 +253,9 @@ describe("sidecar.attach dispatch", () => {
       expect(detached.metadata?.aliasReleased).toBe(true);
       expect(detached.metadata?.appliedTargetVersion).toBe(2);
     }
+    expect(calls.some((args) =>
+      args.join(" ") === `docker network rm ${projectName}-${userId}_sidecar-net`,
+    )).toBe(true);
     const aliasRegistry = JSON.parse(await readFile(join(registryDir, "alias-registry.json"), "utf8")) as {
       entries: Record<string, { state: string; networkAlias: string }>;
     };
@@ -477,6 +482,23 @@ describe("sidecar.detach dispatch", () => {
       targetAttachmentVersion: 2,
     });
 
+    const calls: string[][] = [];
+    Bun.spawn = ((args: string[]) => {
+      calls.push(args);
+      if (args.join(" ").includes("docker inspect")) {
+        return {
+          exited: Promise.resolve(1),
+          stdout: new Blob([""]).stream(),
+          stderr: new Blob(["No such container"]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([""]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as typeof Bun.spawn;
+
     const result = await dispatch("sidecar.detach", basePayload({
       operationId: "op-2",
       expectedAttachmentVersion: 1,
@@ -489,6 +511,9 @@ describe("sidecar.detach dispatch", () => {
       expect(result.metadata?.appliedTargetVersion).toBe(2);
       expect(result.metadata?.appliedConfigVersion).toBe(1);
     }
+    expect(calls.some((args) =>
+      args.join(" ") === `docker network rm ${projectName}-${userId}_sidecar-net`,
+    )).toBe(true);
   });
 
   it("rejects when no spec exists", async () => {
