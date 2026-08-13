@@ -71,6 +71,17 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(compose).not.toMatch(/WEIXIN_BINDING_TOKEN=cbt_/);
     });
 
+    it("keeps iLink and gateway credentials under the per-instance env files", () => {
+      const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
+      const start = compose.indexOf("weixin-sidecar:");
+      const end = compose.indexOf("openclaw-gateway:");
+      const weixinSection = compose.slice(start, end);
+      expect(weixinSection).toContain("- ./.env.weixin");
+      expect(weixinSection).toContain("- ./instance.env");
+      expect(weixinSection).not.toMatch(/^\s+GATEWAY_INTERNAL_TOKEN:/m);
+      expect(weixinSection).not.toMatch(/^\s+WEIXIN_ENABLE_ILINK_TRANSPORT:/m);
+    });
+
     it("uses bridge network (not host network_mode)", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
       const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));

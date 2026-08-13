@@ -152,9 +152,7 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
       - ./instance.env
     environment:
       SIDECAR_GATEWAY_URL: http://sidecar-gateway:3002
-      GATEWAY_INTERNAL_TOKEN: \${GATEWAY_INTERNAL_TOKEN:-gateway-dev-token}
       SIDECAR_CLAW_BAY_API_URL: http://claw-bay-api:3001
-      WEIXIN_ENABLE_ILINK_TRANSPORT: \${WEIXIN_ENABLE_ILINK_TRANSPORT:-false}
       OPENCLAW_STATE_DIR: /data/openclaw
       SESSION_STORAGE_PATH: /data/weixin-sessions
       WEIXIN_HEALTH_CHECK_URL: http://claw-bay-api:3001/health

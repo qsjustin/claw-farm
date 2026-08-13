@@ -1263,6 +1263,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
               readinessTimeoutMs: 30_000,
               readinessIntervalMs: 2_000,
               bayCredentialSecret: bindingSecret,
+              bayCredentialGeneration: generation,
             },
             skipRestart: true,
           }),

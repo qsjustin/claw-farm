@@ -133,6 +133,17 @@ describe("hermesInstanceComposeTemplate with weixin sidecar (#159B)", () => {
     expect(compose).not.toMatch(/WEIXIN_BINDING_TOKEN=cbt_/);
   });
 
+  test("keeps iLink and gateway credentials under the per-instance env files", () => {
+    const compose = hermesInstanceComposeTemplate(
+      "test-proj", "user-1", 18790, "none", undefined, false, true, ".env.weixin"
+    );
+    const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"));
+    expect(weixinSection).toContain("- ./.env.weixin");
+    expect(weixinSection).toContain("- ./instance.env");
+    expect(weixinSection).not.toMatch(/^\s+GATEWAY_INTERNAL_TOKEN:/m);
+    expect(weixinSection).not.toMatch(/^\s+WEIXIN_ENABLE_ILINK_TRANSPORT:/m);
+  });
+
   test("exposes port 8787 internally (no host port publishing)", () => {
     const compose = hermesInstanceComposeTemplate(
       "test-proj", "user-1", 18790, "none", undefined, false, true, ".env.weixin", 18887
