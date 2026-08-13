@@ -80,7 +80,10 @@ async function getContainerId(composeProject: string, serviceName: string): Prom
       if (exitCode === 0) {
         const stdout = await new Response(proc.stdout).text();
         const id = stdout.trim();
-        if (id) return id.slice(0, 12); // short container ID
+        // IdentityAssertion is persisted and independently checked by Bay.
+        // Preserve the full Docker ID so it is a stable, unambiguous runtime
+        // identity rather than a display-only short prefix.
+        if (/^[0-9a-f]{64}$/i.test(id)) return id;
       }
     } catch {
       // Try the next canonical Docker name.
