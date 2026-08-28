@@ -28,7 +28,7 @@ import {
 import { fileExists } from "./fs-utils.ts";
 import { ensureInstanceDirs, instanceDir, templateDir } from "./instance.ts";
 import {
-  writeSidecarSpec,
+  writeSidecarSpecRaw,
   readSidecarSpec,
   removeSidecarSpec,
 } from "./sidecar-spec.ts";
@@ -747,7 +747,10 @@ export async function spawn(options: {
     // (start, restart, model apply, rebuild) know to include the sidecar.
     // If sidecar is explicitly disabled, remove any stale spec to prevent resurrection.
     if (enableWeixinSidecar) {
-      await writeSidecarSpec(instDir, {
+      // Creation happens before ClawBay has issued the authoritative CAS
+      // identity. Persist the explicitly supported v1 bootstrap record; the
+      // first bridge attach migrates it to validated v2 identity fields.
+      await writeSidecarSpecRaw(instDir, {
         schemaVersion: 1,
         enabled: true,
         serviceName: "weixin-sidecar",

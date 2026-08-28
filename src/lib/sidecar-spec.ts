@@ -19,6 +19,7 @@
 import { join } from "node:path";
 import { chmod, rename, unlink, writeFile, open } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
+import { isSafeYamlIdentifier } from "./validate.ts";
 
 const SPEC_FILENAME = "sidecar-spec.json";
 const SCHEMA_VERSION = 2;
@@ -150,6 +151,32 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
     if (typeof obj.externalNetwork !== "string" || !/^[a-zA-Z0-9_-]+$/.test(obj.externalNetwork) || obj.externalNetwork.length > 128) {
       throw new SidecarSpecError(
         `sidecar spec 'externalNetwork' must be Docker-safe if present, got ${JSON.stringify(obj.externalNetwork)}`,
+        "spec-invalid",
+      );
+    }
+  }
+
+  // #179: Alias identity is an atomic pair.  A persisted alias without its
+  // generation (or vice versa) would make detach/quarantine accounting
+  // ambiguous, so reject it before anything reaches compose rendering.
+  const hasNetworkAlias = obj.networkAlias !== undefined;
+  const hasAliasGeneration = obj.aliasGeneration !== undefined;
+  if (hasNetworkAlias !== hasAliasGeneration) {
+    throw new SidecarSpecError(
+      "sidecar spec 'networkAlias' and 'aliasGeneration' must be provided together",
+      "spec-invalid",
+    );
+  }
+  if (hasNetworkAlias) {
+    if (typeof obj.networkAlias !== "string" || !isSafeYamlIdentifier(obj.networkAlias)) {
+      throw new SidecarSpecError(
+        `sidecar spec 'networkAlias' must be safe for YAML interpolation (lowercase alphanumeric start; lowercase alphanumeric/dash/underscore, max 63), got ${JSON.stringify(obj.networkAlias)}`,
+        "spec-invalid",
+      );
+    }
+    if (typeof obj.aliasGeneration !== "number" || !Number.isSafeInteger(obj.aliasGeneration) || obj.aliasGeneration < 1) {
+      throw new SidecarSpecError(
+        `sidecar spec 'aliasGeneration' must be a positive safe integer, got ${JSON.stringify(obj.aliasGeneration)}`,
         "spec-invalid",
       );
     }
