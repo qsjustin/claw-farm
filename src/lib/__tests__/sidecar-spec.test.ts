@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,7 +19,7 @@ import {
 } from "../sidecar-spec.ts";
 
 const validSpec: SidecarSpec = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   enabled: true,
   serviceName: "weixin-sidecar",
   envFile: ".env.weixin",
@@ -50,7 +50,7 @@ describe("sidecar-spec persistence", () => {
     const read = await readSidecarSpec(tempDir);
 
     expect(read).not.toBeNull();
-    expect(read!.schemaVersion).toBe(1);
+    expect(read!.schemaVersion).toBe(2);
     expect(read!.enabled).toBe(true);
     expect(read!.serviceName).toBe("weixin-sidecar");
     expect(read!.envFile).toBe(".env.weixin");
@@ -75,7 +75,7 @@ describe("sidecar-spec persistence", () => {
   });
 
   it("throws for wrong schemaVersion", async () => {
-    const badSpec = { ...validSpec, schemaVersion: 2 };
+    const badSpec = { ...validSpec, schemaVersion: 1 };
     expect(writeSidecarSpec(tempDir, badSpec)).rejects.toThrow(SidecarSpecError);
   });
 
@@ -172,13 +172,28 @@ describe("sidecar-spec persistence", () => {
   });
 
   it("rejects unsafe aliases and invalid alias generations", async () => {
+    for (const networkAlias of ["alias;injection", "Alias", "-alias", "_alias"]) {
+      await expect(writeSidecarSpec(tempDir, {
+        ...validSpec,
+        networkAlias,
+        aliasGeneration: 1,
+      })).rejects.toThrow(SidecarSpecError);
+    }
     await expect(writeSidecarSpec(tempDir, {
       ...validSpec,
-      networkAlias: "alias;injection",
+      networkAlias: "clawbay-sidecar-deadbeef0000",
+      aliasGeneration: 0,
+    })).rejects.toThrow(SidecarSpecError);
+  });
+
+  it("rejects incomplete alias identities", async () => {
+    await expect(writeSidecarSpec(tempDir, {
+      ...validSpec,
+      networkAlias: "clawbay-sidecar-deadbeef0000",
     })).rejects.toThrow(SidecarSpecError);
     await expect(writeSidecarSpec(tempDir, {
       ...validSpec,
-      aliasGeneration: 0,
+      aliasGeneration: 1,
     })).rejects.toThrow(SidecarSpecError);
   });
 
@@ -200,7 +215,7 @@ describe("sidecar-spec persistence", () => {
     // Final state should be one of the 5, and must be valid
     const read = await readSidecarSpec(tempDir);
     expect(read).not.toBeNull();
-    expect(read!.schemaVersion).toBe(1);
+    expect(read!.schemaVersion).toBe(2);
     expect(read!.serviceName).toBe("weixin-sidecar");
   });
 });
@@ -212,11 +227,86 @@ describe("sidecar-spec persistence", () => {
 // (for docker compose commands) and mocked fetch (for token rotation).
 // They verify the actual code path, not simulated logic.
 
-import { upInstance } from "../api.ts";
+import { spawn, upInstance } from "../api.ts";
 import { writeSidecarSpec as _writeSpec2 } from "../sidecar-spec.ts";
-import { addProject, addInstance, removeInstance } from "../registry.ts";
+import { addProject, addInstance, getProject, loadRegistry, saveRegistry } from "../registry.ts";
 import { ensureInstanceDirs } from "../instance.ts";
-import { mkdir, writeFile as fsWriteFile } from "node:fs/promises";
+import { writeProjectConfig } from "../config.ts";
+import { writeFile as fsWriteFile } from "node:fs/promises";
+
+describe("spawn sidecar bootstrap", () => {
+  let tempDir: string;
+  let projectDir: string;
+  let registryDir: string;
+  let originalRegistryDir: string | undefined;
+  let originalAttachNetworks: string | undefined;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "claw-farm-spawn-sidecar-"));
+    projectDir = join(tempDir, "project");
+    registryDir = join(tempDir, "registry");
+    await mkdir(projectDir, { recursive: true });
+
+    originalRegistryDir = process.env.CLAW_FARM_REGISTRY_DIR;
+    originalAttachNetworks = process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS;
+    process.env.CLAW_FARM_REGISTRY_DIR = registryDir;
+    process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS = "clawbay_test";
+
+    await addProject("spawn-sidecar", projectDir, "builtin", "hermes");
+    const registry = await loadRegistry();
+    registry.projects["spawn-sidecar"].multiInstance = true;
+    await saveRegistry(registry);
+    const project = await getProject("spawn-sidecar");
+    if (!project) throw new Error("test project was not added to the registry");
+    await writeProjectConfig(projectDir, {
+      name: "spawn-sidecar",
+      processor: "builtin",
+      port: project.port,
+      createdAt: project.createdAt,
+      multiInstance: true,
+      runtime: "hermes",
+      proxyMode: "none",
+    });
+
+    globalThis.fetch = ((_url: string, _options?: RequestInit) => Promise.resolve(new Response(
+      JSON.stringify({ ok: true, tokenLast4: "test" }),
+      { status: 200 },
+    ))) as typeof fetch;
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    if (originalRegistryDir === undefined) delete process.env.CLAW_FARM_REGISTRY_DIR;
+    else process.env.CLAW_FARM_REGISTRY_DIR = originalRegistryDir;
+    if (originalAttachNetworks === undefined) delete process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS;
+    else process.env.CLAW_FARM_RUNTIME_ATTACH_NETWORKS = originalAttachNetworks;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("persists the supported v1 bootstrap record before bridge identity is available", async () => {
+    await spawn({
+      project: "spawn-sidecar",
+      userId: "user-1",
+      autoStart: false,
+      quiet: true,
+      enableWeixinSidecar: true,
+      managedInstanceId: "sri-test-1",
+      clawBayApiUrl: "http://claw-bay-api:3001",
+      clawBayAdminToken: "test-admin-token",
+    });
+
+    const spec = JSON.parse(await Bun.file(join(
+      projectDir,
+      "instances",
+      "user-1",
+      "sidecar-spec.json",
+    )).text()) as SidecarSpec;
+    expect(spec.schemaVersion).toBe(1);
+    expect(spec.managedInstanceId).toBe("sri-test-1");
+    expect(spec.desiredAttachmentState).toBe("attached");
+  });
+});
 
 describe("upInstance behavioral — sidecar spec integration", () => {
   let tmpProjectDir: string;
@@ -272,7 +362,7 @@ describe("upInstance behavioral — sidecar spec integration", () => {
     // Write sidecar spec
     const instDir = join(tmpProjectDir, "instances", userId);
     await _writeSpec2(instDir, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       enabled: true,
       serviceName: "weixin-sidecar",
       envFile: ".env.weixin",
@@ -364,7 +454,7 @@ describe("upInstance behavioral — sidecar spec integration", () => {
   it("enabled spec + missing rotation inputs → throws, no compose commands", async () => {
     const instDir = join(tmpProjectDir, "instances", userId);
     await _writeSpec2(instDir, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       enabled: true,
       serviceName: "weixin-sidecar",
       envFile: ".env.weixin",
@@ -400,7 +490,7 @@ describe("upInstance behavioral — sidecar spec integration", () => {
   it("lifecycle cannot override canonical spec — upInstance only accepts rotation creds", async () => {
     const instDir = join(tmpProjectDir, "instances", userId);
     await _writeSpec2(instDir, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       enabled: true,
       serviceName: "weixin-sidecar",
       envFile: ".env.weixin",
@@ -454,7 +544,7 @@ describe("upInstance behavioral — sidecar spec integration", () => {
   it("rotate fetch failure → throws, no compose start/up command", async () => {
     const instDir = join(tmpProjectDir, "instances", userId);
     await _writeSpec2(instDir, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       enabled: true,
       serviceName: "weixin-sidecar",
       envFile: ".env.weixin",
