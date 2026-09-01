@@ -35,6 +35,9 @@ import {
 import { resolveWorkspaceLayout } from "./workspace-layout.ts";
 
 import { instanceComposeTemplate, buildInstanceCompose } from "../templates/docker-compose.instance.yml.ts";
+import type { WeixinRuntimeProfile } from "./weixin-runtime-profile.ts";
+import { ensureOpenClawGatewayToken, writeInstanceRuntimeEnv } from "./instance-runtime-secret.ts";
+import { resolveGatewayBindingComposeGuard } from "./gateway-binding-guard.ts";
 import { fillUserTemplate } from "../templates/USER.template.md.ts";
 import {
   dockerNetworkConnect,
@@ -511,9 +514,17 @@ export async function writeInstanceCompose(options: {
   externalNetwork?: string;
   /** #179: Farm-authoritative DNS alias on the external network. */
   networkAlias?: string;
+  /** Validated optional gateway-binding image pair. */
+  weixinRuntimeProfile?: WeixinRuntimeProfile;
 }): Promise<string> {
   const instanceHostDir = resolveDockerHostInstanceDir(options.instDir);
   const enableWeixin = options.enableWeixinSidecar ?? false;
+  if (options.runtimeType === "openclaw") {
+    await ensureOpenClawGatewayToken(options.instDir);
+  }
+  const weixinRuntimeProfile = enableWeixin && options.runtimeType === "openclaw"
+    ? options.weixinRuntimeProfile
+    : undefined;
 
   let composeContent: string;
   if (enableWeixin && options.runtimeType === "openclaw") {
@@ -529,6 +540,7 @@ export async function writeInstanceCompose(options: {
       weixinEnvFile: options.weixinEnvFile,
       externalNetwork: options.externalNetwork,
       networkAlias: options.networkAlias,
+      weixinRuntimeProfile,
     });
   } else if (options.runtimeType === "openclaw") {
     composeContent = instanceComposeTemplate(
@@ -713,7 +725,7 @@ export async function spawn(options: {
     const envContent = env
       ? Object.entries(env).map(([k, v]) => validateEnvEntry(k, v)).join("\n") + "\n"
       : "";
-    await Bun.write(join(instDir, "instance.env"), envContent);
+    await writeInstanceRuntimeEnv(instDir, envContent);
 
     // Write .env.model for per-instance proxy config (api-proxy reads this)
     // Only write if llm+apiKey provided, otherwise use default empty template
@@ -758,6 +770,7 @@ export async function spawn(options: {
         port: 8787,
         externalNetwork,
         composeProject: `${projectName}-${userId}`,
+        gatewayBinding: false,
         managedInstanceId: managedInstanceId ?? "migrated",
         bindingId: "legacy-binding",
         operationId: "legacy-bootstrap",
@@ -992,6 +1005,7 @@ export async function despawn(
   const connectContainer = (proxyMode === "shared" && runtimeType !== "openclaw")
     ? { container: `${projectName}-api-proxy`, network: `${composeProject}_instance-net` }
     : undefined;
+  const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
 
   // #159B: Revoke weixin sidecar tokens before tearing down (fail-closed)
   if (options?.managedInstanceId && options?.clawBayApiUrl && options?.clawBayAdminToken) {
@@ -1020,6 +1034,7 @@ export async function despawn(
       projectName: composeProject,
       connectContainer,
       quiet: options?.quiet,
+      allowOverride: composeGuard.allowOverride,
     });
   } catch (err) {
     if (!options?.quiet) {
@@ -1053,11 +1068,13 @@ export async function stopInstance(
 ): Promise<void> {
   const { projectName, projectDir, composePath, composeProject } =
     await resolveInstance(project, userId);
+  const composeGuard = await resolveGatewayBindingComposeGuard(instanceDir(projectDir, userId));
 
   await runCompose(projectDir, "stop", {
     composePath,
     projectName: composeProject,
     quiet: options?.quiet,
+    allowOverride: composeGuard.allowOverride,
   });
   await updateRuntimeInstanceStatus(projectName, userId, "stopped", { ready: false });
 }
@@ -1075,12 +1092,15 @@ export async function startInstance(
     await resolveInstance(project, userId);
   const config = await readProjectConfig(projectDir);
   const { runtimeType } = resolveRuntimeConfig(config, entry);
-  await ensureRuntimeContainerWritable({ instDir: instanceDir(projectDir, userId), runtimeType });
+  const instDir = instanceDir(projectDir, userId);
+  await ensureRuntimeContainerWritable({ instDir, runtimeType });
+  const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
 
   await runCompose(projectDir, "start", {
     composePath,
     projectName: composeProject,
     quiet: options?.quiet,
+    allowOverride: composeGuard.allowOverride,
   });
   await connectRuntimeAttachNetworks({
     projectName,
@@ -1114,12 +1134,17 @@ export async function upInstance(
   // spawn() writes spec; attach/detach/backfill is Slice 2 control-plane operation.
   const sidecarSpec = await readSidecarSpec(instDir);
   const enableWeixin = sidecarSpec?.enabled ?? false;
+  const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
+  const allowComposeOverride = composeGuard.allowOverride;
 
   // Port/env/network come exclusively from the canonical spec
   const effectiveWeixinSidecarPort = sidecarSpec?.port ?? 8787;
   const effectiveWeixinEnvFile = sidecarSpec?.envFile ?? ".env.weixin";
   const externalNetwork = enableWeixin
     ? (sidecarSpec?.externalNetwork ?? resolveExternalNetwork())
+    : undefined;
+  const weixinRuntimeProfile: WeixinRuntimeProfile | undefined = sidecarSpec?.gatewayBinding === true
+    ? composeGuard.runtimeProfile
     : undefined;
 
   // #171: Fail-closed — if sidecar is enabled (from spec or explicit),
@@ -1154,6 +1179,7 @@ export async function upInstance(
     weixinEnvFile: effectiveWeixinEnvFile,
     externalNetwork,
     networkAlias: sidecarSpec?.networkAlias,
+    weixinRuntimeProfile,
   });
 
   // #159B/#171: Rotate weixin sidecar token on rebuild/restore (fail-closed).
@@ -1207,6 +1233,7 @@ export async function upInstance(
       composePath,
       projectName: composeProject,
       quiet: options?.quiet,
+      allowOverride: allowComposeOverride,
     });
   } else {
     await runCompose(projectDir, "up", {
@@ -1214,6 +1241,7 @@ export async function upInstance(
       projectName: composeProject,
       connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
       quiet: options?.quiet,
+      allowOverride: allowComposeOverride,
     });
   }
   await connectRuntimeAttachNetworks({
@@ -1241,12 +1269,14 @@ export async function downInstance(
 
   const config = await readProjectConfig(projectDir);
   const { runtimeType, proxyMode } = resolveRuntimeConfig(config, entry);
+  const composeGuard = await resolveGatewayBindingComposeGuard(instanceDir(projectDir, userId));
 
   await runCompose(projectDir, "down", {
     composePath,
     projectName: composeProject,
     connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
     quiet: options?.quiet,
+    allowOverride: composeGuard.allowOverride,
   });
   await updateRuntimeInstanceStatus(projectName, userId, "stopped", { ready: false });
 }

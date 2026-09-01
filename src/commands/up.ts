@@ -5,6 +5,7 @@ import { runCompose, sharedProxyConnect, COMPOSE_FILENAME } from "../lib/compose
 import { snapshotWorkspace } from "../lib/raw-collector.ts";
 import { instanceDir } from "../lib/instance.ts";
 import { updateRuntimeInstanceStatus } from "../lib/runtime-instance-registry.ts";
+import { resolveGatewayBindingComposeGuard } from "../lib/gateway-binding-guard.ts";
 import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
 
 /** Start shared proxy compose if needed. */
@@ -54,10 +55,12 @@ export async function upCommand(args: string[]): Promise<void> {
           console.log(`\n▶ Starting ${name}/${uid}...`);
           const instDir = instanceDir(project.path, uid);
           const composePath = join(instDir, COMPOSE_FILENAME);
+          const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
           await runCompose(project.path, "up", {
             composePath,
             projectName: `${name}-${uid}`,
             connectContainer: sharedProxyConnect(name, uid, runtimeType, proxyMode),
+            allowOverride: composeGuard.allowOverride,
           });
           await updateRuntimeInstanceStatus(name, uid, "running", { ready: true });
         }));
@@ -84,12 +87,14 @@ export async function upCommand(args: string[]): Promise<void> {
 
     const instDir = instanceDir(entry.path, userId);
     const composePath = join(instDir, COMPOSE_FILENAME);
+    const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
 
     console.log(`\n▶ Starting ${projectName}/${userId}...`);
     await runCompose(entry.path, "up", {
       composePath,
       projectName: `${projectName}-${userId}`,
       connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
+      allowOverride: composeGuard.allowOverride,
     });
     await updateRuntimeInstanceStatus(projectName, userId, "running", { ready: true });
     console.log(`\n✅ ${projectName}/${userId} is running at http://localhost:${instance.port}`);
@@ -110,10 +115,12 @@ export async function upCommand(args: string[]): Promise<void> {
       console.log(`\n▶ Starting ${projectName}/${uid}...`);
       const instDir = instanceDir(entry.path, uid);
       const composePath = join(instDir, COMPOSE_FILENAME);
+      const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
       await runCompose(entry.path, "up", {
         composePath,
         projectName: `${projectName}-${uid}`,
         connectContainer: sharedProxyConnect(projectName, uid, runtimeType, proxyMode),
+        allowOverride: composeGuard.allowOverride,
       });
       await updateRuntimeInstanceStatus(projectName, uid, "running", { ready: true });
     }));

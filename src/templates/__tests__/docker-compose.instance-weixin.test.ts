@@ -19,6 +19,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildInstanceCompose, instanceComposeTemplate } from "../docker-compose.instance.yml.ts";
 
+function serviceStart(compose: string, serviceName: string): number {
+  const index = compose.indexOf(`\n  ${serviceName}:`);
+  if (index < 0) throw new Error(`service ${serviceName} not found`);
+  return index + 1;
+}
+
 describe("Per-instance weixin sidecar compose (Phase 2)", () => {
   const baseOpts = {
     projectName: "clawbay-openclaw",
@@ -26,6 +32,11 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
     port: 18789,
     proxyMode: "none" as const,
     instanceHostDir: "/runtime/instance",
+  };
+  const gatewayBindingProfile = {
+    gatewayBinding: true,
+    sidecarImage: "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    gatewayImage: "registry.example.test/openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   };
 
   describe("enableWeixinSidecar = false (default, backward compatible)", () => {
@@ -39,7 +50,8 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       const compose = instanceComposeTemplate("clawbay-openclaw", "user-1", 18789, "none", "/runtime/instance");
       expect(compose).toContain("openclaw-gateway:");
       expect(compose).toContain("container_name: clawbay-openclaw-user-1-openclaw");
-      expect(compose).toContain("OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?");
+      expect(compose).toContain("- ./instance.env");
+      expect(compose).not.toMatch(/^\s+OPENCLAW_GATEWAY_TOKEN:/m);
     });
   });
 
@@ -54,9 +66,33 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
       // Per-instance compose cannot use local build context (not accessible from instance dir)
       // Must use the pre-built sidecar image from the workspace compose
-      expect(compose).toContain("image: ${WEIXIN_SIDECAR_IMAGE:-clawbay-bay-sidecar-weixin:latest}");
+      expect(compose).toContain("image: clawbay-bay-sidecar-weixin:latest");
       // Must NOT use the local build context (which is unreachable from per-instance compose)
       expect(compose).not.toContain("build: ../../claw-sidecar-weixin");
+    });
+
+    it("renders a validated gateway-binding image pair without Compose interpolation", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        enableWeixinSidecar: true,
+        weixinRuntimeProfile: gatewayBindingProfile,
+      });
+      expect(compose).toContain(`image: ${gatewayBindingProfile.sidecarImage}`);
+      expect(compose).toContain(`image: ${gatewayBindingProfile.gatewayImage}`);
+      expect(compose).toContain("WEIXIN_OPENCLAW_RUNTIME_ROLE: gateway");
+      expect(compose).not.toContain("${WEIXIN_SIDECAR_IMAGE");
+      expect(compose).not.toContain("${OPENCLAW_GATEWAY_IMAGE");
+    });
+
+    it("rejects a programmatic gateway-binding profile with a mutable image", () => {
+      expect(() => buildInstanceCompose({
+        ...baseOpts,
+        enableWeixinSidecar: true,
+        weixinRuntimeProfile: {
+          ...gatewayBindingProfile,
+          gatewayImage: "registry.example.test/openclaw:latest",
+        },
+      })).toThrow("validated sidecar/gateway image pair");
     });
 
     it("consumes token via env_file ONLY (no environment override)", () => {
@@ -74,10 +110,11 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
     it("keeps iLink and gateway credentials under the per-instance env files", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
       const start = compose.indexOf("weixin-sidecar:");
-      const end = compose.indexOf("openclaw-gateway:");
+      const end = serviceStart(compose, "openclaw-gateway");
       const weixinSection = compose.slice(start, end);
       expect(weixinSection).toContain("- ./.env.weixin");
       expect(weixinSection).toContain("- ./instance.env");
+      expect(weixinSection).not.toContain("- ./openclaw-gateway.env");
       expect(weixinSection).not.toMatch(/^\s+GATEWAY_INTERNAL_TOKEN:/m);
       expect(weixinSection).not.toMatch(/^\s+WEIXIN_ENABLE_ILINK_TRANSPORT:/m);
     });
@@ -97,7 +134,7 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       });
       // Slice only the weixin-sidecar section (up to the next service)
       const start = compose.indexOf("weixin-sidecar:");
-      const end = compose.indexOf("openclaw-gateway:");
+      const end = serviceStart(compose, "openclaw-gateway");
       const weixinSection = compose.slice(start, end);
       // Sidecar uses expose (container-internal) instead of ports (host-published)
       expect(weixinSection).toContain("expose:");
@@ -120,6 +157,26 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(compose).not.toContain("host.docker.internal");
     });
 
+    it("connects to its validated paired OpenClaw gateway only through sidecar-net", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        enableWeixinSidecar: true,
+        weixinRuntimeProfile: gatewayBindingProfile,
+      });
+      const weixinSection = compose.slice(
+        compose.indexOf("weixin-sidecar:"),
+        serviceStart(compose, "openclaw-gateway"),
+      );
+      const gatewaySection = compose.slice(serviceStart(compose, "openclaw-gateway"));
+      expect(weixinSection).toContain("OPENCLAW_GATEWAY_URL: ws://openclaw-gateway:18789");
+      expect(weixinSection).toContain('WEIXIN_ENABLE_OPENCLAW_GATEWAY_BINDING: "true"');
+      expect(weixinSection).not.toContain("${OPENCLAW_GATEWAY_URL");
+      expect(weixinSection).not.toMatch(/^\s+OPENCLAW_GATEWAY_TOKEN:/m);
+      expect(weixinSection).toContain("- ./openclaw-gateway.env");
+      expect(gatewaySection).toContain("networks:\n      - sidecar-net");
+      expect(gatewaySection).not.toContain("ports:\n      - \"0.0.0.0:");
+    });
+
     it("has a healthcheck on /healthz for readiness verification", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
       expect(compose).toContain("healthcheck:");
@@ -135,7 +192,7 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       const compose = buildInstanceCompose({ ...baseOpts, enableWeixinSidecar: true });
       // Slice only the weixin-sidecar section
       const start = compose.indexOf("weixin-sidecar:");
-      const end = compose.indexOf("openclaw-gateway:");
+      const end = serviceStart(compose, "openclaw-gateway");
       const weixinSection = compose.slice(start, end);
       expect(weixinSection).toContain("no-new-privileges:true");
       expect(weixinSection).toContain("read_only: true");
@@ -192,6 +249,17 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(compose).toContain("openclaw-gateway:");
     });
 
+    it("keeps the gateway on both proxy-net and sidecar-net for a gateway-binding profile", () => {
+      const compose = buildInstanceCompose({
+        ...baseOpts,
+        proxyMode: "per-instance",
+        enableWeixinSidecar: true,
+        weixinRuntimeProfile: gatewayBindingProfile,
+      });
+      const gatewaySection = compose.slice(serviceStart(compose, "openclaw-gateway"));
+      expect(gatewaySection).toContain("networks:\n      - proxy-net\n      - sidecar-net");
+    });
+
     it("weixin-sidecar does not depend on api-proxy (separate concerns)", () => {
       const compose = buildInstanceCompose({
         ...baseOpts,
@@ -200,7 +268,7 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       });
       const weixinSection = compose.slice(
         compose.indexOf("weixin-sidecar:"),
-        compose.indexOf("openclaw-gateway:"),
+        serviceStart(compose, "openclaw-gateway"),
       );
       expect(weixinSection).not.toContain("depends_on:");
     });
@@ -237,13 +305,14 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       writeFileSync(join(tmpDir2, ".env"), "");
       writeFileSync(join(tmpDir2, ".env.model"), "");
       writeFileSync(join(tmpDir2, "instance.env"), "");
+      writeFileSync(join(tmpDir2, "openclaw-gateway.env"), "OPENCLAW_GATEWAY_TOKEN=test-only\n");
       writeFileSync(join(tmpDir2, ".env.weixin"), "WEIXIN_BINDING_TOKEN=test\n");
       writeFileSync(join(tmpDir2, "instance.env"), "CLAW_BAY_ADMIN_TOKEN=test\n");
 
       const proc = Bun.spawn(["docker", "compose", "-f", tmpFile, "config"], {
         stdout: "pipe",
         stderr: "pipe",
-        env: { ...process.env, OPENCLAW_GATEWAY_TOKEN: "test", GATEWAY_INTERNAL_TOKEN: "test", HOME: process.env.HOME ?? "/" },
+        env: { ...process.env, GATEWAY_INTERNAL_TOKEN: "test", HOME: process.env.HOME ?? "/" },
         cwd: tmpDir2,
       });
       const exitCode = await proc.exited;
@@ -272,12 +341,13 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       writeFileSync(join(tmpDir2, ".env"), "");
       writeFileSync(join(tmpDir2, ".env.model"), "");
       writeFileSync(join(tmpDir2, "instance.env"), "");
+      writeFileSync(join(tmpDir2, "openclaw-gateway.env"), "OPENCLAW_GATEWAY_TOKEN=test-only\n");
       writeFileSync(join(tmpDir2, ".env.weixin"), "WEIXIN_BINDING_TOKEN=test\n");
 
       const proc = Bun.spawn(["docker", "compose", "-f", tmpFile, "config"], {
         stdout: "pipe",
         stderr: "pipe",
-        env: { ...process.env, OPENCLAW_GATEWAY_TOKEN: "test", GATEWAY_INTERNAL_TOKEN: "test", HOME: process.env.HOME ?? "/" },
+        env: { ...process.env, GATEWAY_INTERNAL_TOKEN: "test", HOME: process.env.HOME ?? "/" },
         cwd: tmpDir2,
       });
       const exitCode = await proc.exited;
@@ -315,7 +385,7 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
       expect(compose).toContain("clawbay_default:");
       expect(compose).toContain("external: true");
       // Sidecar service joins both sidecar-net and the external network
-      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"), compose.indexOf("openclaw-gateway:"));
+      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"), serviceStart(compose, "openclaw-gateway"));
       expect(weixinSection).toContain("- sidecar-net");
       expect(weixinSection).toContain("- clawbay_default");
     });
@@ -327,7 +397,7 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
         externalNetwork: "clawbay_default",
         networkAlias: "clawbay-sidecar-deadbeef0000",
       });
-      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"), compose.indexOf("openclaw-gateway:"));
+      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"), serviceStart(compose, "openclaw-gateway"));
       expect(weixinSection).toContain("sidecar-net:");
       expect(weixinSection).toContain("clawbay_default:\n        aliases:\n          - clawbay-sidecar-deadbeef0000");
       expect(compose).toContain("clawbay_default:\n    external: true");
@@ -347,7 +417,7 @@ describe("Per-instance weixin sidecar compose (Phase 2)", () => {
         enableWeixinSidecar: true,
       });
       expect(compose).not.toContain("external: true");
-      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"), compose.indexOf("openclaw-gateway:"));
+      const weixinSection = compose.slice(compose.indexOf("weixin-sidecar:"), serviceStart(compose, "openclaw-gateway"));
       expect(weixinSection).toContain("- sidecar-net");
       expect(weixinSection).not.toContain("clawbay_default");
     });

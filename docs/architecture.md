@@ -100,6 +100,44 @@ my-agent/
 
 ## 3. Container Topology
 
+### ClawBay per-instance Weixin runtime
+
+When ClawBay enables a Weixin sidecar for an OpenClaw instance, Farm renders
+three separate concerns instead of a shared channel container:
+
+```text
+                    instance-private sidecar-net
+  weixin-sidecar  <------------------------------>  openclaw-gateway
+        |
+        | authenticated control-plane calls only
+        v
+  ClawBay external runtime network (DNS alias + Bay API / gateway)
+```
+
+- `weixin-sidecar` and `openclaw-gateway` share only the instance-private
+  `sidecar-net`. The existing `127.0.0.1:<instance-port>` gateway binding is
+  a separate loopback-only administrator endpoint; it is neither a public
+  listener nor the sidecar-to-gateway transport.
+- The optional external runtime network is for the Farm-signed alias and
+  ClawBay control-plane reachability. It is not a substitute for the private
+  sidecar network.
+- Gateway binding is opt-in through `CLAW_FARM_WEIXIN_GATEWAY_BINDING=true`.
+  It additionally requires `CLAW_FARM_WEIXIN_SIDECAR_IMAGE` and
+  `CLAW_FARM_OPENCLAW_GATEWAY_IMAGE`, both exact `@sha256` image references.
+  Farm writes that compatibility-tested pair into the generated instance
+  Compose; it does not interpolate arbitrary runtime image values at Compose
+  execution time.
+- Farm supplies the gateway URL internally as `ws://openclaw-gateway:18789`.
+  Farm generates the per-instance gateway token once and stores it in the
+  owner-only `openclaw-gateway.env`. The ordinary Weixin sidecar does not read
+  that file; only the verified gateway-binding pair does. It is never
+  accepted from a user-facing console or put on a CLI argument. Operators must
+  not collect `docker compose config` output as evidence because Compose can
+  expand env-file values.
+- `WEIXIN_ENABLE_OPENCLAW_GATEWAY_BINDING=true` is valid only for such a
+  verified image pair. Otherwise the sidecar remains fail-closed and reports
+  `configuration_required` rather than accepting traffic without a channel.
+
 ### Local Development (default)
 
 Single network, no nginx. Both containers share `proxy-net` (non-internal)

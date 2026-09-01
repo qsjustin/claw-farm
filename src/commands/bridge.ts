@@ -18,6 +18,7 @@ import {
   type AliasReservation,
 } from "../lib/alias-registry.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
+import { resolveWeixinRuntimeProfile, type WeixinRuntimeProfile } from "../lib/weixin-runtime-profile.ts";
 import { exportCommand } from "./export.ts";
 import { importCommand } from "./import.ts";
 import { instanceDir, templateDir } from "../lib/instance.ts";
@@ -1173,6 +1174,25 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   const generation = eatv! + 1;
   const sri = managedInstanceId;
   const externalNetwork = spec?.externalNetwork ?? resolveExternalNetwork();
+  let weixinRuntimeProfile: WeixinRuntimeProfile | undefined;
+  try {
+    weixinRuntimeProfile = context.runtimeType === "openclaw"
+      ? resolveWeixinRuntimeProfile()
+      : undefined;
+  } catch {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: "Gateway-binding runtime profile is incomplete or not digest-pinned.",
+      errorCode: "runtime-command-failed",
+      retryable: false,
+      project: context.resolved.name,
+      userId,
+    });
+  }
+  const replacedServiceNames = weixinRuntimeProfile?.gatewayBinding
+    ? ["openclaw-gateway", "weixin-sidecar"]
+    : ["weixin-sidecar"];
+  const allowComposeOverride = weixinRuntimeProfile?.gatewayBinding !== true;
   const assertionNow = new Date();
   const validitySeconds = 3600;
   const assertionExpiresAt = new Date(assertionNow.getTime() + validitySeconds * 1000).toISOString();
@@ -1231,6 +1251,9 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
         externalNetwork,
         networkAlias,
         aliasGeneration: generation,
+        gatewayBinding: weixinRuntimeProfile?.gatewayBinding === true,
+        gatewayBindingSidecarImage: weixinRuntimeProfile?.sidecarImage,
+        gatewayBindingGatewayImage: weixinRuntimeProfile?.gatewayImage,
         composeProject,
         managedInstanceId: asString(payload.managedInstanceId) ?? "",
         bindingId,
@@ -1242,6 +1265,8 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       },
       serviceName,
       composeProject,
+      serviceNames: replacedServiceNames,
+      allowComposeOverride,
     },
     async () => {
       // #171 Phase 2A-2: Credential validation — fail-closed before any mutations
@@ -1320,13 +1345,19 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
           enableWeixinSidecar: true,
           externalNetwork,
           networkAlias,
+          weixinRuntimeProfile,
         });
 
-        // Side effect 3: Compose up sidecar
-        await runComposeService(instDir, "up", serviceName, {
-          quiet: true,
-          projectName: composeProject,
-        });
+        // Side effect 3: Replace the complete paired workload. When a
+        // gateway-binding profile is selected, recreating only the sidecar
+        // would leave the old gateway image and plugin state running.
+        for (const targetService of replacedServiceNames) {
+          await runComposeService(instDir, "up", targetService, {
+            quiet: true,
+            projectName: composeProject,
+            allowOverride: allowComposeOverride,
+          });
+        }
 
         // Side effect 4: Health check. Docker health checks normally begin
         // after the service has had time to boot (the generated sidecar uses a
@@ -1674,6 +1705,10 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
 
   const serviceName = "weixin-sidecar";
   const instance = await getInstance(context.resolved.name, userId);
+  const replacedServiceNames = spec.gatewayBinding === true && context.runtimeType === "openclaw"
+    ? ["openclaw-gateway", "weixin-sidecar"]
+    : ["weixin-sidecar"];
+  const allowComposeOverride = spec.gatewayBinding !== true;
 
   const txResult = await executeWorkloadTransaction(
     instDir,
@@ -1689,6 +1724,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         externalNetwork: spec.externalNetwork,
         networkAlias: spec.networkAlias,
         aliasGeneration: spec.aliasGeneration,
+        gatewayBinding: false,
         composeProject,
         managedInstanceId: asString(payload.managedInstanceId) ?? "",
         bindingId,
@@ -1700,6 +1736,8 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
       },
       serviceName,
       composeProject,
+      serviceNames: replacedServiceNames,
+      allowComposeOverride,
     },
     async () => {
       // #171 Phase 2A-2: Credential validation — fail-closed before any mutations.
@@ -1717,6 +1755,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         await runComposeService(instDir, "stop", serviceName, {
           quiet: true,
           projectName: composeProject,
+          allowOverride: allowComposeOverride,
         });
       } catch (error) {
         stopErrors.push(error instanceof Error ? error.message : String(error));
@@ -1727,6 +1766,7 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         await runComposeService(instDir, "rm", serviceName, {
           quiet: true,
           projectName: composeProject,
+          allowOverride: allowComposeOverride,
         });
       } catch (error) {
         stopErrors.push(error instanceof Error ? error.message : String(error));
@@ -1763,6 +1803,48 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         throw new Error(`Cannot verify sidecar absence: ${err instanceof Error ? err.message : err}`);
       }
 
+      // The gateway-binding profile places the paired gateway on sidecar-net
+      // too. Remove it before deleting that network, then rebuild the stock
+      // gateway from the detached compose below. Otherwise Docker correctly
+      // refuses network deletion because the old gateway remains an endpoint.
+      if (replacedServiceNames.includes("openclaw-gateway")) {
+        const gatewayErrors: string[] = [];
+        try {
+          await runComposeService(instDir, "stop", "openclaw-gateway", {
+            quiet: true,
+            projectName: composeProject,
+            allowOverride: allowComposeOverride,
+          });
+        } catch (error) {
+          gatewayErrors.push(error instanceof Error ? error.message : String(error));
+        }
+        try {
+          await runComposeService(instDir, "rm", "openclaw-gateway", {
+            quiet: true,
+            projectName: composeProject,
+            allowOverride: allowComposeOverride,
+          });
+        } catch (error) {
+          gatewayErrors.push(error instanceof Error ? error.message : String(error));
+        }
+        if (gatewayErrors.length >= 2) {
+          throw new Error(`Failed to stop and remove paired gateway: ${gatewayErrors.join("; ")}`);
+        }
+        const gatewayContainer = `${composeProject}-openclaw`;
+        const inspectProc = Bun.spawn(
+          ["docker", "inspect", gatewayContainer],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        const gatewayExitCode = await inspectProc.exited;
+        const gatewayStderr = await new Response(inspectProc.stderr).text();
+        if (gatewayExitCode === 0) {
+          throw new Error(`Paired gateway container ${gatewayContainer} still exists after rm`);
+        }
+        if (!gatewayStderr.includes("No such object") && !gatewayStderr.includes("No such container")) {
+          throw new Error(`Docker inspect failed after paired gateway rm: ${gatewayStderr.trim()}`);
+        }
+      }
+
       // `docker compose rm` is deliberately service-scoped and does not
       // remove the private Compose network. It has no remaining members once
       // the sidecar absence check above passes, so remove it before publishing
@@ -1782,6 +1864,17 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
         proxyMode: context.proxyMode,
         enableWeixinSidecar: false,
       });
+
+      // A gateway-binding attach replaced the instance gateway with the paired
+      // image. Recreate it from the detached Compose before committing so the
+      // normal stock runtime is restored instead of leaving image drift.
+      if (replacedServiceNames.includes("openclaw-gateway")) {
+        await runComposeService(instDir, "up", "openclaw-gateway", {
+          quiet: true,
+          projectName: composeProject,
+          allowOverride: allowComposeOverride,
+        });
+      }
     },
     // Post-commit: revoke token via ClawBay authenticated API
     async () => {

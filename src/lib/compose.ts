@@ -13,6 +13,12 @@ export interface ComposeOptions {
   /** Suppress compose output and warnings. */
   quiet?: boolean;
   /**
+   * Whether a sibling docker-compose.openclaw.override.yml may be merged.
+   * Security-sensitive paired runtime operations set this false so an
+   * instance-local override cannot replace the verified image or gateway URL.
+   */
+  allowOverride?: boolean;
+  /**
    * After compose up, connect this container to the compose's network.
    * Used for shared proxy mode: connects the api-proxy to each instance's
    * isolated network (hub-and-spoke topology for cross-tenant isolation).
@@ -56,11 +62,7 @@ export async function runCompose(
 
   const args = [...await dockerComposeCommand(), "-f", composePath];
 
-  // Auto-load override file if it exists (user customizations survive upgrade)
-  const overridePath = composePath.replace(".yml", ".override.yml");
-  if (await fileExists(overridePath)) {
-    args.push("-f", overridePath);
-  }
+  await appendOverrideFile(args, composePath, options);
 
   if (options?.projectName) {
     args.push("-p", options.projectName);
@@ -140,11 +142,7 @@ export async function runComposeService(
 
   const args = [...await dockerComposeCommand(), "-f", composePath];
 
-  // Auto-load override file if it exists
-  const overridePath = composePath.replace(".yml", ".override.yml");
-  if (await fileExists(overridePath)) {
-    args.push("-f", overridePath);
-  }
+  await appendOverrideFile(args, composePath, options);
 
   if (options?.projectName) {
     args.push("-p", options.projectName);
@@ -182,6 +180,19 @@ export async function runComposeService(
       throw new Error(`docker compose ${action} ${serviceName} failed with exit code ${exitCode}`);
     }
   }
+}
+
+async function appendOverrideFile(
+  args: string[],
+  composePath: string,
+  options?: ComposeOptions,
+): Promise<void> {
+  const overridePath = composePath.replace(".yml", ".override.yml");
+  if (!await fileExists(overridePath)) return;
+  if (options?.allowOverride === false) {
+    throw new Error("instance compose override is not permitted for this security-sensitive operation");
+  }
+  args.push("-f", overridePath);
 }
 
 /**

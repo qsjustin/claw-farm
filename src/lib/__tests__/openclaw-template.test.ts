@@ -21,10 +21,13 @@ describe("OpenClaw runtime templates", () => {
     expect(config.gateway.http.endpoints.chatCompletions.enabled).toBe(true);
   });
 
-  it("requires an OpenClaw gateway token in generated instance compose", () => {
+  it("consumes the Farm-managed OpenClaw gateway token from the gateway-only env file", () => {
     const compose = instanceComposeTemplate("clawbay-openclaw", "user-1", 18789, "none", "/runtime/instance");
 
-    expect(compose).toContain("OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?");
+    expect(compose).toContain("- ./instance.env");
+    expect(compose).toContain("- ./openclaw-gateway.env");
+    expect(compose).not.toMatch(/^\s+OPENCLAW_GATEWAY_TOKEN:/m);
+    expect(compose).not.toContain("${OPENCLAW_GATEWAY_TOKEN");
     expect(compose).toContain("/runtime/instance/openclaw:/home/node/.openclaw");
     expect(compose).toContain("- ./.env.model");
   });

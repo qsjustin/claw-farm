@@ -34,6 +34,9 @@ const COMPOSE_FILE = "docker-compose.openclaw.yml";
 export interface WorkloadSnapshot {
   previousSpec: SidecarSpec | null;
   previousCompose: string | null;
+  /** Running state for every service replaced by this transaction. */
+  runningServices?: Record<string, boolean>;
+  /** Compatibility alias for the historical sidecar-only transaction. */
   wasRunning: boolean;
 }
 
@@ -41,6 +44,10 @@ export interface TransactionPlan {
   newSpec: SidecarSpec;
   serviceName: string;
   composeProject: string;
+  /** Ordered services replaced together; gateway precedes sidecar when present. */
+  serviceNames?: readonly string[];
+  /** Reject instance-local Compose override for immutable paired runtime work. */
+  allowComposeOverride?: boolean;
 }
 
 export interface TransactionResult {
@@ -87,6 +94,7 @@ async function writeAtomicSpec(instDir: string, spec: SidecarSpec): Promise<void
 export async function snapshotWorkload(
   instDir: string,
   composeProject: string,
+  serviceNames: readonly string[] = ["weixin-sidecar"],
 ): Promise<WorkloadSnapshot> {
   const previousSpec = await readSidecarSpec(instDir).catch((err) => {
     // If the spec is corrupt or has I/O errors, propagate the failure
@@ -101,16 +109,26 @@ export async function snapshotWorkload(
   });
 
   const previousCompose = await readFileSync(join(instDir, COMPOSE_FILE));
-  const wasRunning = await isServiceRunning(composeProject);
+  const runningServices: Record<string, boolean> = {};
+  for (const serviceName of serviceNames) {
+    runningServices[serviceName] = await isServiceRunning(composeProject, serviceName);
+  }
+  const wasRunning = runningServices["weixin-sidecar"] ?? false;
 
-  return { previousSpec, previousCompose, wasRunning };
+  return { previousSpec, previousCompose, runningServices, wasRunning };
 }
 
 /**
  * Check if sidecar container is running via Docker inspect.
  */
-async function isServiceRunning(composeProject: string): Promise<boolean> {
-  const containerName = `${composeProject}-weixin`;
+function serviceContainerName(composeProject: string, serviceName: string): string {
+  if (serviceName === "weixin-sidecar") return `${composeProject}-weixin`;
+  if (serviceName === "openclaw-gateway") return `${composeProject}-openclaw`;
+  return `${composeProject}-${serviceName}`;
+}
+
+async function isServiceRunning(composeProject: string, serviceName: string): Promise<boolean> {
+  const containerName = serviceContainerName(composeProject, serviceName);
   const proc = Bun.spawn(
     ["docker", "inspect", "--format", "{{.State.Running}}", containerName],
     { stdout: "pipe", stderr: "pipe" },
@@ -142,27 +160,41 @@ export async function compensateTarget(
   instDir: string,
   composeProject: string,
   serviceName: string,
-  deps?: { runComposeService?: typeof import("./compose.ts").runComposeService },
+  serviceNamesOrDeps:
+    | readonly string[]
+    | { runComposeService?: typeof import("./compose.ts").runComposeService } = [serviceName],
+  maybeDeps?: { runComposeService?: typeof import("./compose.ts").runComposeService },
+  composeOptions?: { allowOverride?: boolean },
 ): Promise<RollbackErrorCode[]> {
   const codes: RollbackErrorCode[] = [];
+  // Preserve the historical fourth-argument dependency injection shape for
+  // callers/tests while allowing a multi-service replacement plan.
+  const serviceNames = Array.isArray(serviceNamesOrDeps) ? serviceNamesOrDeps : [serviceName];
+  const deps = Array.isArray(serviceNamesOrDeps)
+    ? maybeDeps
+    : serviceNamesOrDeps as { runComposeService?: typeof import("./compose.ts").runComposeService };
   const runCompose = deps?.runComposeService ?? (await import("./compose.ts")).runComposeService;
 
-  try {
-    await runCompose(instDir, "stop", serviceName, {
-      quiet: true,
-      projectName: composeProject,
-    });
-  } catch {
-    codes.push("target-stop-failed");
-  }
+  for (const targetService of [...serviceNames].reverse()) {
+    try {
+      await runCompose(instDir, "stop", targetService, {
+        quiet: true,
+        projectName: composeProject,
+        allowOverride: composeOptions?.allowOverride,
+      });
+    } catch {
+      codes.push("target-stop-failed");
+    }
 
-  try {
-    await runCompose(instDir, "rm", serviceName, {
-      quiet: true,
-      projectName: composeProject,
-    });
-  } catch {
-    codes.push("target-remove-failed");
+    try {
+      await runCompose(instDir, "rm", targetService, {
+        quiet: true,
+        projectName: composeProject,
+        allowOverride: composeOptions?.allowOverride,
+      });
+    } catch {
+      codes.push("target-remove-failed");
+    }
   }
 
   return codes.slice(0, MAX_ROLLBACK_CODES);
@@ -179,6 +211,8 @@ export async function restorePrevious(
   instDir: string,
   composeProject: string,
   snapshot: WorkloadSnapshot,
+  serviceNames: readonly string[] = ["weixin-sidecar"],
+  composeOptions?: { allowOverride?: boolean },
 ): Promise<RollbackErrorCode[]> {
   const codes: RollbackErrorCode[] = [];
   const composePath = join(instDir, COMPOSE_FILE);
@@ -220,15 +254,21 @@ export async function restorePrevious(
     }
   }
 
-  // Restart previous workload if it was running (service-scoped, not full instance)
-  if (snapshot.wasRunning) {
+  // Restart each previous workload in dependency order (service-scoped, not
+  // a full instance restart). `wasRunning` preserves the old sidecar-only
+  // snapshot shape for callers that predate runningServices.
+  for (const serviceName of serviceNames) {
+    if (!(snapshot.runningServices?.[serviceName] ?? (serviceName === "weixin-sidecar" && snapshot.wasRunning))) {
+      continue;
+    }
     try {
       const { runComposeService } = await import("./compose.ts");
-      await runComposeService(instDir, "up", "weixin-sidecar", {
+      await runComposeService(instDir, "up", serviceName, {
         quiet: true,
         projectName: composeProject,
+        allowOverride: composeOptions?.allowOverride,
       });
-    } catch (err) {
+    } catch {
       codes.push("workload-restore-failed");
     }
   }
@@ -289,15 +329,17 @@ export async function executeWorkloadTransaction(
   compensateOnSuccess?: () => Promise<void>,
 ): Promise<TransactionResult> {
   // 1. Prepare: snapshot previous state (fail-closed)
-  const snapshot = await snapshotWorkload(instDir, composeProject);
+  const serviceNames = plan.serviceNames?.length ? plan.serviceNames : [serviceName];
+  const composeOptions = { allowOverride: plan.allowComposeOverride };
+  const snapshot = await snapshotWorkload(instDir, composeProject, serviceNames);
 
   // 2. Execute side effects
   try {
     await sideEffects();
   } catch (error) {
     // Side effect failed: compensate target + restore previous
-    const compensateErrors = await compensateTarget(instDir, composeProject, serviceName);
-    const restoreErrors = await restorePrevious(instDir, composeProject, snapshot);
+    const compensateErrors = await compensateTarget(instDir, composeProject, serviceName, serviceNames, undefined, composeOptions);
+    const restoreErrors = await restorePrevious(instDir, composeProject, snapshot, serviceNames, composeOptions);
     // Merge with error-attached rollback codes (e.g., revoke-failed, env-restore-failed)
     const VALID_CODES = new Set<string>(ROLLBACK_ERROR_CODES);
     const attachedCodes = ((error as Error & { rollbackErrorCodes?: readonly string[] })?.rollbackErrorCodes ?? [])
@@ -320,8 +362,8 @@ export async function executeWorkloadTransaction(
     await writeSidecarSpec(instDir, plan.newSpec);
   } catch (error) {
     // Commit failed: compensate target + restore previous
-    const compensateErrors = await compensateTarget(instDir, composeProject, serviceName);
-    const restoreErrors = await restorePrevious(instDir, composeProject, snapshot);
+    const compensateErrors = await compensateTarget(instDir, composeProject, serviceName, serviceNames, undefined, composeOptions);
+    const restoreErrors = await restorePrevious(instDir, composeProject, snapshot, serviceNames, composeOptions);
     return {
       committed: false,
       error: `spec commit failed: ${error instanceof Error ? error.message : error}`,

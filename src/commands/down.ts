@@ -5,6 +5,7 @@ import { runCompose, sharedProxyConnect, COMPOSE_FILENAME } from "../lib/compose
 import { snapshotWorkspace } from "../lib/raw-collector.ts";
 import { instanceDir } from "../lib/instance.ts";
 import { updateRuntimeInstanceStatus } from "../lib/runtime-instance-registry.ts";
+import { resolveGatewayBindingComposeGuard } from "../lib/gateway-binding-guard.ts";
 import type { RuntimeType, ProxyMode } from "../runtimes/index.ts";
 
 /** Stop shared proxy compose if no instances remain running. */
@@ -53,11 +54,13 @@ export async function downCommand(args: string[]): Promise<void> {
           console.log(`\n■ Stopping ${name}/${uid}...`);
           const instDir = instanceDir(project.path, uid);
           const composePath = join(instDir, COMPOSE_FILENAME);
+          const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
           try {
             await runCompose(project.path, "down", {
               composePath,
               projectName: `${name}-${uid}`,
               connectContainer: sharedProxyConnect(name, uid, runtimeType, proxyMode),
+              allowOverride: composeGuard.allowOverride,
             });
             await updateRuntimeInstanceStatus(name, uid, "stopped", { ready: false });
           } catch {}
@@ -87,12 +90,14 @@ export async function downCommand(args: string[]): Promise<void> {
 
     const instDir = instanceDir(entry.path, userId);
     const composePath = join(instDir, COMPOSE_FILENAME);
+    const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
 
     console.log(`\n■ Stopping ${projectName}/${userId}...`);
     await runCompose(entry.path, "down", {
       composePath,
       projectName: `${projectName}-${userId}`,
       connectContainer: sharedProxyConnect(projectName, userId, runtimeType, proxyMode),
+      allowOverride: composeGuard.allowOverride,
     });
     await updateRuntimeInstanceStatus(projectName, userId, "stopped", { ready: false });
     console.log(`\n✅ ${projectName}/${userId} stopped.`);
@@ -109,11 +114,13 @@ export async function downCommand(args: string[]): Promise<void> {
       console.log(`\n■ Stopping ${projectName}/${uid}...`);
       const instDir = instanceDir(entry.path, uid);
       const composePath = join(instDir, COMPOSE_FILENAME);
+      const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
       try {
         await runCompose(entry.path, "down", {
           composePath,
           projectName: `${projectName}-${uid}`,
           connectContainer: sharedProxyConnect(projectName, uid, runtimeType, proxyMode),
+          allowOverride: composeGuard.allowOverride,
         });
         await updateRuntimeInstanceStatus(projectName, uid, "stopped", { ready: false });
       } catch {}

@@ -107,6 +107,20 @@ OpenClaw ──(no key)──→ API Proxy ──(key injection)──→ LLM AP
 
 ## 4. Network Access Control
 
+### Per-instance Weixin gateway binding
+
+- Treat the Weixin sidecar image and the OpenClaw gateway image as one
+  compatibility-tested, digest-pinned release unit. Farm accepts the pair only
+  through its validated gateway-binding profile; never install a plugin in a
+  running workload.
+- The sidecar-to-gateway URL is an instance-private Docker DNS name, not the
+  existing loopback-only administrator host port. Farm creates a unique token in the gateway-only owner-only env file
+  and must not place it in CLI arguments, Compose config evidence, or logs.
+- Do not enable gateway binding merely to make a health check green. A missing
+  compatible plugin must remain `configuration_required` and block attach.
+- The external runtime network is control-plane-only. It must not make an
+  instance sidecar reachable from another instance's private network.
+
 ### Local Development
 - `127.0.0.1` binding (no external access)
 - `gateway.bind: "loopback"` default

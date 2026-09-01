@@ -1,5 +1,9 @@
 import type { ProxyMode } from "../runtimes/interface.ts";
 import { safeYamlIdentifier } from "../lib/validate.ts";
+import { isImmutableImageDigestReference, type WeixinRuntimeProfile } from "../lib/weixin-runtime-profile.ts";
+
+const DEFAULT_WEIXIN_SIDECAR_IMAGE = "clawbay-bay-sidecar-weixin:latest";
+const DEFAULT_OPENCLAW_GATEWAY_IMAGE = "ghcr.io/openclaw/openclaw:latest";
 
 export interface InstanceComposeOptions {
   projectName: string;
@@ -33,6 +37,8 @@ export interface InstanceComposeOptions {
   externalNetwork?: string;
   /** #179: Farm-authoritative DNS alias on externalNetwork. */
   networkAlias?: string;
+  /** Validated Farm-owned image pair for the optional gateway-binding profile. */
+  weixinRuntimeProfile?: WeixinRuntimeProfile;
 }
 
 /**
@@ -80,6 +86,7 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
     weixinSidecarPort = 8787,
     externalNetwork,
     networkAlias,
+    weixinRuntimeProfile,
   } = opts;
 
   safeYamlIdentifier(projectName, "project name");
@@ -90,6 +97,24 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
   }
   const containerPrefix = `${projectName}-${userId}`;
   const hasProxy = proxyMode !== "none";
+  const gatewayBinding = enableWeixinSidecar && weixinRuntimeProfile?.gatewayBinding === true;
+  if (
+    gatewayBinding
+    && (
+      !weixinRuntimeProfile.sidecarImage
+      || !weixinRuntimeProfile.gatewayImage
+      || !isImmutableImageDigestReference(weixinRuntimeProfile.sidecarImage)
+      || !isImmutableImageDigestReference(weixinRuntimeProfile.gatewayImage)
+    )
+  ) {
+    throw new Error("gateway-binding profile must include a validated sidecar/gateway image pair");
+  }
+  const weixinSidecarImage = gatewayBinding
+    ? weixinRuntimeProfile!.sidecarImage!
+    : DEFAULT_WEIXIN_SIDECAR_IMAGE;
+  const openclawGatewayImage = gatewayBinding
+    ? weixinRuntimeProfile!.gatewayImage!
+    : DEFAULT_OPENCLAW_GATEWAY_IMAGE;
   const openclawMountSource = instanceHostDir ? `${instanceHostDir}/openclaw` : "./openclaw";
 
   // ─── api-proxy (conditional) ──────────────────────────────────────────────
@@ -145,14 +170,18 @@ export function buildInstanceCompose(opts: InstanceComposeOptions): string {
 
   const weixinSidecarService = enableWeixinSidecar ? `  weixin-sidecar:
     container_name: ${containerPrefix}-weixin
-    image: \${WEIXIN_SIDECAR_IMAGE:-clawbay-bay-sidecar-weixin:latest}
+    image: ${weixinSidecarImage}
     user: "1000:1000"
     env_file:
       - ./${weixinEnvFile}
       - ./instance.env
+${gatewayBinding ? "      - ./openclaw-gateway.env" : ""}
     environment:
       SIDECAR_GATEWAY_URL: http://sidecar-gateway:3002
       SIDECAR_CLAW_BAY_API_URL: http://claw-bay-api:3001
+${gatewayBinding ? `      # The paired gateway is reachable only on sidecar-net.
+      OPENCLAW_GATEWAY_URL: ws://openclaw-gateway:18789
+      WEIXIN_ENABLE_OPENCLAW_GATEWAY_BINDING: "true"` : `      WEIXIN_ENABLE_OPENCLAW_GATEWAY_BINDING: "false"`}
       OPENCLAW_STATE_DIR: /data/openclaw
       SESSION_STORAGE_PATH: /data/weixin-sessions
       WEIXIN_HEALTH_CHECK_URL: http://claw-bay-api:3001/health
@@ -185,9 +214,21 @@ ${weixinNetworks}
 ` : "";
 
   // ─── openclaw-gateway (always present) ────────────────────────────────────
+  const openclawGatewayNetworks = gatewayBinding
+    ? hasProxy
+      ? `    networks:
+      - proxy-net
+      - sidecar-net`
+      : `    networks:
+      - sidecar-net`
+    : hasProxy
+      ? `    networks:
+      - proxy-net`
+      : "";
+
   const openclawGatewayService = `  openclaw-gateway:
     container_name: ${containerPrefix}-openclaw
-    image: ghcr.io/openclaw/openclaw:latest
+    image: ${openclawGatewayImage}
     ports:
       - "127.0.0.1:${port}:18789"
     volumes:
@@ -198,6 +239,7 @@ ${weixinNetworks}
       # available through this same bind mount without extra per-provider volumes.
       - ${openclawMountSource}:/home/node/.openclaw
     env_file:
+      - ./openclaw-gateway.env
       - ./instance.env
       - ./.env.model
     environment:
@@ -205,9 +247,10 @@ ${hasProxy ? `      OPENCLAW_API_PROXY: http://api-proxy:8080` : `      # OPENCL
       OPENCLAW_SANDBOX: 1
       OPENCLAW_AUDIT_LOG: /home/node/.openclaw/logs/audit.jsonl
       OPENCLAW_SIDECAR_ATTACH_ROOT: /home/node/.openclaw/workspace/runtime
-      OPENCLAW_GATEWAY_TOKEN: \${OPENCLAW_GATEWAY_TOKEN:?Set OPENCLAW_GATEWAY_TOKEN for OpenClaw HTTP access}
-${hasProxy ? `    networks:
-      - proxy-net` : ""}
+${gatewayBinding ? `      # The validated runtime image consumes this marker; stock OpenClaw never sees it.
+      WEIXIN_OPENCLAW_RUNTIME_ROLE: gateway
+      WEIXIN_OPENCLAW_GATEWAY_BIND: lan` : ""}
+${openclawGatewayNetworks}
     tmpfs:
       - /tmp:size=100M
       - /home/node/.cache:size=200M

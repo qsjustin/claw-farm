@@ -221,6 +221,113 @@ describe("sidecar.attach dispatch", () => {
     });
   });
 
+  it("replaces the digest-pinned OpenClaw gateway and sidecar as one gateway-binding workload", async () => {
+    const savedRuntimeProfile = {
+      enabled: process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING,
+      sidecar: process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE,
+      gateway: process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE,
+    };
+    const sidecarImage = "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const gatewayImage = "registry.example.test/openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const calls: string[][] = [];
+
+    try {
+      process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = "true";
+      process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE = sidecarImage;
+      process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = gatewayImage;
+      await mkdir(join(instDir, "openclaw", "workspace"), { recursive: true });
+      await writeFile(join(projectDir, ".claw-farm.json"), JSON.stringify({ runtime: "openclaw", processor: "builtin" }));
+
+      Bun.spawn = ((args: string[]) => {
+        calls.push(args);
+        if (args.join(" ").includes("docker inspect")) {
+          return {
+            exited: Promise.resolve(0),
+            stdout: new Blob([args.some((arg) => arg.includes("Health")) ? "healthy" : "true"]).stream(),
+            stderr: new Blob([""]).stream(),
+          } as unknown as ReturnType<typeof Bun.spawn>;
+        }
+        return {
+          exited: Promise.resolve(0),
+          stdout: new Blob([""]).stream(),
+          stderr: new Blob([""]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }) as typeof Bun.spawn;
+
+      const result = await dispatch("sidecar.attach", basePayload());
+      expect(result.ok).toBe(true);
+
+      const compose = await readFile(join(instDir, "docker-compose.openclaw.yml"), "utf8");
+      const gatewayEnv = await readFile(join(instDir, "openclaw-gateway.env"), "utf8");
+      const instanceEnv = await readFile(join(instDir, "instance.env"), "utf8");
+      const token = gatewayEnv.match(/^OPENCLAW_GATEWAY_TOKEN=(.+)$/m)?.[1] ?? "";
+      expect(token).not.toBe("");
+      expect(instanceEnv).not.toContain("OPENCLAW_GATEWAY_TOKEN");
+      expect(compose).toContain(`image: ${sidecarImage}`);
+      expect(compose).toContain(`image: ${gatewayImage}`);
+      expect(compose).toContain("OPENCLAW_GATEWAY_URL: ws://openclaw-gateway:18789");
+      expect(compose).not.toContain(token);
+      expect(compose).not.toContain("${OPENCLAW_GATEWAY_TOKEN");
+
+      const composeUps = calls
+        .map((args) => args.join(" "))
+        .filter((command) => command.includes("docker compose") && command.includes(" up -d "))
+        .map((command) => command.endsWith("openclaw-gateway") ? "openclaw-gateway" : "weixin-sidecar");
+      expect(composeUps).toEqual(["openclaw-gateway", "weixin-sidecar"]);
+    } finally {
+      if (savedRuntimeProfile.enabled === undefined) delete process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING;
+      else process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = savedRuntimeProfile.enabled;
+      if (savedRuntimeProfile.sidecar === undefined) delete process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE;
+      else process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE = savedRuntimeProfile.sidecar;
+      if (savedRuntimeProfile.gateway === undefined) delete process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE;
+      else process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = savedRuntimeProfile.gateway;
+    }
+  });
+
+  it("fails closed before compose up when a gateway-binding instance has an override file", async () => {
+    const savedRuntimeProfile = {
+      enabled: process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING,
+      sidecar: process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE,
+      gateway: process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE,
+    };
+    const calls: string[][] = [];
+    try {
+      process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = "true";
+      process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE = "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = "registry.example.test/openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      await mkdir(join(instDir, "openclaw", "workspace"), { recursive: true });
+      await writeFile(join(projectDir, ".claw-farm.json"), JSON.stringify({ runtime: "openclaw", processor: "builtin" }));
+      await writeFile(join(instDir, "docker-compose.openclaw.override.yml"), "services:\n  weixin-sidecar:\n    image: untrusted:latest\n");
+      Bun.spawn = ((args: string[]) => {
+        calls.push(args);
+        if (args.join(" ").includes("docker inspect")) {
+          return {
+            exited: Promise.resolve(1),
+            stdout: new Blob([""]).stream(),
+            stderr: new Blob(["No such container"]).stream(),
+          } as unknown as ReturnType<typeof Bun.spawn>;
+        }
+        return {
+          exited: Promise.resolve(0),
+          stdout: new Blob([""]).stream(),
+          stderr: new Blob([""]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }) as typeof Bun.spawn;
+
+      const result = await dispatch("sidecar.attach", basePayload());
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.message).toContain("override is not permitted");
+      expect(calls.some((args) => args.join(" ").includes("docker compose") && args.includes("up"))).toBe(false);
+    } finally {
+      if (savedRuntimeProfile.enabled === undefined) delete process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING;
+      else process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = savedRuntimeProfile.enabled;
+      if (savedRuntimeProfile.sidecar === undefined) delete process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE;
+      else process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE = savedRuntimeProfile.sidecar;
+      if (savedRuntimeProfile.gateway === undefined) delete process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE;
+      else process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = savedRuntimeProfile.gateway;
+    }
+  });
+
   it("releases the attached generation into durable quarantine on detach", async () => {
     const attached = await dispatch("sidecar.attach", basePayload());
     expect(attached.ok).toBe(true);
@@ -471,6 +578,56 @@ describe("sidecar.detach dispatch", () => {
     expect(spec.desiredAttachmentState).toBe("detached");
     expect(spec.operationId).toBe("op-2");
     expect(spec.targetAttachmentVersion).toBe(2);
+  });
+
+  it("restores the stock gateway image when detaching a gateway-binding workload", async () => {
+    const calls: string[][] = [];
+    await mkdir(join(instDir, "openclaw", "workspace"), { recursive: true });
+    await writeFile(join(projectDir, ".claw-farm.json"), JSON.stringify({ runtime: "openclaw", processor: "builtin" }));
+    await writeFile(join(instDir, "docker-compose.openclaw.yml"), "services: {}\n");
+    await writeSidecarSpec(instDir, {
+      ...validSpec,
+      gatewayBinding: true,
+      gatewayBindingSidecarImage: "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      gatewayBindingGatewayImage: "registry.example.test/openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      operationId: "op-1",
+      targetAttachmentVersion: 1,
+      desiredAttachmentState: "attached",
+    });
+
+    Bun.spawn = ((args: string[]) => {
+      calls.push(args);
+      const command = args.join(" ");
+      if (command.includes("docker inspect")) {
+        const isStatusProbe = args.includes("--format");
+        return {
+          exited: Promise.resolve(isStatusProbe ? 0 : 1),
+          stdout: new Blob([isStatusProbe ? "true" : ""]).stream(),
+          stderr: new Blob([isStatusProbe ? "" : "No such container"]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([""]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as typeof Bun.spawn;
+
+    const result = await dispatch("sidecar.detach", basePayload({
+      operationId: "op-2",
+      expectedAttachmentVersion: 1,
+      expectedConfigVersion: 1,
+    }));
+    expect(result.ok).toBe(true);
+
+    const compose = await readFile(join(instDir, "docker-compose.openclaw.yml"), "utf8");
+    expect(compose).toContain("image: ghcr.io/openclaw/openclaw:latest");
+    expect(compose).not.toContain("WEIXIN_OPENCLAW_RUNTIME_ROLE: gateway");
+    expect(calls.some((args) => args.join(" ").includes("docker compose") && args.at(-1) === "openclaw-gateway" && args.includes("up"))).toBe(true);
+    const gatewayRemoveAt = calls.findIndex((args) => args.join(" ").includes("docker compose") && args.at(-1) === "openclaw-gateway" && args.includes("rm"));
+    const networkRemoveAt = calls.findIndex((args) => args.join(" ") === `docker network rm ${projectName}-${userId}_sidecar-net`);
+    expect(gatewayRemoveAt).toBeGreaterThanOrEqual(0);
+    expect(networkRemoveAt).toBeGreaterThan(gatewayRemoveAt);
   });
 
   it("returns idempotent success when same operation already applied", async () => {

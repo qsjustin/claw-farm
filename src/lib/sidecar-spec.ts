@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { chmod, rename, unlink, writeFile, open } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { isSafeYamlIdentifier } from "./validate.ts";
+import { isImmutableImageDigestReference } from "./weixin-runtime-profile.ts";
 
 const SPEC_FILENAME = "sidecar-spec.json";
 const SCHEMA_VERSION = 2;
@@ -40,6 +41,11 @@ export interface SidecarSpec {
   /** #179: Farm-authoritative alias bound to this SRI + generation. */
   networkAlias?: string;
   aliasGeneration?: number;
+  /** Whether this instance was attached with the immutable gateway-binding profile. */
+  gatewayBinding?: boolean;
+  /** Pinned image pair persisted with gatewayBinding to prevent silent drift on rebuild. */
+  gatewayBindingSidecarImage?: string;
+  gatewayBindingGatewayImage?: string;
 
   /**
    * #171 Phase 2A-2: ClawBay SRI (Service Runtime Instance) ID.
@@ -182,6 +188,33 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
     }
   }
 
+  if (obj.gatewayBinding !== undefined && typeof obj.gatewayBinding !== "boolean") {
+    throw new SidecarSpecError(
+      `sidecar spec 'gatewayBinding' must be boolean if present, got ${typeof obj.gatewayBinding}`,
+      "spec-invalid",
+    );
+  }
+  const hasGatewaySidecarImage = obj.gatewayBindingSidecarImage !== undefined;
+  const hasGatewayImage = obj.gatewayBindingGatewayImage !== undefined;
+  if (obj.gatewayBinding === true) {
+    if (
+      typeof obj.gatewayBindingSidecarImage !== "string"
+      || typeof obj.gatewayBindingGatewayImage !== "string"
+      || !isImmutableImageDigestReference(obj.gatewayBindingSidecarImage)
+      || !isImmutableImageDigestReference(obj.gatewayBindingGatewayImage)
+    ) {
+      throw new SidecarSpecError(
+        "gateway-binding sidecar spec requires a validated immutable image pair",
+        "spec-invalid",
+      );
+    }
+  } else if (hasGatewaySidecarImage || hasGatewayImage) {
+    throw new SidecarSpecError(
+      "gateway-binding image fields require gatewayBinding=true",
+      "spec-invalid",
+    );
+  }
+
   // updatedAt must be valid ISO 8601
   if (typeof obj.updatedAt !== "string" || isNaN(Date.parse(obj.updatedAt))) {
     throw new SidecarSpecError(
@@ -231,7 +264,7 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
   }
 
   // Reject unknown fields
-  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "networkAlias", "aliasGeneration", "composeProject", "managedInstanceId", "bindingId", "operationId", "targetAttachmentVersion", "targetConfigVersion", "desiredAttachmentState", "updatedAt"]);
+  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "networkAlias", "aliasGeneration", "gatewayBinding", "gatewayBindingSidecarImage", "gatewayBindingGatewayImage", "composeProject", "managedInstanceId", "bindingId", "operationId", "targetAttachmentVersion", "targetConfigVersion", "desiredAttachmentState", "updatedAt"]);
   for (const key of Object.keys(obj)) {
     if (!allowed.has(key)) {
       throw new SidecarSpecError(

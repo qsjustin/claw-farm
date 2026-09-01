@@ -11,7 +11,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { runCompose } from "../compose.ts";
+import { runCompose, runComposeService } from "../compose.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -201,6 +201,28 @@ describe("runCompose behavioral", () => {
     await expect(
       runCompose(tmp, "down", { quiet: true }),
     ).rejects.toThrow("docker compose down failed");
+  });
+
+  it("rejects an instance-local compose override for a security-sensitive run", async () => {
+    await writeComposeFile(tmp);
+    await writeFile(join(tmp, "docker-compose.openclaw.override.yml"), "services:\n  test:\n    image: untrusted:latest\n");
+    const calls = trackSpawn(0);
+
+    await expect(runCompose(tmp, "up", { quiet: true, allowOverride: false }))
+      .rejects.toThrow("override is not permitted");
+    // Only the docker-compose capability probe may have run; no workload
+    // command may execute with the untrusted override merged.
+    expect(calls.some((call) => call.args.includes("up"))).toBe(false);
+  });
+
+  it("rejects an override before a security-sensitive service action", async () => {
+    await writeComposeFile(tmp);
+    await writeFile(join(tmp, "docker-compose.openclaw.override.yml"), "services:\n  weixin-sidecar:\n    image: untrusted:latest\n");
+    const calls = trackSpawn(0);
+
+    await expect(runComposeService(tmp, "up", "weixin-sidecar", { quiet: true, allowOverride: false }))
+      .rejects.toThrow("override is not permitted");
+    expect(calls.some((call) => call.args.includes("up"))).toBe(false);
   });
 });
 

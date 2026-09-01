@@ -14,6 +14,7 @@ import { writeApiProxyFiles } from "../templates/api-proxy.ts";
 import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
 import { fileExists, dirExists } from "../lib/fs-utils.ts";
 import { COMPOSE_FILENAME } from "../lib/compose.ts";
+import { assertNoGatewayBindingUpgrade } from "../lib/gateway-binding-guard.ts";
 
 async function moveContents(srcDir: string, destDir: string): Promise<void> {
   let files: string[];
@@ -275,6 +276,16 @@ async function upgradeMultiInstance(
   const rtDir = runtime.runtimeDirName;
   const config = await readProjectConfig(projectDir);
   const proxyMode: ProxyMode = config?.proxyMode ?? runtime.defaultProxyMode; // upgradeMultiInstance uses passed runtimeType, not entry
+  const instanceIds = Object.keys(entry.instances ?? {});
+
+  // A gateway-binding instance carries an immutable runtime pair and separate
+  // credential file. Generic template regeneration would discard that state,
+  // so fail before changing any project/template files.
+  if (runtimeType === "openclaw") {
+    for (const userId of instanceIds) {
+      await assertNoGatewayBindingUpgrade(instanceDir(projectDir, userId));
+    }
+  }
 
   // Upgrade shared template files
   const tmplDir = templateDir(projectDir);
@@ -330,7 +341,6 @@ async function upgradeMultiInstance(
 
   // Regenerate per-instance compose files + migrate layout + copy config
   const instances = entry.instances ?? {};
-  const instanceIds = Object.keys(instances);
   if (instanceIds.length > 0) {
     let migratedCount = 0;
     for (const userId of instanceIds) {

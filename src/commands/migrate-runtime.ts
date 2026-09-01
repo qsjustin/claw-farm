@@ -12,6 +12,7 @@ import { instanceDir, templateDir, ensureInstanceDirs } from "../lib/instance.ts
 import { getRuntime, type RuntimeType, type ProxyMode } from "../runtimes/index.ts";
 import { policyTemplate } from "../templates/policy.yaml.ts";
 import { fileExists, copyIfExists } from "../lib/fs-utils.ts";
+import { assertNoGatewayBindingUpgrade } from "../lib/gateway-binding-guard.ts";
 
 async function copyDirContents(srcDir: string, destDir: string): Promise<void> {
   let files: string[];
@@ -284,6 +285,15 @@ export async function migrateRuntimeCommand(args: string[]): Promise<void> {
   const sourceRuntime = getRuntime(sourceRuntimeType);
   const targetRuntime = getRuntime(targetRuntimeType);
   const proxyMode: ProxyMode = (proxyModeArg as ProxyMode) ?? targetRuntime.defaultProxyMode;
+
+  // Runtime migration would replace the generated compose and invalidate the
+  // persisted gateway-binding image pair. It needs its own reviewed migration
+  // workflow, so stop here before any container or data mutation.
+  if (entry.multiInstance) {
+    for (const uid of Object.keys(entry.instances ?? {})) {
+      await assertNoGatewayBindingUpgrade(instanceDir(projectDir, uid));
+    }
+  }
 
   console.log(`\n🔄 Migrating "${projectName}" runtime: ${sourceRuntimeType} → ${targetRuntimeType}`);
   console.log(`   Processor: ${processor}`);

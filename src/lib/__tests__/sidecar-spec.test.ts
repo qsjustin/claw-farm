@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -169,6 +169,23 @@ describe("sidecar-spec persistence", () => {
     const read = await readSidecarSpec(tempDir);
     expect(read?.networkAlias).toBe("clawbay-sidecar-deadbeef0000");
     expect(read?.aliasGeneration).toBe(3);
+  });
+
+  it("persists the gateway-binding digest pair without storing a token", async () => {
+    const sidecarImage = "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const gatewayImage = "registry.example.test/openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    await writeSidecarSpec(tempDir, {
+      ...validSpec,
+      gatewayBinding: true,
+      gatewayBindingSidecarImage: sidecarImage,
+      gatewayBindingGatewayImage: gatewayImage,
+    });
+    const raw = await readFile(join(tempDir, "sidecar-spec.json"), "utf8");
+    const read = await readSidecarSpec(tempDir);
+    expect(read?.gatewayBinding).toBe(true);
+    expect(read?.gatewayBindingSidecarImage).toBe(sidecarImage);
+    expect(read?.gatewayBindingGatewayImage).toBe(gatewayImage);
+    expect(raw).not.toContain("OPENCLAW_GATEWAY_TOKEN");
   });
 
   it("rejects unsafe aliases and invalid alias generations", async () => {
@@ -588,6 +605,80 @@ describe("upInstance behavioral — sidecar spec integration", () => {
 
     // No compose start/up should have run
     expect(composeCommands.filter(c => c.includes("start") || c.includes("up"))).toHaveLength(0);
+  });
+
+  it("fails closed when a persisted gateway-binding image pair is disabled or changed", async () => {
+    const instDir = join(tmpProjectDir, "instances", userId);
+    const sidecarImage = "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const gatewayImage = "registry.example.test/openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const savedProfile = {
+      enabled: process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING,
+      sidecar: process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE,
+      gateway: process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE,
+    };
+    try {
+      const registry = await loadRegistry();
+      registry.projects[projectName].runtime = "openclaw";
+      await saveRegistry(registry);
+      await ensureInstanceDirs(tmpProjectDir, userId, "openclaw");
+      await fsWriteFile(join(tmpProjectDir, ".claw-farm.json"), JSON.stringify({ runtime: "openclaw", processor: "builtin" }));
+      await _writeSpec2(instDir, {
+        schemaVersion: 2,
+        enabled: true,
+        serviceName: "weixin-sidecar",
+        envFile: ".env.weixin",
+        port: 8787,
+        composeProject: `${projectName}-${userId}`,
+        managedInstanceId: "sri-test-1",
+        bindingId: "binding-test-1",
+        operationId: "op-test-1",
+        targetAttachmentVersion: 1,
+        targetConfigVersion: 0,
+        desiredAttachmentState: "attached",
+        gatewayBinding: true,
+        gatewayBindingSidecarImage: sidecarImage,
+        gatewayBindingGatewayImage: gatewayImage,
+        updatedAt: new Date().toISOString(),
+      });
+      const composeCommands: string[] = [];
+      Bun.spawn = ((args: string[]) => {
+        composeCommands.push(args.join(" "));
+        return {
+          exited: Promise.resolve(0),
+          stdout: new Blob([""]).stream(),
+          stderr: new Blob([""]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }) as typeof Bun.spawn;
+
+      delete process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING;
+      delete process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE;
+      delete process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE;
+      await expect(upInstance(projectName, userId, {
+        quiet: true,
+        managedInstanceId: "sri-test-1",
+        clawBayApiUrl: "http://api:3001",
+        clawBayAdminToken: "token",
+      })).rejects.toThrow("does not match");
+      expect(composeCommands).toHaveLength(0);
+
+      process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = "true";
+      process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE = sidecarImage;
+      process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = "registry.example.test/openclaw@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+      await expect(upInstance(projectName, userId, {
+        quiet: true,
+        managedInstanceId: "sri-test-1",
+        clawBayApiUrl: "http://api:3001",
+        clawBayAdminToken: "token",
+      })).rejects.toThrow("does not match");
+      expect(composeCommands).toHaveLength(0);
+    } finally {
+      if (savedProfile.enabled === undefined) delete process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING;
+      else process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = savedProfile.enabled;
+      if (savedProfile.sidecar === undefined) delete process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE;
+      else process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE = savedProfile.sidecar;
+      if (savedProfile.gateway === undefined) delete process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE;
+      else process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = savedProfile.gateway;
+    }
   });
 });
 

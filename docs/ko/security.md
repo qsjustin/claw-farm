@@ -105,6 +105,21 @@ OpenClaw ──(키 없음)──→ API Proxy ──(키 주입)──→ LLM A
 
 ## 4. 네트워크 접근 제어
 
+### 인스턴스별 Weixin gateway binding
+
+- Weixin sidecar 이미지와 OpenClaw gateway 이미지는 호환성 검증 및 digest
+  pinning을 거친 하나의 릴리스 단위로 취급합니다. Farm은 검증된
+  gateway-binding profile로만 이 쌍을 허용하며, 실행 중인 workload에 plugin을
+  설치하지 않습니다.
+- sidecar-to-gateway URL은 인스턴스 전용 Docker DNS 이름이며 기존 loopback
+  전용 관리자 host port가 아닙니다. Farm은 gateway 전용 owner-only env 파일에 고유 token을 생성하며, CLI
+  인수, Compose config 증적 또는 로그에 나타나면 안 됩니다.
+- health check를 green으로 만들기 위해 gateway binding을 활성화하지
+  않습니다. 호환 plugin이 없으면 `configuration_required`를 유지하고
+  attach를 차단해야 합니다.
+- 외부 런타임 네트워크는 control-plane 전용입니다. 한 인스턴스 sidecar가
+  다른 인스턴스의 private network에서 접근 가능해지면 안 됩니다.
+
 ### 로컬 개발
 - `127.0.0.1` 바인딩 (외부 접근 불가)
 - `gateway.bind: "loopback"` 기본값

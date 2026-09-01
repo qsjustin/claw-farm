@@ -247,6 +247,63 @@ describe("executeWorkloadTransaction", () => {
     expect(compose).toBe(oldCompose);
   });
 
+  it("rolls back a gateway-binding pair in reverse order and restores the prior gateway", async () => {
+    const composeCalls: string[] = [];
+    await writeFile(join(tempDir, "docker-compose.openclaw.yml"), "version: '3' # old", "utf8");
+    Bun.spawn = ((args: string[]) => {
+      const command = args.join(" ");
+      if (command.includes("docker inspect")) {
+        const container = args.at(-1) ?? "";
+        const wasGatewayRunning = container === "test-project-user-openclaw";
+        return {
+          exited: Promise.resolve(wasGatewayRunning ? 0 : 1),
+          stdout: new Blob([wasGatewayRunning ? "true" : ""]).stream(),
+          stderr: new Blob([wasGatewayRunning ? "" : "No such container"]).stream(),
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }
+      if (command.includes("docker compose")) composeCalls.push(command);
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([""]).stream(),
+      } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as typeof Bun.spawn;
+
+    const result = await executeWorkloadTransaction(
+      tempDir,
+      "test-project-user",
+      "weixin-sidecar",
+      {
+        newSpec: validSpec,
+        serviceName: "weixin-sidecar",
+        composeProject: "test-project-user",
+        serviceNames: ["openclaw-gateway", "weixin-sidecar"],
+      },
+      async () => {
+        await writeFile(join(tempDir, "docker-compose.openclaw.yml"), "version: '3' # new", "utf8");
+        throw new Error("paired workload health failed");
+      },
+    );
+
+    expect(result.committed).toBe(false);
+    // Compensation stops/removes the dependent sidecar before the gateway.
+    const serviceActions = composeCalls.map((call) => {
+      const service = call.endsWith("weixin-sidecar") ? "weixin-sidecar" : "openclaw-gateway";
+      if (call.includes(" stop ")) return `stop ${service}`;
+      if (call.includes(" rm -f ")) return `rm ${service}`;
+      if (call.includes(" up -d ")) return `up ${service}`;
+      return "unknown";
+    });
+    expect(serviceActions.filter((action) => action !== "unknown")).toEqual([
+      "stop weixin-sidecar",
+      "rm weixin-sidecar",
+      "stop openclaw-gateway",
+      "rm openclaw-gateway",
+      "up openclaw-gateway",
+    ]);
+    expect(await readFile(join(tempDir, "docker-compose.openclaw.yml"), "utf8")).toBe("version: '3' # old");
+  });
+
   it("rolls back on spec commit failure", async () => {
     // Write old compose
     await writeFile(join(tempDir, "docker-compose.openclaw.yml"), "version: '3' # old", "utf8");

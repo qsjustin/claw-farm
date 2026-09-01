@@ -98,6 +98,42 @@ my-agent/
 
 ## 3. 컨테이너 토폴로지
 
+### ClawBay 인스턴스별 Weixin 런타임
+
+ClawBay가 OpenClaw 인스턴스에 Weixin 사이드카를 활성화할 때 Farm은 공유 채널
+컨테이너 대신 다음의 세 가지 경계를 렌더링합니다.
+
+```text
+                    인스턴스 전용 sidecar-net
+  weixin-sidecar  <------------------------------>  openclaw-gateway
+        |
+        | 인증된 control-plane 호출만 허용
+        v
+  ClawBay 외부 런타임 네트워크 (DNS alias + Bay API / gateway)
+```
+
+- `weixin-sidecar`와 `openclaw-gateway`는 인스턴스 전용 `sidecar-net`만
+  공유합니다. 기존의 `127.0.0.1:<instance-port>` gateway binding은 별도의
+  loopback 전용 관리자 endpoint이며, public listener나 sidecar-to-gateway
+  transport가 아닙니다.
+- 선택적 외부 런타임 네트워크는 Farm 서명 alias와 ClawBay control-plane
+  연결용입니다. 전용 sidecar 네트워크를 대체하지 않습니다.
+- gateway binding은 `CLAW_FARM_WEIXIN_GATEWAY_BINDING=true`로만 활성화합니다.
+  이때 `CLAW_FARM_WEIXIN_SIDECAR_IMAGE`와
+  `CLAW_FARM_OPENCLAW_GATEWAY_IMAGE`가 필요하며, 둘 다 정확한 `@sha256`
+  이미지 참조여야 합니다. Farm은 이 호환성 검증 이미지 쌍을 생성된 인스턴스
+  Compose에 기록하고, Compose 실행 시 임의의 runtime 이미지 값을 보간하지
+  않습니다.
+- Farm은 gateway URL을 `ws://openclaw-gateway:18789`로 내부 주입합니다.
+  Farm은 인스턴스별 gateway token을 한 번 생성하여, 페어 workload만 읽는
+  `openclaw-gateway.env`에 저장합니다. 일반 Weixin sidecar는 이 파일을 읽지
+  않고 검증된 gateway-binding 쌍만 읽습니다. 사용자 콘솔에서 받거나 CLI 인수에
+  넣지 않습니다. Compose는 env-file 값을 확장할 수 있으므로 운영자는
+  `docker compose config` 출력을 증적으로 수집하면 안 됩니다.
+- `WEIXIN_ENABLE_OPENCLAW_GATEWAY_BINDING=true`은 이러한 검증된 이미지
+  쌍에서만 유효합니다. 그렇지 않으면 사이드카는 fail-closed 상태를 유지하고
+  채널 없이 트래픽을 받는 대신 `configuration_required`를 보고합니다.
+
 ### 로컬 개발 (기본)
 
 단일 네트워크, nginx 없음. 두 컨테이너가 `proxy-net` (non-internal) 공유.
