@@ -239,6 +239,109 @@ describe("bridge instance.delete fallback", () => {
     expect(registry.instances[`clawbay-hermes:${userId}`]).toBeUndefined();
   });
 
+  test("does not delete a stale directory that still declares an active sidecar binding", async () => {
+    const home = await mkdtemp(join(tmpdir(), "claw-farm-bridge-delete-active-sidecar-"));
+    const registryDir = join(home, ".claw-farm");
+    const projectName = "protected-project";
+    const legacyProject = "legacy-project";
+    const userId = "protected-user";
+    const projectDir = join(home, "projects", projectName);
+    const instanceRoot = join(projectDir, "instances", userId);
+    await mkdir(join(instanceRoot, "openclaw", "workspace"), { recursive: true });
+    await mkdir(registryDir, { recursive: true });
+    await writeFile(join(instanceRoot, "must-survive.txt"), "runtime data");
+    await writeFile(
+      join(instanceRoot, "sidecar-spec.json"),
+      JSON.stringify({
+        schemaVersion: 2,
+        enabled: true,
+        serviceName: "weixin-sidecar",
+        envFile: ".env.weixin",
+        port: 8787,
+        composeProject: `${projectName}-${userId}`,
+        managedInstanceId: "sri-protected-1",
+        bindingId: "binding-protected-1",
+        operationId: "op-protected-1",
+        targetAttachmentVersion: 1,
+        targetConfigVersion: 1,
+        desiredAttachmentState: "attached",
+        updatedAt: "2026-09-07T00:00:00.000Z",
+      }) + "\n",
+    );
+    await writeFile(
+      join(registryDir, "registry.json"),
+      JSON.stringify({
+        projects: {
+          [projectName]: {
+            path: projectDir,
+            port: 18789,
+            processor: "builtin",
+            createdAt: "2026-09-07T00:00:00.000Z",
+            multiInstance: true,
+            runtime: "openclaw",
+            // Deliberately missing the instance record: this is the stale
+            // registry recovery path that must not erase an active binding.
+            instances: {},
+          },
+        },
+        nextPort: 18790,
+      }),
+    );
+    await writeFile(
+      join(registryDir, "runtime-instances.json"),
+      JSON.stringify({
+        version: 1,
+        instances: {
+          [`${projectName}:${userId}`]: {
+            runtimeInstanceKey: `${projectName}:${userId}`,
+            runtimeType: "openclaw",
+            project: projectName,
+            userId,
+            status: "running",
+            composeProject: `${projectName}-${userId}`,
+            containerName: `${projectName}-${userId}-openclaw`,
+            internalPort: 18789,
+            hostPort: 18790,
+            endpointRef: `claw-farm:${projectName}:${userId}:endpoint`,
+            dataVolumeRef: `claw-farm:${projectName}:${userId}:data`,
+            workspaceRef: `claw-farm:${projectName}:${userId}:workspace`,
+            health: { observedAt: null, ready: true },
+            createdAt: "2026-09-07T00:00:00.000Z",
+            updatedAt: "2026-09-07T00:00:00.000Z",
+            deletedAt: null,
+          },
+        },
+      }),
+    );
+
+    const child = Bun.spawn({
+      cmd: [
+        "bun", "src/index.ts", "bridge", "instance.delete",
+        JSON.stringify({ project: legacyProject, userId, runtimeType: "openclaw", deleteData: true }),
+      ],
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: home },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+    const response = JSON.parse(stdout) as { ok: boolean; errorCode?: string; error?: string };
+    expect(response.ok).toBe(false);
+    expect(response.errorCode).toBe("runtime-conflict");
+    expect(response.error).toContain("sidecar.detach");
+    expect(await Bun.file(join(instanceRoot, "must-survive.txt")).exists()).toBe(true);
+    const runtimeRegistry = JSON.parse(await readFile(join(registryDir, "runtime-instances.json"), "utf8")) as {
+      instances: Record<string, unknown>;
+    };
+    expect(runtimeRegistry.instances[`${projectName}:${userId}`]).toBeDefined();
+  });
+
   test("normal instance.delete response metadata does not contain host paths", async () => {
     const home = await mkdtemp(join(tmpdir(), "claw-farm-bridge-delete-normal-"));
     const registryDir = join(home, ".claw-farm");

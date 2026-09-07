@@ -781,6 +781,17 @@ async function bridgeInstanceDeleteDataFallback(
     }
 
     const instDir = instanceDir(project.path, entry.userId);
+    // A missing Farm registry entry does not prove that this directory is an
+    // abandoned workload.  Its durable sidecar spec is the authority for
+    // binding cleanup; do not delete an active (or unreadable) spec and leave
+    // its Bay credential, alias reservation, or containers behind.
+    const staleSpec = await readSidecarSpec(instDir);
+    if (staleSpec?.enabled === true) {
+      throw new BridgeCommandError(
+        "runtime-conflict",
+        `Cannot cleanup stale runtime "${entry.runtimeInstanceKey}" with an active Weixin sidecar; recover the registry and use sidecar.detach first.`,
+      );
+    }
     await rm(instDir, { recursive: true, force: true });
     try {
       await removeInstance(entry.project, entry.userId);
