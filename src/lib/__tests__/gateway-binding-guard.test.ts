@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +8,7 @@ import { assertNoGatewayBindingUpgrade, resolveGatewayBindingComposeGuard } from
 
 const sidecarImage = "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const gatewayImage = "registry.example.test/openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const composeDigest = "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52";
 
 describe("gateway-binding lifecycle guard", () => {
   it("uses the persisted immutable pair and rejects override files", async () => {
@@ -18,6 +19,7 @@ describe("gateway-binding lifecycle guard", () => {
       gateway: process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE,
     };
     try {
+      await writeFile(join(dir, "docker-compose.openclaw.yml"), "services: {}\n");
       await writeSidecarSpec(dir, {
         schemaVersion: 2,
         enabled: true,
@@ -34,6 +36,7 @@ describe("gateway-binding lifecycle guard", () => {
         gatewayBinding: true,
         gatewayBindingSidecarImage: sidecarImage,
         gatewayBindingGatewayImage: gatewayImage,
+        gatewayBindingComposeSha256: composeDigest,
         updatedAt: new Date().toISOString(),
       });
       process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = "true";
@@ -41,6 +44,9 @@ describe("gateway-binding lifecycle guard", () => {
       process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = gatewayImage;
       await expect(resolveGatewayBindingComposeGuard(dir)).resolves.toMatchObject({ allowOverride: false });
       await expect(assertNoGatewayBindingUpgrade(dir)).rejects.toThrow("blocked");
+
+      await writeFile(join(dir, "docker-compose.openclaw.yml"), "services:\n  attacker:\n    image: untrusted\n");
+      await expect(resolveGatewayBindingComposeGuard(dir)).rejects.toThrow("immutable digest");
 
       delete process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING;
       await expect(resolveGatewayBindingComposeGuard(dir)).rejects.toThrow("does not match");

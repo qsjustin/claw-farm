@@ -46,6 +46,8 @@ export interface SidecarSpec {
   /** Pinned image pair persisted with gatewayBinding to prevent silent drift on rebuild. */
   gatewayBindingSidecarImage?: string;
   gatewayBindingGatewayImage?: string;
+  /** SHA-256 of the generated paired-runtime Compose file. */
+  gatewayBindingComposeSha256?: string;
 
   /**
    * #171 Phase 2A-2: ClawBay SRI (Service Runtime Instance) ID.
@@ -196,21 +198,24 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
   }
   const hasGatewaySidecarImage = obj.gatewayBindingSidecarImage !== undefined;
   const hasGatewayImage = obj.gatewayBindingGatewayImage !== undefined;
+  const hasGatewayComposeHash = obj.gatewayBindingComposeSha256 !== undefined;
   if (obj.gatewayBinding === true) {
     if (
       typeof obj.gatewayBindingSidecarImage !== "string"
       || typeof obj.gatewayBindingGatewayImage !== "string"
+      || typeof obj.gatewayBindingComposeSha256 !== "string"
       || !isImmutableImageDigestReference(obj.gatewayBindingSidecarImage)
       || !isImmutableImageDigestReference(obj.gatewayBindingGatewayImage)
+      || !/^[a-f0-9]{64}$/.test(obj.gatewayBindingComposeSha256)
     ) {
       throw new SidecarSpecError(
-        "gateway-binding sidecar spec requires a validated immutable image pair",
+        "gateway-binding sidecar spec requires a validated immutable image pair and Compose digest",
         "spec-invalid",
       );
     }
-  } else if (hasGatewaySidecarImage || hasGatewayImage) {
+  } else if (hasGatewaySidecarImage || hasGatewayImage || hasGatewayComposeHash) {
     throw new SidecarSpecError(
-      "gateway-binding image fields require gatewayBinding=true",
+      "gateway-binding image and Compose digest fields require gatewayBinding=true",
       "spec-invalid",
     );
   }
@@ -264,7 +269,7 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
   }
 
   // Reject unknown fields
-  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "networkAlias", "aliasGeneration", "gatewayBinding", "gatewayBindingSidecarImage", "gatewayBindingGatewayImage", "composeProject", "managedInstanceId", "bindingId", "operationId", "targetAttachmentVersion", "targetConfigVersion", "desiredAttachmentState", "updatedAt"]);
+  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "networkAlias", "aliasGeneration", "gatewayBinding", "gatewayBindingSidecarImage", "gatewayBindingGatewayImage", "gatewayBindingComposeSha256", "composeProject", "managedInstanceId", "bindingId", "operationId", "targetAttachmentVersion", "targetConfigVersion", "desiredAttachmentState", "updatedAt"]);
   for (const key of Object.keys(obj)) {
     if (!allowed.has(key)) {
       throw new SidecarSpecError(

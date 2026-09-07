@@ -1001,6 +1001,12 @@ export async function despawn(
   const config = await readProjectConfig(projectDir);
   const { runtimeType, proxyMode } = resolveRuntimeConfig(config, entry);
   const preserveData = shouldPreserveInstanceData(runtimeType, options);
+  const sidecarSpec = await readSidecarSpec(instDir);
+  if (sidecarSpec?.enabled === true) {
+    throw new Error(
+      "cannot despawn an instance with an active Weixin sidecar binding; use sidecar.detach so credentials and alias state are revoked first",
+    );
+  }
   await updateRuntimeInstanceStatus(projectName, userId, "deleting", { ready: false });
   const connectContainer = (proxyMode === "shared" && runtimeType !== "openclaw")
     ? { container: `${projectName}-api-proxy`, network: `${composeProject}_instance-net` }

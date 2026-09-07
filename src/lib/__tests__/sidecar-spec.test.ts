@@ -179,12 +179,14 @@ describe("sidecar-spec persistence", () => {
       gatewayBinding: true,
       gatewayBindingSidecarImage: sidecarImage,
       gatewayBindingGatewayImage: gatewayImage,
+      gatewayBindingComposeSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     });
     const raw = await readFile(join(tempDir, "sidecar-spec.json"), "utf8");
     const read = await readSidecarSpec(tempDir);
     expect(read?.gatewayBinding).toBe(true);
     expect(read?.gatewayBindingSidecarImage).toBe(sidecarImage);
     expect(read?.gatewayBindingGatewayImage).toBe(gatewayImage);
+    expect(read?.gatewayBindingComposeSha256).toBe("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
     expect(raw).not.toContain("OPENCLAW_GATEWAY_TOKEN");
   });
 
@@ -244,7 +246,7 @@ describe("sidecar-spec persistence", () => {
 // (for docker compose commands) and mocked fetch (for token rotation).
 // They verify the actual code path, not simulated logic.
 
-import { spawn, upInstance } from "../api.ts";
+import { despawn, spawn, upInstance } from "../api.ts";
 import { writeSidecarSpec as _writeSpec2 } from "../sidecar-spec.ts";
 import { addProject, addInstance, getProject, loadRegistry, saveRegistry } from "../registry.ts";
 import { ensureInstanceDirs } from "../instance.ts";
@@ -622,6 +624,7 @@ describe("upInstance behavioral — sidecar spec integration", () => {
       await saveRegistry(registry);
       await ensureInstanceDirs(tmpProjectDir, userId, "openclaw");
       await fsWriteFile(join(tmpProjectDir, ".claw-farm.json"), JSON.stringify({ runtime: "openclaw", processor: "builtin" }));
+      await fsWriteFile(join(instDir, "docker-compose.openclaw.yml"), "services: {}\n");
       await _writeSpec2(instDir, {
         schemaVersion: 2,
         enabled: true,
@@ -638,6 +641,7 @@ describe("upInstance behavioral — sidecar spec integration", () => {
         gatewayBinding: true,
         gatewayBindingSidecarImage: sidecarImage,
         gatewayBindingGatewayImage: gatewayImage,
+        gatewayBindingComposeSha256: "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
         updatedAt: new Date().toISOString(),
       });
       const composeCommands: string[] = [];
@@ -679,6 +683,27 @@ describe("upInstance behavioral — sidecar spec integration", () => {
       if (savedProfile.gateway === undefined) delete process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE;
       else process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = savedProfile.gateway;
     }
+  });
+
+  it("rejects generic despawn while a sidecar binding is still active", async () => {
+    const instDir = join(tmpProjectDir, "instances", userId);
+    await _writeSpec2(instDir, {
+      schemaVersion: 2,
+      enabled: true,
+      serviceName: "weixin-sidecar",
+      envFile: ".env.weixin",
+      port: 8787,
+      composeProject: `${projectName}-${userId}`,
+      managedInstanceId: "sri-test-1",
+      bindingId: "binding-test-1",
+      operationId: "op-test-1",
+      targetAttachmentVersion: 1,
+      targetConfigVersion: 0,
+      desiredAttachmentState: "attached",
+      updatedAt: new Date().toISOString(),
+    });
+
+    await expect(despawn(projectName, userId, { quiet: true })).rejects.toThrow("use sidecar.detach");
   });
 });
 

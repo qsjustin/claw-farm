@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { readSidecarSpec } from "./sidecar-spec.ts";
 import { resolveWeixinRuntimeProfile, type WeixinRuntimeProfile } from "./weixin-runtime-profile.ts";
 
@@ -5,6 +8,28 @@ export type GatewayBindingComposeGuard = {
   allowOverride: boolean;
   runtimeProfile?: WeixinRuntimeProfile;
 };
+
+export async function hashGatewayBindingCompose(instDir: string): Promise<string> {
+  const contents = await readFile(join(instDir, "docker-compose.openclaw.yml"), "utf8").catch((error) => {
+    throw new Error(`gateway-binding Compose file cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  return createHash("sha256").update(contents, "utf8").digest("hex");
+}
+
+/**
+ * A paired gateway/sidecar instance only runs the exact Compose file Farm
+ * generated during attach.  A mode-only check is not enough: the instance
+ * directory is operational data and a changed main file could otherwise add
+ * mounts or replace the image without using an override file.
+ */
+export async function assertGatewayBindingComposeIntegrity(instDir: string): Promise<void> {
+  const spec = await readSidecarSpec(instDir);
+  if (spec?.gatewayBinding !== true) return;
+  const actual = await hashGatewayBindingCompose(instDir);
+  if (actual !== spec.gatewayBindingComposeSha256) {
+    throw new Error("gateway-binding Compose file does not match the Farm-generated immutable digest");
+  }
+}
 
 /**
  * Re-read the persisted pair before any lifecycle command that consumes an
@@ -14,6 +39,8 @@ export type GatewayBindingComposeGuard = {
 export async function resolveGatewayBindingComposeGuard(instDir: string): Promise<GatewayBindingComposeGuard> {
   const spec = await readSidecarSpec(instDir);
   if (spec?.gatewayBinding !== true) return { allowOverride: true };
+
+  await assertGatewayBindingComposeIntegrity(instDir);
 
   const runtimeProfile = resolveWeixinRuntimeProfile();
   if (

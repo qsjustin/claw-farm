@@ -269,11 +269,33 @@ describe("sidecar.attach dispatch", () => {
       expect(compose).not.toContain(token);
       expect(compose).not.toContain("${OPENCLAW_GATEWAY_TOKEN");
 
+      await writeFile(join(instDir, "docker-compose.openclaw.yml"), "services:\n  untrusted:\n    image: attacker\n");
+      const tamperedReplay = await dispatch("sidecar.attach", basePayload());
+      expect(tamperedReplay.ok).toBe(false);
+      if (!tamperedReplay.ok) {
+        expect(tamperedReplay.errorCode).toBe("runtime-conflict");
+        expect(tamperedReplay.error).toContain("immutable integrity check");
+      }
+      await writeFile(join(instDir, "docker-compose.openclaw.yml"), compose);
+
       const composeUps = calls
         .map((args) => args.join(" "))
         .filter((command) => command.includes("docker compose") && command.includes(" up -d "))
         .map((command) => command.endsWith("openclaw-gateway") ? "openclaw-gateway" : "weixin-sidecar");
       expect(composeUps).toEqual(["openclaw-gateway", "weixin-sidecar"]);
+
+      // A second attach may rotate credentials, but it must not silently
+      // replace a running paired image with a different digest.
+      process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = "registry.example.test/openclaw@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+      const driftResult = await dispatch("sidecar.attach", basePayload({
+        operationId: "op-2",
+        expectedAttachmentVersion: 1,
+      }));
+      expect(driftResult.ok).toBe(false);
+      if (!driftResult.ok) {
+        expect(driftResult.errorCode).toBe("runtime-conflict");
+        expect(driftResult.error).toContain("immutable image pair");
+      }
     } finally {
       if (savedRuntimeProfile.enabled === undefined) delete process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING;
       else process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = savedRuntimeProfile.enabled;
@@ -590,6 +612,7 @@ describe("sidecar.detach dispatch", () => {
       gatewayBinding: true,
       gatewayBindingSidecarImage: "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       gatewayBindingGatewayImage: "registry.example.test/openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      gatewayBindingComposeSha256: "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
       operationId: "op-1",
       targetAttachmentVersion: 1,
       desiredAttachmentState: "attached",

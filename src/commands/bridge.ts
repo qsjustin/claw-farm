@@ -19,6 +19,10 @@ import {
 } from "../lib/alias-registry.ts";
 import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
 import { resolveWeixinRuntimeProfile, type WeixinRuntimeProfile } from "../lib/weixin-runtime-profile.ts";
+import {
+  assertGatewayBindingComposeIntegrity,
+  hashGatewayBindingCompose,
+} from "../lib/gateway-binding-guard.ts";
 import { exportCommand } from "./export.ts";
 import { importCommand } from "./import.ts";
 import { instanceDir, templateDir } from "../lib/instance.ts";
@@ -759,7 +763,7 @@ async function bridgeInstanceDeleteDataFallback(
 ): Promise<BridgeSuccess | null> {
   try {
     await despawn(entry.project, entry.userId, { quiet: true, deleteData: true });
-  } catch {
+  } catch (error) {
     const project = await getProject(entry.project);
     if (!project) {
       throw new BridgeCommandError(
@@ -767,6 +771,15 @@ async function bridgeInstanceDeleteDataFallback(
         `Cannot physically delete runtime data for "${entry.runtimeInstanceKey}" because project "${entry.project}" is not registered.`,
       );
     }
+
+    // The fallback exists only for a stale runtime-registry entry whose Farm
+    // instance record is already absent.  Never turn an ordinary lifecycle
+    // failure (especially the active-sidecar detach guard) into a recursive
+    // filesystem delete: that would orphan credentials and alias state.
+    if (await getInstance(entry.project, entry.userId)) {
+      throw error;
+    }
+
     const instDir = instanceDir(project.path, entry.userId);
     await rm(instDir, { recursive: true, force: true });
     try {
@@ -1094,6 +1107,24 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     }
   }
 
+  // Verify this before accepting an idempotent attach response.  Otherwise a
+  // caller could receive a successful replay response for a workload whose
+  // on-disk Compose file has since been replaced.
+  if (spec?.gatewayBinding === true) {
+    try {
+      await assertGatewayBindingComposeIntegrity(instDir);
+    } catch {
+      return bridgeFailure({
+        action: "sidecar.attach",
+        message: "Persisted gateway-binding Compose file failed its immutable integrity check.",
+        errorCode: "runtime-conflict",
+        retryable: false,
+        project: context.resolved.name,
+        userId,
+      });
+    }
+  }
+
   // #171 Phase 2A-2: Idempotency — same operation already applied
   if (
     spec && spec.operationId !== "" &&
@@ -1189,6 +1220,30 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
       userId,
     });
   }
+  const requestedGatewayBinding = weixinRuntimeProfile?.gatewayBinding === true;
+  if (
+    spec?.enabled === true
+    && context.runtimeType === "openclaw"
+    && (
+      spec.gatewayBinding !== requestedGatewayBinding
+      || (
+        requestedGatewayBinding
+        && (
+          spec.gatewayBindingSidecarImage !== weixinRuntimeProfile?.sidecarImage
+          || spec.gatewayBindingGatewayImage !== weixinRuntimeProfile?.gatewayImage
+        )
+      )
+    )
+  ) {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: "Gateway-binding runtime profile differs from the active immutable image pair; use the profile-aware upgrade workflow.",
+      errorCode: "runtime-conflict",
+      retryable: false,
+      project: context.resolved.name,
+      userId,
+    });
+  }
   const replacedServiceNames = weixinRuntimeProfile?.gatewayBinding
     ? ["openclaw-gateway", "weixin-sidecar"]
     : ["weixin-sidecar"];
@@ -1236,33 +1291,34 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   // authenticated internal provision request and signed into the in-memory
   // assertion; it is never logged or returned in retained evidence.
   const bindingSecret = generateBindingSecret();
+  const attachedSpec: SidecarSpec = {
+    schemaVersion: 2,
+    enabled: true,
+    serviceName: "weixin-sidecar",
+    envFile: ".env.weixin",
+    port: 8787,
+    externalNetwork,
+    networkAlias,
+    aliasGeneration: generation,
+    gatewayBinding: requestedGatewayBinding,
+    gatewayBindingSidecarImage: weixinRuntimeProfile?.sidecarImage,
+    gatewayBindingGatewayImage: weixinRuntimeProfile?.gatewayImage,
+    composeProject,
+    managedInstanceId: asString(payload.managedInstanceId) ?? "",
+    bindingId,
+    operationId,
+    targetAttachmentVersion: generation,
+    targetConfigVersion: ecgv!,
+    desiredAttachmentState: "attached",
+    updatedAt: new Date().toISOString(),
+  };
 
   const txResult = await executeWorkloadTransaction(
     instDir,
     composeProject,
     serviceName,
     {
-      newSpec: {
-        schemaVersion: 2,
-        enabled: true,
-        serviceName: "weixin-sidecar",
-        envFile: ".env.weixin",
-        port: 8787,
-        externalNetwork,
-        networkAlias,
-        aliasGeneration: generation,
-        gatewayBinding: weixinRuntimeProfile?.gatewayBinding === true,
-        gatewayBindingSidecarImage: weixinRuntimeProfile?.sidecarImage,
-        gatewayBindingGatewayImage: weixinRuntimeProfile?.gatewayImage,
-        composeProject,
-        managedInstanceId: asString(payload.managedInstanceId) ?? "",
-        bindingId,
-        operationId,
-        targetAttachmentVersion: generation,
-        targetConfigVersion: ecgv!,
-        desiredAttachmentState: "attached",
-        updatedAt: new Date().toISOString(),
-      },
+      newSpec: attachedSpec,
       serviceName,
       composeProject,
       serviceNames: replacedServiceNames,
@@ -1347,6 +1403,9 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
           networkAlias,
           weixinRuntimeProfile,
         });
+        if (attachedSpec.gatewayBinding === true) {
+          attachedSpec.gatewayBindingComposeSha256 = await hashGatewayBindingCompose(instDir);
+        }
 
         // Side effect 3: Replace the complete paired workload. When a
         // gateway-binding profile is selected, recreating only the sidecar
@@ -1705,6 +1764,20 @@ async function bridgeSidecarDetach(payload: Record<string, unknown>): Promise<Br
 
   const serviceName = "weixin-sidecar";
   const instance = await getInstance(context.resolved.name, userId);
+  if (spec.gatewayBinding === true) {
+    try {
+      await assertGatewayBindingComposeIntegrity(instDir);
+    } catch {
+      return bridgeFailure({
+        action: "sidecar.detach",
+        message: "Persisted gateway-binding Compose file failed its immutable integrity check.",
+        errorCode: "runtime-conflict",
+        retryable: false,
+        project: context.resolved.name,
+        userId,
+      });
+    }
+  }
   const replacedServiceNames = spec.gatewayBinding === true && context.runtimeType === "openclaw"
     ? ["openclaw-gateway", "weixin-sidecar"]
     : ["weixin-sidecar"];

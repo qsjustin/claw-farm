@@ -55,15 +55,13 @@ export async function downCommand(args: string[]): Promise<void> {
           const instDir = instanceDir(project.path, uid);
           const composePath = join(instDir, COMPOSE_FILENAME);
           const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
-          try {
-            await runCompose(project.path, "down", {
-              composePath,
-              projectName: `${name}-${uid}`,
-              connectContainer: sharedProxyConnect(name, uid, runtimeType, proxyMode),
-              allowOverride: composeGuard.allowOverride,
-            });
-            await updateRuntimeInstanceStatus(name, uid, "stopped", { ready: false });
-          } catch {}
+          await runCompose(project.path, "down", {
+            composePath,
+            projectName: `${name}-${uid}`,
+            connectContainer: sharedProxyConnect(name, uid, runtimeType, proxyMode),
+            allowOverride: composeGuard.allowOverride,
+          });
+          await updateRuntimeInstanceStatus(name, uid, "stopped", { ready: false });
         }));
         // Stop shared proxy after all instances
         await stopSharedProxy(project.path, name, runtimeType, proxyMode);
@@ -115,15 +113,13 @@ export async function downCommand(args: string[]): Promise<void> {
       const instDir = instanceDir(entry.path, uid);
       const composePath = join(instDir, COMPOSE_FILENAME);
       const composeGuard = await resolveGatewayBindingComposeGuard(instDir);
-      try {
-        await runCompose(entry.path, "down", {
-          composePath,
-          projectName: `${projectName}-${uid}`,
-          connectContainer: sharedProxyConnect(projectName, uid, runtimeType, proxyMode),
-          allowOverride: composeGuard.allowOverride,
-        });
-        await updateRuntimeInstanceStatus(projectName, uid, "stopped", { ready: false });
-      } catch {}
+      await runCompose(entry.path, "down", {
+        composePath,
+        projectName: `${projectName}-${uid}`,
+        connectContainer: sharedProxyConnect(projectName, uid, runtimeType, proxyMode),
+        allowOverride: composeGuard.allowOverride,
+      });
+      await updateRuntimeInstanceStatus(projectName, uid, "stopped", { ready: false });
     }));
     // Stop shared proxy after all instances are down
     await stopSharedProxy(entry.path, projectName, runtimeType, proxyMode);

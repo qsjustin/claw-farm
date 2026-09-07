@@ -239,9 +239,11 @@ ${weixinNetworks}
       # available through this same bind mount without extra per-provider volumes.
       - ${openclawMountSource}:/home/node/.openclaw
     env_file:
-      - ./openclaw-gateway.env
       - ./instance.env
       - ./.env.model
+      # Keep the gateway-only token last: generic instance/model env files
+      # must never override a Farm-generated runtime secret.
+      - ./openclaw-gateway.env
     environment:
 ${hasProxy ? `      OPENCLAW_API_PROXY: http://api-proxy:8080` : `      # OPENCLAW_API_PROXY: not set (proxyMode: none)`}
       OPENCLAW_SANDBOX: 1
