@@ -1083,6 +1083,25 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     });
   }
 
+  if (payload.runtimeRelease !== undefined && context.runtimeType !== "openclaw") {
+    return bridgeFailure({ action: "sidecar.attach", message: "Runtime release is only supported for OpenClaw.",
+      errorCode: "invalid-payload", retryable: false, project: context.resolved.name, userId });
+  }
+  let weixinRuntimeProfile: WeixinRuntimeProfile | undefined;
+  try {
+    weixinRuntimeProfile = context.runtimeType === "openclaw"
+      ? resolveWeixinRuntimeProfile(process.env, payload.runtimeRelease)
+      : undefined;
+  } catch {
+    return bridgeFailure({
+      action: "sidecar.attach",
+      message: "Gateway-binding runtime profile is incomplete or not digest-pinned.",
+      errorCode: "runtime-command-failed",
+      retryable: false,
+      project: context.resolved.name,
+      userId,
+    });
+  }
   // Derive instDir from registry (caller must not pass this)
   const instDir = instanceDir(context.resolved.entry.path, userId);
 
@@ -1116,6 +1135,17 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     } else {
       throw error;
     }
+  }
+
+  // A replay cannot change or omit the release attached to this instance.
+  if ((spec?.runtimeRelease || (spec?.enabled && weixinRuntimeProfile?.runtimeRelease)) && (
+    spec?.runtimeRelease?.id !== weixinRuntimeProfile?.runtimeRelease?.id
+    || spec?.runtimeRelease?.manifestSha256 !== weixinRuntimeProfile?.runtimeRelease?.manifestSha256
+    || spec?.gatewayBindingGatewayImage !== weixinRuntimeProfile?.gatewayImage
+    || spec?.gatewayBindingSidecarImage !== weixinRuntimeProfile?.sidecarImage
+  )) {
+    return bridgeFailure({ action: "sidecar.attach", message: "Runtime release differs from the persisted instance release.",
+      errorCode: "runtime-conflict", retryable: false, project: context.resolved.name, userId });
   }
 
   // Verify this before accepting an idempotent attach response.  Otherwise a
@@ -1216,21 +1246,6 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
   const generation = eatv! + 1;
   const sri = managedInstanceId;
   const externalNetwork = spec?.externalNetwork ?? resolveExternalNetwork();
-  let weixinRuntimeProfile: WeixinRuntimeProfile | undefined;
-  try {
-    weixinRuntimeProfile = context.runtimeType === "openclaw"
-      ? resolveWeixinRuntimeProfile()
-      : undefined;
-  } catch {
-    return bridgeFailure({
-      action: "sidecar.attach",
-      message: "Gateway-binding runtime profile is incomplete or not digest-pinned.",
-      errorCode: "runtime-command-failed",
-      retryable: false,
-      project: context.resolved.name,
-      userId,
-    });
-  }
   const requestedGatewayBinding = weixinRuntimeProfile?.gatewayBinding === true;
   if (
     spec?.enabled === true
@@ -1241,7 +1256,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
         requestedGatewayBinding
         && (
           spec.gatewayBindingSidecarImage !== weixinRuntimeProfile?.sidecarImage
-          || spec.gatewayBindingGatewayImage !== weixinRuntimeProfile?.gatewayImage
+          || spec?.gatewayBindingGatewayImage !== weixinRuntimeProfile?.gatewayImage
         )
       )
     )
@@ -1312,6 +1327,7 @@ async function bridgeSidecarAttach(payload: Record<string, unknown>): Promise<Br
     networkAlias,
     aliasGeneration: generation,
     gatewayBinding: requestedGatewayBinding,
+    runtimeRelease: weixinRuntimeProfile?.runtimeRelease,
     gatewayBindingSidecarImage: weixinRuntimeProfile?.sidecarImage,
     gatewayBindingGatewayImage: weixinRuntimeProfile?.gatewayImage,
     composeProject,

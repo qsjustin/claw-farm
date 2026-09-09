@@ -42,7 +42,9 @@ export async function resolveGatewayBindingComposeGuard(instDir: string): Promis
 
   await assertGatewayBindingComposeIntegrity(instDir);
 
-  const runtimeProfile = resolveWeixinRuntimeProfile();
+  const runtimeProfile = spec.runtimeRelease
+    ? resolveWeixinRuntimeProfile({}, spec.runtimeRelease)
+    : resolveWeixinRuntimeProfile();
   if (
     !runtimeProfile.gatewayBinding
     || runtimeProfile.sidecarImage !== spec.gatewayBindingSidecarImage

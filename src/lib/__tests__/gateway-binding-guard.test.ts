@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { writeSidecarSpec } from "../sidecar-spec.ts";
+import { writeSidecarSpec, readSidecarSpec } from "../sidecar-spec.ts";
 import { assertNoGatewayBindingUpgrade, resolveGatewayBindingComposeGuard } from "../gateway-binding-guard.ts";
 
 const sidecarImage = "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -39,6 +39,15 @@ describe("gateway-binding lifecycle guard", () => {
         gatewayBindingComposeSha256: composeDigest,
         updatedAt: new Date().toISOString(),
       });
+      const legacy = (await readSidecarSpec(dir))!;
+      await writeSidecarSpec(dir, { ...legacy, runtimeRelease: { id: "approved-release", manifestSha256: "c".repeat(64), images: { gateway: gatewayImage, sidecar: sidecarImage } } });
+      // Catalog-managed instances use the persisted selection with no global image configuration.
+      delete process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING;
+      delete process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE;
+      delete process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE;
+      expect((await resolveGatewayBindingComposeGuard(dir)).runtimeProfile?.runtimeRelease?.id).toBe("approved-release");
+      await expect(writeSidecarSpec(dir, { ...legacy, runtimeRelease: { id: "bad", manifestSha256: "c".repeat(64), images: { gateway: sidecarImage, sidecar: sidecarImage } } })).rejects.toThrow("invalid persisted runtime release");
+      await writeSidecarSpec(dir, legacy);
       process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = "true";
       process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE = sidecarImage;
       process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = gatewayImage;

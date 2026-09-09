@@ -10,7 +10,7 @@ import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dispatch } from "../bridge.ts";
-import { writeSidecarSpec, type SidecarSpec } from "../../lib/sidecar-spec.ts";
+import { readSidecarSpec, writeSidecarSpec, type SidecarSpec } from "../../lib/sidecar-spec.ts";
 
 const HOME_DIR = join(tmpdir(), "sidecar-dispatch-test");
 let home: string;
@@ -221,7 +221,7 @@ describe("sidecar.attach dispatch", () => {
     });
   });
 
-  it("replaces the digest-pinned OpenClaw gateway and sidecar as one gateway-binding workload", async () => {
+  it.each([false, true])("replaces the immutable pair (control-plane release=%s)", async (catalog) => {
     const savedRuntimeProfile = {
       enabled: process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING,
       sidecar: process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE,
@@ -230,11 +230,18 @@ describe("sidecar.attach dispatch", () => {
     const sidecarImage = "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const gatewayImage = "registry.example.test/openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const calls: string[][] = [];
+    const runtimeRelease = { id: "release-1", manifestSha256: "d".repeat(64), images: { gateway: gatewayImage, sidecar: sidecarImage } };
+    const attachPayload = () => basePayload(catalog ? { runtimeRelease } : {});
 
     try {
       process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = "true";
       process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE = sidecarImage;
       process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = gatewayImage;
+      if (catalog) {
+        delete process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING;
+        delete process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE;
+        delete process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE;
+      }
       await mkdir(join(instDir, "openclaw", "workspace"), { recursive: true });
       await writeFile(join(projectDir, ".claw-farm.json"), JSON.stringify({ runtime: "openclaw", processor: "builtin" }));
 
@@ -254,8 +261,14 @@ describe("sidecar.attach dispatch", () => {
         } as unknown as ReturnType<typeof Bun.spawn>;
       }) as typeof Bun.spawn;
 
-      const result = await dispatch("sidecar.attach", basePayload());
+      const result = await dispatch("sidecar.attach", attachPayload());
       expect(result.ok).toBe(true);
+      if (catalog) {
+        expect((await readSidecarSpec(instDir))?.runtimeRelease).toEqual(runtimeRelease);
+        expect((await dispatch("sidecar.attach", attachPayload())).ok).toBe(true);
+        expect((await dispatch("sidecar.attach", basePayload())).ok).toBe(false);
+        expect((await dispatch("sidecar.attach", basePayload({ runtimeRelease: { ...runtimeRelease, id: "release-2" } }))).ok).toBe(false);
+      }
 
       const compose = await readFile(join(instDir, "docker-compose.openclaw.yml"), "utf8");
       const gatewayEnv = await readFile(join(instDir, "openclaw-gateway.env"), "utf8");
@@ -270,7 +283,7 @@ describe("sidecar.attach dispatch", () => {
       expect(compose).not.toContain("${OPENCLAW_GATEWAY_TOKEN");
 
       await writeFile(join(instDir, "docker-compose.openclaw.yml"), "services:\n  untrusted:\n    image: attacker\n");
-      const tamperedReplay = await dispatch("sidecar.attach", basePayload());
+      const tamperedReplay = await dispatch("sidecar.attach", attachPayload());
       expect(tamperedReplay.ok).toBe(false);
       if (!tamperedReplay.ok) {
         expect(tamperedReplay.errorCode).toBe("runtime-conflict");
@@ -288,13 +301,14 @@ describe("sidecar.attach dispatch", () => {
       // replace a running paired image with a different digest.
       process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE = "registry.example.test/openclaw@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
       const driftResult = await dispatch("sidecar.attach", basePayload({
+        ...(catalog ? { runtimeRelease: { ...runtimeRelease, images: { ...runtimeRelease.images, gateway: process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE } } } : {}),
         operationId: "op-2",
         expectedAttachmentVersion: 1,
       }));
       expect(driftResult.ok).toBe(false);
       if (!driftResult.ok) {
         expect(driftResult.errorCode).toBe("runtime-conflict");
-        expect(driftResult.error).toContain("immutable image pair");
+        expect(driftResult.error).toContain(catalog ? "persisted instance release" : "immutable image pair");
       }
     } finally {
       if (savedRuntimeProfile.enabled === undefined) delete process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING;

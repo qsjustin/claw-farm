@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { chmod, rename, unlink, writeFile, open } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { isSafeYamlIdentifier } from "./validate.ts";
-import { isImmutableImageDigestReference } from "./weixin-runtime-profile.ts";
+import { isImmutableImageDigestReference, parseResolvedRuntimeRelease, type ResolvedRuntimeRelease } from "./weixin-runtime-profile.ts";
 
 const SPEC_FILENAME = "sidecar-spec.json";
 const SCHEMA_VERSION = 2;
@@ -43,6 +43,7 @@ export interface SidecarSpec {
   aliasGeneration?: number;
   /** Whether this instance was attached with the immutable gateway-binding profile. */
   gatewayBinding?: boolean;
+  runtimeRelease?: ResolvedRuntimeRelease;
   /** Pinned image pair persisted with gatewayBinding to prevent silent drift on rebuild. */
   gatewayBindingSidecarImage?: string;
   gatewayBindingGatewayImage?: string;
@@ -220,6 +221,16 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
     );
   }
 
+  if (obj.runtimeRelease !== undefined) {
+    try {
+      const release = parseResolvedRuntimeRelease(obj.runtimeRelease);
+      if (obj.gatewayBinding !== true || release.images.gateway !== obj.gatewayBindingGatewayImage
+        || release.images.sidecar !== obj.gatewayBindingSidecarImage) throw new Error("release pair mismatch");
+    } catch {
+      throw new SidecarSpecError("invalid persisted runtime release", "spec-invalid");
+    }
+  }
+
   // updatedAt must be valid ISO 8601
   if (typeof obj.updatedAt !== "string" || isNaN(Date.parse(obj.updatedAt))) {
     throw new SidecarSpecError(
@@ -269,7 +280,7 @@ function validateSpec(data: unknown): asserts data is SidecarSpec {
   }
 
   // Reject unknown fields
-  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "networkAlias", "aliasGeneration", "gatewayBinding", "gatewayBindingSidecarImage", "gatewayBindingGatewayImage", "gatewayBindingComposeSha256", "composeProject", "managedInstanceId", "bindingId", "operationId", "targetAttachmentVersion", "targetConfigVersion", "desiredAttachmentState", "updatedAt"]);
+  const allowed = new Set(["schemaVersion", "enabled", "serviceName", "envFile", "port", "externalNetwork", "networkAlias", "aliasGeneration", "gatewayBinding", "runtimeRelease", "gatewayBindingSidecarImage", "gatewayBindingGatewayImage", "gatewayBindingComposeSha256", "composeProject", "managedInstanceId", "bindingId", "operationId", "targetAttachmentVersion", "targetConfigVersion", "desiredAttachmentState", "updatedAt"]);
   for (const key of Object.keys(obj)) {
     if (!allowed.has(key)) {
       throw new SidecarSpecError(
