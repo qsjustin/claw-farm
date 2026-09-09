@@ -265,6 +265,13 @@ describe("sidecar.attach dispatch", () => {
       expect(result.ok).toBe(true);
       if (catalog) {
         expect((await readSidecarSpec(instDir))?.runtimeRelease).toEqual(runtimeRelease);
+        const beforeCommands = calls.length;
+        for (const operation of ["instance.start", "instance.restart"]) {
+          expect((await dispatch(operation, basePayload())).ok).toBe(false);
+          expect((await dispatch(operation, basePayload({ runtimeRelease: { ...runtimeRelease, id: "wrong-release" } }))).ok).toBe(false);
+        }
+        expect((await dispatch("instance.create", basePayload({ runtimeRelease }))).ok).toBe(false);
+        expect(calls.length).toBe(beforeCommands);
         expect((await dispatch("sidecar.attach", attachPayload())).ok).toBe(true);
         expect((await dispatch("sidecar.attach", basePayload())).ok).toBe(false);
         expect((await dispatch("sidecar.attach", basePayload({ runtimeRelease: { ...runtimeRelease, id: "release-2" } }))).ok).toBe(false);

@@ -62,3 +62,19 @@ export async function assertNoGatewayBindingUpgrade(instDir: string): Promise<vo
     throw new Error("operation is blocked for an active gateway-binding instance; use a profile-aware runtime upgrade workflow");
   }
 }
+
+/** Require the Bay-resolved selection before start/restart can touch containers. */
+export async function assertGatewayBindingReleaseAuthorization(instDir: string, release: unknown): Promise<void> {
+  const spec = await readSidecarSpec(instDir);
+  if (!spec?.runtimeRelease) {
+    if (release !== undefined) throw new Error("runtime release is not pinned in the instance spec");
+    return;
+  }
+  const requested = resolveWeixinRuntimeProfile({}, release).runtimeRelease;
+  const pinned = spec.runtimeRelease;
+  if (!requested || requested.id !== pinned.id || requested.manifestSha256 !== pinned.manifestSha256
+    || requested.images.gateway !== pinned.images.gateway || requested.images.sidecar !== pinned.images.sidecar) {
+    throw new Error("runtime release authorization does not match the persisted instance release");
+  }
+  await assertGatewayBindingComposeIntegrity(instDir);
+}

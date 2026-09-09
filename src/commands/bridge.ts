@@ -1,3 +1,4 @@
+import { assertGatewayBindingReleaseAuthorization, assertNoGatewayBindingUpgrade } from "../lib/gateway-binding-guard.ts";
 import { join } from "node:path";
 import { mkdir, rm, readFile, writeFile, unlink } from "node:fs/promises";
 import { copyTemplateFiles, despawn, downInstance, getInstanceRuntimeStatus, spawn, upInstance, stopInstance, applyInstanceModelControl, writeInstanceCompose, resolveInstance, resolveExternalNetwork } from "../lib/api.ts";
@@ -493,6 +494,7 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
   const clawBayAdminToken = asString(payload.clawBayAdminToken);
 
   const resolved = await resolveProjectName(project);
+  await assertNoGatewayBindingUpgrade(instanceDir(resolved.entry.path, userId));
   const payloadGatewayAllowAllUsers = typeof payload.gatewayAllowAllUsers === "boolean"
     ? payload.gatewayAllowAllUsers
     : undefined;
@@ -555,6 +557,7 @@ async function bridgeInstanceStart(payload: Record<string, unknown>): Promise<Br
   validateBridgeName(userId, "user ID");
   const context = await requireManagedInstance("instance.start", project, userId);
   if ("ok" in context) return context;
+  await assertGatewayBindingReleaseAuthorization(instanceDir(context.resolved.entry.path, userId), payload.runtimeRelease);
   // #171: Lifecycle reads canonical sidecar spec — no topology override.
   // Only forward rotation creds for token refresh.
   const started = await upInstance(project, userId, {
@@ -602,6 +605,7 @@ async function bridgeInstanceRestart(payload: Record<string, unknown>): Promise<
   validateBridgeName(userId, "user ID");
   const context = await requireManagedInstance("instance.restart", project, userId);
   if ("ok" in context) return context;
+  await assertGatewayBindingReleaseAuthorization(instanceDir(context.resolved.entry.path, userId), payload.runtimeRelease);
   await downInstance(project, userId, { quiet: true });
   // #171: Lifecycle reads canonical sidecar spec — no topology override.
   // Only forward rotation creds for token refresh.

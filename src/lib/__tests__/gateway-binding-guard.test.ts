@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { writeSidecarSpec, readSidecarSpec } from "../sidecar-spec.ts";
-import { assertNoGatewayBindingUpgrade, resolveGatewayBindingComposeGuard } from "../gateway-binding-guard.ts";
+import { assertGatewayBindingReleaseAuthorization, assertNoGatewayBindingUpgrade, resolveGatewayBindingComposeGuard } from "../gateway-binding-guard.ts";
 
 const sidecarImage = "registry.example.test/clawbay-weixin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const gatewayImage = "registry.example.test/openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -46,6 +46,8 @@ describe("gateway-binding lifecycle guard", () => {
       delete process.env.CLAW_FARM_WEIXIN_SIDECAR_IMAGE;
       delete process.env.CLAW_FARM_OPENCLAW_GATEWAY_IMAGE;
       expect((await resolveGatewayBindingComposeGuard(dir)).runtimeProfile?.runtimeRelease?.id).toBe("approved-release");
+      await expect(assertGatewayBindingReleaseAuthorization(dir, undefined)).rejects.toThrow();
+      await expect(assertGatewayBindingReleaseAuthorization(dir, { id: "approved-release", manifestSha256: "c".repeat(64), images: { gateway: gatewayImage, sidecar: sidecarImage } })).resolves.toBeUndefined();
       await expect(writeSidecarSpec(dir, { ...legacy, runtimeRelease: { id: "bad", manifestSha256: "c".repeat(64), images: { gateway: sidecarImage, sidecar: sidecarImage } } })).rejects.toThrow("invalid persisted runtime release");
       await writeSidecarSpec(dir, legacy);
       process.env.CLAW_FARM_WEIXIN_GATEWAY_BINDING = "true";
