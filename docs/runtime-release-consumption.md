@@ -17,8 +17,10 @@ adopt a catalog release; migration needs a separate explicit workflow.
 Validation: 277 tests and typecheck pass. Bridge tests cover legacy and catalog
 pairs, persisted selection, idempotency, replacement/omission rejection, Compose
 tamper rejection and cleanup. Docker calls are mocked; this is not native runtime
-or integrated E2E evidence. Production rollout still requires native writer identity and qualified signed
-artifacts. The follow-up adds Bay whole-instance release authorization.
+or integrated E2E evidence. A dev-candidate signed pair now exists in Bay, but
+Farm host pulls and instance lifecycle execution against that private pair are
+still separate acceptance gates. The follow-up adds Bay whole-instance release
+authorization.
 
 Whole-instance start/restart now require the resolved pair to match the pinned
 release and verify Compose integrity before touching containers. Existing paired
