@@ -22,6 +22,16 @@ Farm host pulls and instance lifecycle execution against that private pair are
 still separate acceptance gates. The follow-up adds Bay whole-instance release
 authorization.
 
+Private registry pulls are a deployment prerequisite. Farm invokes Docker Compose
+through the host Docker client, inheriting the Farm process environment; the host
+must therefore provide a Docker credential configuration with read access to the
+approved private GHCR packages, for example by mounting a secret-backed Docker
+config and setting `DOCKER_CONFIG` for the Farm process. Do not use the CI
+publisher identity as the host pull credential. A dev preflight on 2026-09-16
+confirmed that the current local GitHub token lacks the required package-read
+scope, so real Farm pull evidence is still blocked until that credential is
+provided.
+
 Whole-instance start/restart now require the resolved pair to match the pinned
 release and verify Compose integrity before touching containers. Existing paired
 instances cannot be recreated through instance.create/restore. Missing/mismatched
