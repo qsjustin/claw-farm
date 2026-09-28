@@ -173,6 +173,8 @@ export interface ApplyInstanceModelControlOptions {
   userId: string;
   llm: LlmProvider;
   apiKey: string;
+  routingMode: "direct" | "litellm";
+  routingEndpoint?: string | null;
   modelSlug?: string;
   baseUrl?: string | null;
 }
@@ -730,10 +732,20 @@ export async function spawn(options: {
     // Write .env.model for per-instance proxy config (api-proxy reads this)
     // Only write if llm+apiKey provided, otherwise use default empty template
     if (llm && apiKey) {
-      await writeInstanceModelEnv(instDir, { provider: llm, apiKey, baseUrl: baseUrl ?? null });
+      await writeInstanceModelEnv(instDir, {
+        provider: llm,
+        apiKey,
+        baseUrl: baseUrl ?? null,
+        routingMode: "direct",
+      });
     } else if (!await fileExists(join(instDir, ".env.model"))) {
       // Default template for project-level .env fallback
-      await writeInstanceModelEnv(instDir, { provider: "gemini", apiKey: "", baseUrl: null });
+      await writeInstanceModelEnv(instDir, {
+        provider: "gemini",
+        apiKey: "",
+        baseUrl: null,
+        routingMode: "direct",
+      });
     }
 
     // Write compose (always regenerate)
@@ -1314,27 +1326,34 @@ export async function getInstanceRuntimeStatus(
 export async function applyInstanceModelControl(
   options: ApplyInstanceModelControlOptions,
 ): Promise<void> {
-  const { project, userId, llm, apiKey, modelSlug, baseUrl } = options;
+  const { project, userId, llm, apiKey, routingMode, routingEndpoint, modelSlug, baseUrl } = options;
   if (!apiKey.trim()) {
     throw new Error("apiKey is required");
   }
+  if (routingMode === "litellm" && !routingEndpoint?.trim()) {
+    throw new Error("routingEndpoint is required for litellm routing");
+  }
 
   const { projectName, projectDir, entry, instDir } = await resolveInstance(project, userId);
+  const runtimeLlm: LlmProvider = routingMode === "litellm" ? "openai-compat" : llm;
+  const runtimeBaseUrl = routingMode === "litellm" ? routingEndpoint : baseUrl;
 
   await writeInstanceModelEnv(instDir, {
     provider: llm,
     apiKey,
     baseUrl: baseUrl ?? null,
     modelSlug,
+    routingMode,
+    routingEndpoint: routingEndpoint ?? null,
   });
   await syncInstanceRuntimeModelConfig({
     projectName,
     projectDir,
     entry,
     instDir,
-    llm,
+    llm: runtimeLlm,
     modelSlug,
-    baseUrl: baseUrl ?? null,
+    baseUrl: runtimeBaseUrl ?? null,
   });
 }
 

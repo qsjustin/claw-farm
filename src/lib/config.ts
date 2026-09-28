@@ -6,12 +6,15 @@ import { getRuntime } from "../runtimes/index.ts";
 import type { ProjectEntry } from "./registry.ts";
 
 export type LlmProvider = "gemini" | "anthropic" | "openai-compat";
+export type ModelRoutingMode = "direct" | "litellm";
 
 export type InstanceModelEnvInput = {
   provider: LlmProvider;
   apiKey: string;
   baseUrl?: string | null;
   modelSlug?: string | null;
+  routingMode: ModelRoutingMode;
+  routingEndpoint?: string | null;
 };
 
 const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -118,10 +121,17 @@ export function envExampleTemplate(
 }
 
 export function renderInstanceModelEnv(input: InstanceModelEnvInput): string {
-  const hermesProvider = input.provider === "openai-compat" ? "custom" : input.provider;
-  const baseUrl = normalizeModelBaseUrl(input.baseUrl);
+  const routingMode = input.routingMode;
+  const provider = routingMode === "litellm" ? "openai-compat" : input.provider;
+  const endpoint = routingMode === "litellm" ? input.routingEndpoint : input.baseUrl;
+  const hermesProvider = provider === "openai-compat" ? "custom" : provider;
+  const baseUrl = normalizeModelBaseUrl(endpoint);
   const entries: Array<[string, string]> = [
-    ["LLM_PROVIDER", input.provider],
+    ["MODEL_ROUTING_MODE", routingMode],
+    ["MODEL_API_KEY", input.apiKey],
+    ["MODEL_BASE_URL", baseUrl],
+    ["MODEL_ID", input.modelSlug?.trim() ?? ""],
+    ["LLM_PROVIDER", provider],
     ["HERMES_INFERENCE_PROVIDER", hermesProvider],
     ["HERMES_INFERENCE_MODEL", input.modelSlug?.trim() ?? ""],
     ["GEMINI_API_KEY", ""],
@@ -133,16 +143,16 @@ export function renderInstanceModelEnv(input: InstanceModelEnvInput): string {
     ["CUSTOM_BASE_URL", ""]
   ];
 
-  if (input.provider === "gemini") {
-    entries[3] = ["GEMINI_API_KEY", input.apiKey];
-    entries[4] = ["GEMINI_BASE_URL", baseUrl];
-  } else if (input.provider === "anthropic") {
-    entries[5] = ["ANTHROPIC_API_KEY", input.apiKey];
-    entries[6] = ["ANTHROPIC_BASE_URL", baseUrl];
+  if (provider === "gemini") {
+    entries[7] = ["GEMINI_API_KEY", input.apiKey];
+    entries[8] = ["GEMINI_BASE_URL", baseUrl];
+  } else if (provider === "anthropic") {
+    entries[9] = ["ANTHROPIC_API_KEY", input.apiKey];
+    entries[10] = ["ANTHROPIC_BASE_URL", baseUrl];
   } else {
-    entries[7] = ["OPENAI_API_KEY", input.apiKey];
-    entries[8] = ["OPENAI_COMPAT_BASE_URL", baseUrl];
-    entries[9] = ["CUSTOM_BASE_URL", baseUrl];
+    entries[11] = ["OPENAI_API_KEY", input.apiKey];
+    entries[12] = ["OPENAI_COMPAT_BASE_URL", baseUrl];
+    entries[13] = ["CUSTOM_BASE_URL", baseUrl];
   }
 
   return `# Generated per-instance model control env\n${entries.map(([key, value]) => renderEnvEntry(key, value)).join("\n")}\n`;

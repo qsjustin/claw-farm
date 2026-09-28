@@ -130,6 +130,7 @@ async function removeDetachedSidecarNetwork(composeProject: string): Promise<voi
 }
 
 const INSTANCE_OPERATIONS = new Set([
+  "bridge.capabilities",
   "instance.create",
   "instance.start",
   "instance.stop",
@@ -149,6 +150,10 @@ const INSTANCE_OPERATIONS = new Set([
   "runtime.registry.sync",
   "runtime.registry.resolve",
 ]);
+
+const BRIDGE_CAPABILITIES = [
+  "model-control-routing-v2",
+] as const;
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -352,6 +357,14 @@ function parseApiKey(payload: Record<string, unknown>): string {
   return apiKey;
 }
 
+function parseRoutingMode(payload: Record<string, unknown>): "direct" | "litellm" {
+  const routingMode = asString(payload.routingMode);
+  if (routingMode === "direct" || routingMode === "litellm") {
+    return routingMode;
+  }
+  throw new BridgeCommandError("invalid-payload", 'routingMode must be one of: direct, litellm');
+}
+
 function requireStringField(payload: Record<string, unknown>, field: string): string {
   const value = asString(payload[field]);
   if (!value?.trim()) {
@@ -548,6 +561,16 @@ async function bridgeInstanceCreate(payload: Record<string, unknown>): Promise<B
     extra: {
       port: created.port,
       userId: created.userId,
+    },
+  });
+}
+
+async function bridgeCapabilities(): Promise<BridgeSuccess> {
+  return bridgeSuccess({
+    action: "bridge.capabilities",
+    message: "Bridge capabilities resolved.",
+    extra: {
+      capabilities: [...BRIDGE_CAPABILITIES],
     },
   });
 }
@@ -995,6 +1018,8 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
     userId,
     llm: parseLlmProvider(payload),
     apiKey: parseApiKey(payload),
+    routingMode: parseRoutingMode(payload),
+    routingEndpoint: asString(payload.routingEndpoint) ?? null,
     modelSlug: asString(payload.modelSlug),
     baseUrl: asString(payload.baseUrl) ?? null,
   });
@@ -2324,6 +2349,8 @@ export async function dispatch(operation: string, payload: Record<string, unknow
     switch (operation) {
       case "instance.create":
         return await bridgeInstanceCreate(payload);
+      case "bridge.capabilities":
+        return await bridgeCapabilities();
       case "instance.start":
         return await bridgeInstanceStart(payload);
       case "instance.stop":

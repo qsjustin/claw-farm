@@ -109,9 +109,11 @@ describe("renderInstanceModelEnv", () => {
     const env = renderInstanceModelEnv({
       provider: "anthropic",
       apiKey: "sk-ant-test",
+      routingMode: "direct",
       modelSlug: "anthropic/claude-sonnet-4-6",
     });
 
+    expect(env).toContain("MODEL_ROUTING_MODE=direct");
     expect(env).toContain("LLM_PROVIDER=anthropic");
     expect(env).toContain("HERMES_INFERENCE_PROVIDER=anthropic");
     expect(env).toContain("HERMES_INFERENCE_MODEL=anthropic/claude-sonnet-4-6");
@@ -122,6 +124,7 @@ describe("renderInstanceModelEnv", () => {
     const env = renderInstanceModelEnv({
       provider: "openai-compat",
       apiKey: "sk-openai-test",
+      routingMode: "direct",
       baseUrl: "https://models.example/v1",
       modelSlug: "openai/custom",
     });
@@ -134,16 +137,40 @@ describe("renderInstanceModelEnv", () => {
     expect(env).toContain("CUSTOM_BASE_URL=https://models.example/v1");
   });
 
+  it("routes litellm virtual keys only to the LiteLLM OpenAI-compatible endpoint", () => {
+    const env = renderInstanceModelEnv({
+      provider: "gemini",
+      apiKey: "sk-litellm-vk-test",
+      routingMode: "litellm",
+      routingEndpoint: "http://litellm:4000/v1",
+      modelSlug: "gemini/gemini-2.5-flash",
+    });
+
+    expect(env).toContain("MODEL_ROUTING_MODE=litellm");
+    expect(env).toContain("MODEL_API_KEY=sk-litellm-vk-test");
+    expect(env).toContain("MODEL_BASE_URL=http://litellm:4000/v1");
+    expect(env).toContain("LLM_PROVIDER=openai-compat");
+    expect(env).toContain("OPENAI_API_KEY=sk-litellm-vk-test");
+    expect(env).toContain("OPENAI_COMPAT_BASE_URL=http://litellm:4000/v1");
+    expect(env).toContain("CUSTOM_BASE_URL=http://litellm:4000/v1");
+    expect(env).toContain("GEMINI_API_KEY=");
+    expect(env).toContain("ANTHROPIC_API_KEY=");
+    expect(env).not.toContain("GEMINI_API_KEY=sk-litellm-vk-test");
+    expect(env).not.toContain("ANTHROPIC_API_KEY=sk-litellm-vk-test");
+  });
+
   it("rejects newline injection in model env values", () => {
     expect(() => renderInstanceModelEnv({
       provider: "anthropic",
       apiKey: "sk-test\nINJECTED=1",
+      routingMode: "direct",
       modelSlug: "anthropic/claude-sonnet-4-6",
     })).toThrow("newline");
 
     expect(() => renderInstanceModelEnv({
       provider: "anthropic",
       apiKey: "sk-test",
+      routingMode: "direct",
       modelSlug: "anthropic/claude-sonnet-4-6\rINJECTED=1",
     })).toThrow("newline");
   });
@@ -152,12 +179,14 @@ describe("renderInstanceModelEnv", () => {
     expect(() => renderInstanceModelEnv({
       provider: "openai-compat",
       apiKey: "sk-test",
+      routingMode: "direct",
       baseUrl: "https://user:pass@models.example/v1",
     })).toThrow("must not contain credentials");
 
     expect(() => renderInstanceModelEnv({
       provider: "openai-compat",
       apiKey: "sk-test",
+      routingMode: "direct",
       baseUrl: "file:///tmp/model",
     })).toThrow("http or https");
   });
