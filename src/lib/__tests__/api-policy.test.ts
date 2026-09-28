@@ -28,6 +28,7 @@ describe("instance model env policy", () => {
       await writeInstanceModelEnv(dir, {
         provider: "anthropic",
         apiKey: "sk-ant-test",
+        routingMode: "direct",
         modelSlug: "anthropic/claude-sonnet-4-6",
       });
 
