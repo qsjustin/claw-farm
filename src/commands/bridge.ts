@@ -18,7 +18,7 @@ import {
   isAliasBoundOnDockerNetwork,
   type AliasReservation,
 } from "../lib/alias-registry.ts";
-import { readProjectConfig, resolveRuntimeConfig, type LlmProvider } from "../lib/config.ts";
+import { readProjectConfig, resolveRuntimeConfig } from "../lib/config.ts";
 import { resolveWeixinRuntimeProfile, type WeixinRuntimeProfile } from "../lib/weixin-runtime-profile.ts";
 import {
   assertGatewayBindingComposeIntegrity,
@@ -318,27 +318,6 @@ function parseRuntimeInstanceKey(payload: Record<string, unknown>): { project: s
   throw new BridgeCommandError("invalid-payload", 'Missing project/userId or runtimeInstanceKey');
 }
 
-function parseDirectLlmProvider(payload: Record<string, unknown>): LlmProvider {
-  const protocol = asString(payload.protocol) ?? asString(payload.providerProtocol) ?? asString(payload.llm) ?? asString(payload.provider);
-  if (protocol === "openai-compat" || protocol === "openai-compatible") {
-    return "openai-compat";
-  }
-  if (protocol === "anthropic-compat" || protocol === "anthropic-compatible") {
-    return "anthropic";
-  }
-  throw new BridgeCommandError(
-    "invalid-payload",
-    'direct protocol must be one of: openai-compatible, anthropic-compatible'
-  );
-}
-
-function resolveRuntimeLlmProvider(payload: Record<string, unknown>, routingMode: "direct" | "litellm"): LlmProvider {
-  if (routingMode === "litellm") {
-    return "openai-compat";
-  }
-  return parseDirectLlmProvider(payload);
-}
-
 function parseRuntimeType(value: unknown): RuntimeType | undefined {
   if (value === undefined) return undefined;
   if (value === "openclaw" || value === "picoclaw" || value === "hermes") return value;
@@ -370,12 +349,12 @@ function parseApiKey(payload: Record<string, unknown>): string {
   return apiKey;
 }
 
-function parseRoutingMode(payload: Record<string, unknown>): "direct" | "litellm" {
+function parseManagedRoutingMode(payload: Record<string, unknown>): "litellm" {
   const routingMode = asString(payload.routingMode);
-  if (routingMode === "direct" || routingMode === "litellm") {
+  if (routingMode === "litellm") {
     return routingMode;
   }
-  throw new BridgeCommandError("invalid-payload", 'routingMode must be one of: direct, litellm');
+  throw new BridgeCommandError("invalid-payload", 'routingMode must be "litellm" for managed model control');
 }
 
 function requireStringField(payload: Record<string, unknown>, field: string): string {
@@ -1022,15 +1001,15 @@ async function bridgeRuntimeRegistryResolve(payload: Record<string, unknown>): P
 async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>): Promise<BridgeSuccess | BridgeFailure> {
   const { project, userId } = parseRuntimeInstanceKey(payload);
   validateBridgeName(userId, "user ID");
+  const routingMode = parseManagedRoutingMode(payload);
   const context = await requireManagedInstance("instance.applyModelControl", project, userId);
   if ("ok" in context) return context;
   const previousStatus = await getInstanceRuntimeStatus(project, userId);
 
-  const routingMode = parseRoutingMode(payload);
   await applyInstanceModelControl({
     project,
     userId,
-    llm: resolveRuntimeLlmProvider(payload, routingMode),
+    llm: "openai-compat",
     apiKey: parseApiKey(payload),
     routingMode,
     routingEndpoint: asString(payload.routingEndpoint) ?? null,
