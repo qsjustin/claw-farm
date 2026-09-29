@@ -100,6 +100,50 @@ describe("model-control routing apply", () => {
     }
   });
 
+  it("normalizes DeepSeek LiteLLM routes without writing provider credentials to the runtime", async () => {
+    const fixture = await createRegisteredInstance({
+      runtime: "openclaw",
+      projectName: "clawbay-openclaw",
+      userId: "user-1",
+    });
+
+    try {
+      await applyInstanceModelControl({
+        project: "clawbay-openclaw",
+        userId: "user-1",
+        llm: "openai-compat",
+        apiKey: "sk-litellm-vk-deepseek",
+        routingMode: "litellm",
+        routingEndpoint: "http://litellm:4000/v1",
+        modelSlug: "deepseek-chat",
+        baseUrl: null,
+      });
+
+      const modelEnv = await readFile(join(fixture.instDir, ".env.model"), "utf8");
+      expect(modelEnv).toContain("MODEL_ROUTING_MODE=litellm");
+      expect(modelEnv).toContain("MODEL_ID=deepseek-chat");
+      expect(modelEnv).toContain("LLM_PROVIDER=openai-compat");
+      expect(modelEnv).toContain("OPENAI_API_KEY=sk-litellm-vk-deepseek");
+      expect(modelEnv).toContain("OPENAI_COMPAT_BASE_URL=http://litellm:4000/v1");
+      expect(modelEnv).not.toContain("DEEPSEEK_API_KEY=");
+
+      const openclawConfig = JSON.parse(
+        await readFile(join(fixture.runtimeDir, "openclaw.json"), "utf8"),
+      ) as {
+        models: { providers: Record<string, { baseUrl?: string; models: Array<{ id: string }> }> };
+        agents: { defaults: { model: { primary: string } } };
+      };
+
+      expect(openclawConfig.agents.defaults.model.primary).toBe("deepseek-chat");
+      expect(openclawConfig.models.providers.openai?.baseUrl).toBe("http://litellm:4000/v1");
+      expect(openclawConfig.models.providers.openai?.models[0]?.id).toBe("deepseek-chat");
+      expect(openclawConfig.models.providers.google).toBeUndefined();
+    } finally {
+      fixture.restoreEnv();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("normalizes LiteLLM routes to Hermes custom provider config", async () => {
     const fixture = await createRegisteredInstance({
       runtime: "hermes",
