@@ -73,7 +73,6 @@ describe("model-control routing apply", () => {
         routingMode: "litellm",
         routingEndpoint: "http://litellm:4000/v1",
         modelSlug: "gemini/gemini-2.5-flash",
-        baseUrl: null,
       });
 
       const modelEnv = await readFile(join(fixture.instDir, ".env.model"), "utf8");
@@ -116,7 +115,6 @@ describe("model-control routing apply", () => {
         routingMode: "litellm",
         routingEndpoint: "http://litellm:4000/v1",
         modelSlug: "deepseek-chat",
-        baseUrl: null,
       });
 
       const modelEnv = await readFile(join(fixture.instDir, ".env.model"), "utf8");
@@ -170,7 +168,6 @@ describe("model-control routing apply", () => {
         routingMode: "litellm",
         routingEndpoint: "http://litellm:4000/v1",
         modelSlug: "gemini/gemini-2.5-flash",
-        baseUrl: null,
       });
 
       const metadata = JSON.parse(
