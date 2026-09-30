@@ -1012,9 +1012,8 @@ async function bridgeInstanceApplyModelControl(payload: Record<string, unknown>)
     llm: "openai-compat",
     apiKey: parseApiKey(payload),
     routingMode,
-    routingEndpoint: asString(payload.routingEndpoint) ?? null,
+    routingEndpoint: requireStringField(payload, "routingEndpoint"),
     modelSlug: asString(payload.modelSlug),
-    baseUrl: asString(payload.baseUrl) ?? null,
   });
 
   let runtimeState = previousStatus.status;

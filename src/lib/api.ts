@@ -173,10 +173,9 @@ export interface ApplyInstanceModelControlOptions {
   userId: string;
   llm: LlmProvider;
   apiKey: string;
-  routingMode: "direct" | "litellm";
-  routingEndpoint?: string | null;
+  routingMode: "litellm";
+  routingEndpoint: string;
   modelSlug?: string;
-  baseUrl?: string | null;
 }
 
 /**
@@ -1326,34 +1325,32 @@ export async function getInstanceRuntimeStatus(
 export async function applyInstanceModelControl(
   options: ApplyInstanceModelControlOptions,
 ): Promise<void> {
-  const { project, userId, llm, apiKey, routingMode, routingEndpoint, modelSlug, baseUrl } = options;
+  const { project, userId, llm, apiKey, routingMode, routingEndpoint, modelSlug } = options;
   if (!apiKey.trim()) {
     throw new Error("apiKey is required");
   }
-  if (routingMode === "litellm" && !routingEndpoint?.trim()) {
+  if (!routingEndpoint.trim()) {
     throw new Error("routingEndpoint is required for litellm routing");
   }
 
   const { projectName, projectDir, entry, instDir } = await resolveInstance(project, userId);
-  const runtimeLlm: LlmProvider = routingMode === "litellm" ? "openai-compat" : llm;
-  const runtimeBaseUrl = routingMode === "litellm" ? routingEndpoint : baseUrl;
 
   await writeInstanceModelEnv(instDir, {
     provider: llm,
     apiKey,
-    baseUrl: baseUrl ?? null,
+    baseUrl: null,
     modelSlug,
     routingMode,
-    routingEndpoint: routingEndpoint ?? null,
+    routingEndpoint,
   });
   await syncInstanceRuntimeModelConfig({
     projectName,
     projectDir,
     entry,
     instDir,
-    llm: runtimeLlm,
+    llm: "openai-compat",
     modelSlug,
-    baseUrl: runtimeBaseUrl ?? null,
+    baseUrl: routingEndpoint,
   });
 }
 
